@@ -1,0 +1,13 @@
+[package]
+name = "vmm-api"
+description = "controller 与 terra-vmm 之间的 API socket 协议定义"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
