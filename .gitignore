@@ -1,0 +1,2 @@
+target/
+# guest 内核与 initramfs 产物（cargo xtask kernel 生成，不进 git）

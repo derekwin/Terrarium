@@ -1,0 +1,37 @@
+# Terrarium workspace
+# 代码以 crate 组织；运行时每个 VM 一个 terra-vmm 进程。
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/vmm",
+    "crates/vmm-api",
+    "crates/vmm-core",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+homepage = "https://github.com/terrarium/terrarium"
+
+# 依赖基线见 AGENTS.md 第 3 节：只允许 rust-vmm 官方 crate + 基础工具库。
+# 新增任何依赖须先说明理由。
+[workspace.dependencies]
+# rust-vmm
+kvm-ioctls = "0.25"
+vm-memory = "0.18" # linux-loader 0.14 依赖 0.18，必须与其一致（2026-07 从 0.17 上调）
+linux-loader = "0.14"
+vmm-sys-util = "0.15"
+event-manager = "0.4"
+# 基础工具库
+thiserror = "2"
+tracing = "0.1"
+clap = { version = "4", features = ["derive"] } # 仅 example/工具二进制用
+
+[workspace.lints.rust]
+unsafe_code = "warn" # unsafe 最小化；每个 unsafe 块必须有 // SAFETY: 注释
+
+[workspace.lints.clippy]
+all = "warn"
