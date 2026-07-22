@@ -16,7 +16,7 @@ use tracing::{debug, warn};
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 use crate::arch;
-use crate::device::{Blk, DeviceManager, Mem, VirtioMmio};
+use crate::device::{Blk, DeviceManager, Mem, Net, VirtioMmio};
 use crate::rtc::{Rtc, RTC_PORT_DATA, RTC_PORT_INDEX};
 use crate::serial::{Serial, SERIAL_PORT_BASE, SERIAL_PORT_SIZE};
 
@@ -47,6 +47,8 @@ pub struct VmConfig {
     pub disk_path: Option<PathBuf>,
     /// virtio-mem 热插拔内存上限（MiB，M1 Task 3；None 时不注册 virtio-mem 设备）。
     pub mem_hotplug_max: Option<usize>,
+    /// virtio-net 后端 fd 路径或 tap 设备名（M1.5 Task 0；None 时不注册 net 设备）。
+    pub net_backend: Option<PathBuf>,
 }
 
 impl VmConfig {
@@ -69,6 +71,7 @@ impl Default for VmConfig {
             max_vcpu_count: 1,
             disk_path: None,
             mem_hotplug_max: None,
+            net_backend: None,
         }
     }
 }
@@ -271,6 +274,15 @@ impl<W: io::Write> Vm<W> {
             .map_err(Error::GuestMemory)?;
             let mem = Mem::new(hotplug_mib, hotplug_mem);
             let mmio = VirtioMmio::new(mem, memory.clone())?;
+            device_manager.register(Box::new(mmio))?;
+        }
+
+        if let Some(ref net_path) = config.net_backend {
+            use std::os::unix::io::AsRawFd;
+            let f = std::fs::File::open(net_path).map_err(Error::Blk)?;
+            let fd = f.as_raw_fd();
+            let net = Net::new_tap(fd, fd).map_err(Error::Blk)?;
+            let mmio = VirtioMmio::new(net, memory.clone())?;
             device_manager.register(Box::new(mmio))?;
         }
 

@@ -7,11 +7,13 @@
 
 pub mod blk;
 pub mod mem;
+pub mod net;
 mod virtio_mmio;
 pub mod vsock;
 
 pub use blk::Blk;
 pub use mem::Mem;
+pub use net::Net;
 pub use virtio_mmio::{
     VirtioDevice, VirtioMmio, ISR_CONFIG_CHANGE, ISR_USED_BUFFER, STATUS_ACKNOWLEDGE,
     STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FAILED, STATUS_FEATURES_OK, STATUS_NEEDS_RESET,
