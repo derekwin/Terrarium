@@ -326,6 +326,7 @@ fn build_initramfs(src_dir: &Path, guest_dir: &Path) -> Result<PathBuf, String> 
         "#!/bin/sh\n\
           /bin/mount -t devtmpfs devtmpfs /dev\n\
           echo MEM_TOTAL=$(free | grep ^Mem | while read _ t _; do echo $t; done)\n\
+          echo TERRA_NET=$(ip addr show eth0 2>/dev/null | grep 'inet ' | while read _ ip _; do echo $ip; done)\n\
           if [ -b /dev/vda ]; then\n\
             /bin/mount -t ext4 /dev/vda /newroot || exec /bin/sh\n\
             if [ -f /newroot/terra_persist ]; then\n\
@@ -364,6 +365,7 @@ fn build_initramfs(src_dir: &Path, guest_dir: &Path) -> Result<PathBuf, String> 
              slink /bin/echo /bin/busybox 0777 0 0\n\
 slink /bin/free /bin/busybox 0777 0 0\n\
 slink /bin/grep /bin/busybox 0777 0 0\n\
+slink /bin/ip /bin/busybox 0777 0 0\n\
              nod /dev/console 0600 0 0 c 5 1\n\
              nod /dev/null 0666 0 0 c 1 3\n",
             init.display(),
