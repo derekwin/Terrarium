@@ -105,6 +105,7 @@ CONFIG_DEBUG_INFO_BTF=y
 # M1.5 Task 0：virtio-net
 CONFIG_VIRTIO_NET=y
 # M1.5 Task 2：Ubuntu GPT 分区表支持
+CONFIG_PARTITION_ADVANCED=y
 CONFIG_EFI_PARTITION=y
 "#;
 
@@ -487,12 +488,35 @@ fn rootfs() -> Result<(), String> {
 
 fn ubuntu() -> Result<(), String> {
     let guest_dir = guest_dir()?;
+    let qcow2 = guest_dir.join("ubuntu.qcow2");
     let out = guest_dir.join("ubuntu.raw");
 
-    // Ubuntu noble 24.04 cloud image（raw 格式，直接可用）。
-    let url = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img";
+    // 检查工具。
+    run("which", &["qemu-img"], None)
+        .map_err(|_| "qemu-img 未安装（apt install qemu-utils）".to_string())?;
 
-    download(url, &out)?;
+    // 下载 Ubuntu noble 24.04 cloud image（qcow2 格式）。
+    let url = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img";
+    download(url, &qcow2)?;
+
+    // qcow2 → raw 转换。
+    if !out.exists() {
+        run(
+            "qemu-img",
+            &[
+                "convert",
+                "-f",
+                "qcow2",
+                "-O",
+                "raw",
+                qcow2.to_str().unwrap(),
+                out.to_str().unwrap(),
+            ],
+            None,
+        )?;
+    } else {
+        println!("已存在，跳过转换: {}", out.display());
+    }
 
     let size_mb = std::fs::metadata(&out).map_err(|e| e.to_string())?.len() / 1024 / 1024;
     println!("产物就绪:");
