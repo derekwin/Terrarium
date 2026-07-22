@@ -81,6 +81,10 @@ CONFIG_KERNEL_LZ4=y
 # M1 Task 1：virtio-blk 与 ext4 根文件系统
 CONFIG_VIRTIO_BLK=y
 CONFIG_EXT4_FS=y
+# M1 Task 3：virtio-mem 内存热插拔
+CONFIG_VIRTIO_MEM=y
+CONFIG_MEMORY_HOTPLUG=y
+CONFIG_MEMORY_HOTREMOVE=y
 "#;
 
 #[derive(Parser)]

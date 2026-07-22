@@ -6,9 +6,11 @@
 //! 声明设备（`CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES`），不引入 ACPI。
 
 pub mod blk;
+pub mod mem;
 mod virtio_mmio;
 
 pub use blk::Blk;
+pub use mem::Mem;
 pub use virtio_mmio::{
     VirtioDevice, VirtioMmio, ISR_CONFIG_CHANGE, ISR_USED_BUFFER, STATUS_ACKNOWLEDGE,
     STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FAILED, STATUS_FEATURES_OK, STATUS_NEEDS_RESET,
