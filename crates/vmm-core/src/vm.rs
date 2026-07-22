@@ -9,6 +9,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use kvm_bindings::{kvm_pit_config, kvm_userspace_memory_region};
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
@@ -173,7 +174,7 @@ pub enum Error {
 /// 每个 VM 对应一个 terra-vmm 进程（见 AGENTS.md 第 1 节）；本结构体拥有
 /// KVM VM fd、guest 内存与全部 vCPU fd。泛型 `W` 是串口输出去向
 /// （生产为 `io::Stdout`，测试可注入缓冲）。
-pub struct Vm<W: io::Write = io::Stdout> {
+pub struct Vm<W: io::Write + Send + 'static = io::Stdout> {
     vm_fd: VmFd,
     #[allow(dead_code)]
     memory: GuestMemoryMmap,
@@ -195,7 +196,7 @@ impl Vm<io::Stdout> {
     }
 }
 
-impl<W: io::Write> Vm<W> {
+impl<W: io::Write + Send + 'static> Vm<W> {
     /// 按配置创建 VM 并完成启动前初始化（内核/initrd 加载、boot params、vCPU 寄存器）。
     ///
     /// `out` 是 guest 串口输出的去向。
@@ -441,12 +442,71 @@ impl<W: io::Write> Vm<W> {
             ..
         } = self;
 
-        let mut bsp = vcpus.into_iter().next().ok_or_else(|| {
-            Error::VcpuRun(kvm_ioctls::Error::new(22)) // EINVAL
-        })?;
+        let mut vcpu_iter = vcpus.into_iter();
+        let mut bsp = vcpu_iter
+            .next()
+            .ok_or_else(|| Error::VcpuRun(kvm_ioctls::Error::new(22)))?;
 
-        // AP vCPU 线程：只跑 KVM_RUN，设备 MMIO/PIO 经共享 device_manager 处理。
-        // 当前仅 BSP 执行，后续多核时在此 spawn AP 线程。
+        // Spawn AP vCPU threads. Each AP runs a minimal KVM_RUN loop.
+        // Device MMIO/PIO is forwarded to the shared device_manager.
+        let _ap_handles: Vec<std::thread::JoinHandle<()>> = vcpu_iter
+            .map(|vcpu| {
+                let dm = device_manager.clone();
+                let s = serial.clone();
+                let r = rtc.clone();
+                thread::spawn(move || {
+                    let mut ap = vcpu;
+                    loop {
+                        match ap.run() {
+                            Ok(VcpuExit::Hlt) => {}
+                            Ok(VcpuExit::Shutdown) => break,
+                            Ok(VcpuExit::IoOut(port, data)) => {
+                                if (SERIAL_PORT_BASE..SERIAL_PORT_BASE + SERIAL_PORT_SIZE)
+                                    .contains(&port)
+                                {
+                                    let _ = s.lock().unwrap().write(port - SERIAL_PORT_BASE, data);
+                                } else if port == RTC_PORT_INDEX || port == RTC_PORT_DATA {
+                                    r.lock().unwrap().write(port - RTC_PORT_INDEX, data);
+                                }
+                            }
+                            Ok(VcpuExit::IoIn(port, data)) => {
+                                for (i, byte) in data.iter_mut().enumerate() {
+                                    let p = port + i as u16;
+                                    *byte = if (SERIAL_PORT_BASE
+                                        ..SERIAL_PORT_BASE + SERIAL_PORT_SIZE)
+                                        .contains(&p)
+                                    {
+                                        s.lock().unwrap().read(p - SERIAL_PORT_BASE)
+                                    } else if p == RTC_PORT_INDEX || p == RTC_PORT_DATA {
+                                        r.lock().unwrap().read(p - RTC_PORT_INDEX)
+                                    } else {
+                                        0xff
+                                    };
+                                }
+                            }
+                            Ok(VcpuExit::MmioRead(addr, data)) => {
+                                dm.lock().unwrap().read(addr, data);
+                            }
+                            Ok(VcpuExit::MmioWrite(addr, data)) => {
+                                dm.lock().unwrap().write(addr, data);
+                            }
+                            Ok(_) => {}
+                            Err(ref e)
+                                if io::Error::from_raw_os_error(e.errno()).kind()
+                                    == io::ErrorKind::Interrupted =>
+                            {
+                                continue
+                            }
+                            Err(e) => {
+                                debug!(err=%e, "AP vCPU 退出");
+                                break;
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
         let mut dev_mgr = device_manager.lock().unwrap();
         let mut serial = serial.lock().unwrap();
         let mut rtc = rtc.lock().unwrap();
