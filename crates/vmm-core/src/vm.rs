@@ -190,6 +190,10 @@ pub struct Vm<W: io::Write = io::Stdout> {
     resize_target: Option<Arc<AtomicU64>>,
     /// virtio-mem config change 信号（API handler 置位，Mem 设备消费）。
     mem_config_changed: Option<Arc<AtomicBool>>,
+    /// virtio-blk 容量（API handler 写入，Blk 设备 config space 暴露）。
+    blk_capacity: Option<Arc<AtomicU64>>,
+    /// virtio-blk config change 信号。
+    blk_config_changed: Option<Arc<AtomicBool>>,
 }
 
 impl Vm<io::Stdout> {
@@ -268,9 +272,13 @@ impl<W: io::Write> Vm<W> {
         let mut device_manager = DeviceManager::new();
         let mut resize_target: Option<Arc<AtomicU64>> = None;
         let mut mem_config_changed: Option<Arc<AtomicBool>> = None;
+        let mut blk_capacity: Option<Arc<AtomicU64>> = None;
+        let mut blk_config_changed: Option<Arc<AtomicBool>> = None;
 
         if let Some(ref disk_path) = config.disk_path {
             let blk = Blk::new(disk_path).map_err(Error::Blk)?;
+            blk_capacity = Some(blk.capacity_arc());
+            blk_config_changed = Some(blk.config_changed_arc());
             let mmio = VirtioMmio::new(blk, memory.clone())?;
             device_manager.register(Box::new(mmio))?;
         }
@@ -399,6 +407,8 @@ impl<W: io::Write> Vm<W> {
             serial_input: Arc::new(Mutex::new(VecDeque::new())),
             resize_target,
             mem_config_changed,
+            blk_capacity,
+            blk_config_changed,
         })
     }
 
@@ -414,6 +424,14 @@ impl<W: io::Write> Vm<W> {
 
     pub fn mem_config_changed(&self) -> Option<Arc<AtomicBool>> {
         self.mem_config_changed.clone()
+    }
+
+    pub fn blk_capacity(&self) -> Option<Arc<AtomicU64>> {
+        self.blk_capacity.clone()
+    }
+
+    pub fn blk_config_changed(&self) -> Option<Arc<AtomicBool>> {
+        self.blk_config_changed.clone()
     }
 
     /// 运行 vCPU 直到 guest 关机（KVM_EXIT_SHUTDOWN）。

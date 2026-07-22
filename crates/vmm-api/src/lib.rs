@@ -20,6 +20,8 @@ pub enum Request {
         /// 新的内存字节数。
         bytes: u64,
     },
+    /// 调整 guest 磁盘容量（字节）。
+    ResizeDisk { bytes: u64 },
 }
 
 /// terra-vmm 返回给客户端的响应。
