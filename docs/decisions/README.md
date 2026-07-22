@@ -6,3 +6,4 @@
 
 1. [0001: 设备模型只用 virtio-mmio，不引入 PCI / ACPI](0001-virtio-mmio-device-model.md)
 2. [0002: 用 Linux x86 64-bit boot protocol 直接加载 bzImage](0002-linux-boot-protocol.md)
+3. [0003: virtio-mmio 地址/IRQ 布局与中断模型](0003-virtio-mmio-layout.md)

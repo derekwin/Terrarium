@@ -31,6 +31,10 @@ vm-memory = { version = "0.18", features = ["backend-mmap"] } # linux-loader 0.1
 linux-loader = { version = "0.14", default-features = false, features = ["bzimage"] }
 vmm-sys-util = "0.15"
 event-manager = "0.4"
+# virtio 设备框架（M1）：队列与描述符链解析交给 rust-vmm 官方 crate，
+# 自己重写易错且无益（AGENTS.md 6.1 Task 0 注明）。
+virtio-queue = "0.18"
+virtio-bindings = "0.2"
 # 基础工具库
 thiserror = "2"
 tracing = "0.1"

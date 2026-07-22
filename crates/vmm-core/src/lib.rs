@@ -5,6 +5,7 @@
 //! 公共接口不出现 x86 专有类型（见 AGENTS.md 第 3 节）。
 
 mod arch;
+pub mod device;
 mod rtc;
 mod serial;
 mod vm;

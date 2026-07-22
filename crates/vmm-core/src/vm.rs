@@ -16,6 +16,7 @@ use tracing::{debug, warn};
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 use crate::arch;
+use crate::device::DeviceManager;
 use crate::rtc::{Rtc, RTC_PORT_DATA, RTC_PORT_INDEX};
 use crate::serial::{Serial, SERIAL_PORT_BASE, SERIAL_PORT_SIZE};
 
@@ -144,8 +145,8 @@ pub enum Error {
     /// 串口输出失败。
     #[error("串口输出失败: {0}")]
     Serial(io::Error),
-    /// 设置串口 IRQ 线电平失败。
-    #[error("设置串口 IRQ 线电平失败: {0}")]
+    /// 设置 IRQ 线电平失败。
+    #[error("设置 IRQ 线电平失败: {0}")]
     SetIrqLine(kvm_ioctls::Error),
 }
 
@@ -155,13 +156,16 @@ pub enum Error {
 /// KVM VM fd、guest 内存与全部 vCPU fd。泛型 `W` 是串口输出去向
 /// （生产为 `io::Stdout`，测试可注入缓冲）。
 pub struct Vm<W: io::Write = io::Stdout> {
-    vm_fd: VmFd, // M1 设备/中断接线（virtio-mmio、irq line）还会用到更多接口。
+    vm_fd: VmFd, // 设备 IRQ 线刷新（set_irq_line）与后续 M1 设备接线用。
     #[allow(dead_code)] // 持有 guest 内存映射，生命周期必须覆盖整个 VM；M1 设备模型会访问。
     memory: GuestMemoryMmap,
     // 结构上预留多 vCPU（M1 按 max_vcpu_count 预创建）；M0 只创建并运行 vcpus[0]。
     vcpus: Vec<VcpuFd>,
     serial: Serial<W>,
     rtc: Rtc,
+    // MMIO 设备（virtio-mmio）；M1 Task 0 尚无具体设备注册，管理器为空，
+    // 空管理器不改变任何行为（cmdline 为空串、无 MMIO 分发、无 IRQ）。
+    device_manager: DeviceManager,
 }
 
 impl Vm<io::Stdout> {
@@ -235,11 +239,20 @@ impl<W: io::Write> Vm<W> {
         let entry_addr = loader_result.kernel_load.raw_value();
         debug!(entry = entry_addr, "内核已加载");
 
-        // 内核命令行。
+        // MMIO 设备管理器：M1 Task 0 尚无具体设备注册（Task 1 起经 VmConfig 配置），
+        // 空管理器不改变 cmdline 与运行时行为。
+        let device_manager = DeviceManager::new();
+
+        // 内核命令行：先插入用户配置，再追加已注册 MMIO 设备的声明
+        // （virtio_mmio.device=…；无设备时为空串，行为与 M0 一致）。
         let mut cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE).map_err(Error::Cmdline)?;
         cmdline
             .insert_str(&config.kernel_cmdline)
             .map_err(Error::Cmdline)?;
+        let device_args = device_manager.cmdline_args();
+        if !device_args.is_empty() {
+            cmdline.insert_str(&device_args).map_err(Error::Cmdline)?;
+        }
         let cmdline_size = cmdline
             .as_cstring()
             .map_err(Error::Cmdline)?
@@ -297,23 +310,29 @@ impl<W: io::Write> Vm<W> {
             vcpus,
             serial: Serial::new(out),
             rtc: Rtc::new(),
+            device_manager,
         })
     }
 
     /// 运行 vCPU 直到 guest 关机（KVM_EXIT_SHUTDOWN）。
     ///
-    /// 处理的退出原因：PIO（分发给串口）、HLT、SHUTDOWN；其余忽略或报错。
+    /// 处理的退出原因：PIO（分发给串口/RTC）、MMIO（分发给设备管理器）、
+    /// HLT、SHUTDOWN；其余忽略或报错。
     pub fn run(&mut self) -> Result<(), Error> {
         // 拆字段借用：vCPU 退出的 data 切片借用 vcpus[0]，
-        // 处理时还需同时借用 serial 与 vm_fd，三者是不同字段。
+        // 处理时还需同时借用 serial、device_manager 与 vm_fd，是不同字段。
         let Self {
             vcpus,
             serial,
             vm_fd,
             rtc,
+            device_manager,
             ..
         } = self;
         let mut last_irq_level = false;
+        // 各 MMIO 设备 IRQ 线的上次电平（电平触发，变化才下发 KVM_IRQ_LINE）。
+        let mut device_irq_levels: Vec<bool> =
+            device_manager.irq_lines().map(|(_, level)| level).collect();
         loop {
             match vcpus[0].run() {
                 Ok(VcpuExit::IoOut(port, data)) => {
@@ -341,6 +360,12 @@ impl<W: io::Write> Vm<W> {
                         };
                     }
                 }
+                Ok(VcpuExit::MmioRead(addr, data)) => {
+                    device_manager.read(addr, data);
+                }
+                Ok(VcpuExit::MmioWrite(addr, data)) => {
+                    device_manager.write(addr, data);
+                }
                 // 重新 run；有 in-kernel irqchip，KVM 会在中断到来时唤醒 vCPU。
                 Ok(VcpuExit::Hlt) => {}
                 Ok(VcpuExit::Shutdown) => return Ok(()),
@@ -357,13 +382,20 @@ impl<W: io::Write> Vm<W> {
                     return Err(Error::VcpuRun(e));
                 }
             }
-            // 每次 PIO 访问后刷新串口 IRQ 电平（电平触发，变化才下发）。
+            // 每次退出处理后刷新串口 IRQ 电平（电平触发，变化才下发）。
             let level = serial.irq_level();
             if level != last_irq_level {
                 vm_fd
                     .set_irq_line(crate::serial::SERIAL_IRQ, level)
                     .map_err(Error::SetIrqLine)?;
                 last_irq_level = level;
+            }
+            // 同款刷新各 MMIO 设备的 IRQ 线（无设备时为空迭代，零开销）。
+            for (idx, (irq, level)) in device_manager.irq_lines().enumerate() {
+                if level != device_irq_levels[idx] {
+                    vm_fd.set_irq_line(irq, level).map_err(Error::SetIrqLine)?;
+                    device_irq_levels[idx] = level;
+                }
             }
         }
     }
