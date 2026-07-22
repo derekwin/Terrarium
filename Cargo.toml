@@ -39,6 +39,11 @@ virtio-bindings = "0.2"
 thiserror = "2"
 tracing = "0.1"
 clap = { version = "4", features = ["derive"] } # 仅 example/工具二进制用
+# M1 Task 2：vmm-api socket 协议用 serde_json 文本帧（Unix seqpacket）。
+# 备选定长二进制帧（零新依赖），但 JSON 可读性强、调试友好、无需手写编解码。
+# 理由见 ADR 0004。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [workspace.lints.rust]
 unsafe_code = "warn" # unsafe 最小化；每个 unsafe 块必须有 // SAFETY: 注释
