@@ -8,6 +8,7 @@ members = [
     "crates/vmm-api",
     "crates/vmm-core",
     "crates/sandboxd",
+    "crates/observe",
     "xtask",
 ]
 

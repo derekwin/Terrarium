@@ -1,0 +1,18 @@
+[package]
+name = "observe"
+description = "guest 内 eBPF 观测守护进程：按沙箱粒度采集 syscall/文件/网络指标，经 vsock 上报 host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "observe"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
