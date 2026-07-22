@@ -40,6 +40,9 @@ struct Args {
     /// API Unix socket 路径
     #[arg(long)]
     api_socket: PathBuf,
+    /// virtio-mem 热插拔内存上限（MiB）
+    #[arg(long)]
+    mem_hotplug_max: Option<usize>,
     /// virtio-net 后端 fd 路径
     #[arg(long)]
     net: Option<PathBuf>,
@@ -64,7 +67,7 @@ fn main() {
         disk_path: args.disk,
         kernel_cmdline: "console=ttyS0 reboot=k panic=-1 tsc=reliable".to_string(),
         max_vcpu_count: args.max_vcpus,
-        mem_hotplug_max: None,
+        mem_hotplug_max: args.mem_hotplug_max,
         net_backend: None,
     };
 
