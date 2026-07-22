@@ -19,7 +19,7 @@ use tracing::{debug, warn};
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 use crate::arch;
-use crate::device::{Blk, DeviceManager, Mem, Net, VirtioMmio};
+use crate::device::{Balloon, Blk, DeviceManager, Mem, Net, Rng, VirtioMmio};
 use crate::rtc::{Rtc, RTC_PORT_DATA, RTC_PORT_INDEX};
 use crate::serial::{Serial, SERIAL_PORT_BASE, SERIAL_PORT_SIZE};
 
@@ -296,6 +296,17 @@ impl<W: io::Write> Vm<W> {
             let fd = f.as_raw_fd();
             let net = Net::new_tap(fd, fd).map_err(Error::Blk)?;
             let mmio = VirtioMmio::new(net, memory.clone())?;
+            device_manager.register(Box::new(mmio))?;
+        }
+
+        // Balloon（无条件注册，无外部依赖）。
+        let balloon = Balloon::new();
+        let mmio = VirtioMmio::new(balloon, memory.clone())?;
+        device_manager.register(Box::new(mmio))?;
+
+        // RNG（无条件注册，从 /dev/urandom 读取熵）。
+        if let Ok(rng) = Rng::new() {
+            let mmio = VirtioMmio::new(rng, memory.clone())?;
             device_manager.register(Box::new(mmio))?;
         }
 
