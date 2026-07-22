@@ -6,6 +6,11 @@
 
 | 来源仓库 | 来源路径 | 来源版本 (commit/tag) | 本项目位置 | 说明 |
 |----------|----------|------------------------|------------|------|
+| kata-containers（Dragonball） | src/dragonball/crates/dbs_boot/src/x86_64/layout.rs | 809ab7d90f7dc8c10f51e5b0eef55b9bd33cdbc5 | crates/vmm-core/src/arch/x86_64.rs | guest 内存布局常量（GDT/IDT、zero page、页表、cmdline、HIMEM、EBDA 地址） |
+| kata-containers（Dragonball） | src/dragonball/crates/dbs_boot/src/x86_64/mod.rs | 809ab7d90f7dc8c10f51e5b0eef55b9bd33cdbc5 | crates/vmm-core/src/arch/x86_64.rs | 恒等映射页表（setup_identity_mapping）、initrd 加载地址、e820 表项追加 |
+| kata-containers（Dragonball） | src/dragonball/crates/dbs_arch/src/x86_64/regs.rs | 809ab7d90f7dc8c10f51e5b0eef55b9bd33cdbc5 | crates/vmm-core/src/arch/x86_64.rs | vCPU regs/sregs/fpu/msr 初始化与 CR0/CR4/EFER 常量 |
+| kata-containers（Dragonball） | src/dragonball/crates/dbs_arch/src/x86_64/gdt.rs | 809ab7d90f7dc8c10f51e5b0eef55b9bd33cdbc5 | crates/vmm-core/src/arch/x86_64.rs | GDT 表项构造（gdt_entry）与解析（kvm_segment_from_gdt） |
+| kata-containers（Dragonball） | src/dragonball/crates/dbs_arch/src/x86_64/msr.rs | 809ab7d90f7dc8c10f51e5b0eef55b9bd33cdbc5 | crates/vmm-core/src/arch/x86_64.rs | MSR 索引常量（片段，仅保留 vCPU 初始化用到的 12 项） |
+| kata-containers（Dragonball） | src/dragonball/crates/dbs_arch/src/x86_64/interrupts.rs | 809ab7d90f7dc8c10f51e5b0eef55b9bd33cdbc5 | crates/vmm-core/src/arch/x86_64.rs | LAPIC LINT 配置（set_lint：LINT0=ExtINT、LINT1=NMI） |
+| kata-containers（Dragonball） | src/dragonball/src/vm/x86_64.rs | 809ab7d90f7dc8c10f51e5b0eef55b9bd33cdbc5 | crates/vmm-core/src/arch/x86_64.rs（build_boot_params）、crates/vmm-core/src/vm.rs | boot_params 字段填充与 e820 布局参考；irqchip + in-kernel PIT 的创建顺序参考 |
 
-<!-- 当前无登记项。首批登记预计在 M0 Task 2（参考/移植 Dragonball 的
-     boot params、串口等实现时）。 -->

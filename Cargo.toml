@@ -21,8 +21,14 @@ homepage = "https://github.com/terrarium/terrarium"
 [workspace.dependencies]
 # rust-vmm
 kvm-ioctls = "0.25"
-vm-memory = "0.18" # linux-loader 0.14 依赖 0.18，必须与其一致（2026-07 从 0.17 上调）
-linux-loader = "0.14"
+# kvm-ioctls 0.25 不再 re-export kvm-bindings，vCPU 初始化需直接构造
+# kvm_regs/kvm_sregs/kvm_userspace_memory_region 等类型；版本与 kvm-ioctls 0.25
+# 的传递依赖保持一致（2026-07 M0 Task 2 新增，理由如上）。
+kvm-bindings = "0.14"
+# backend-mmap：GuestMemoryMmap 所在的特性（0.18 起非默认）。
+vm-memory = { version = "0.18", features = ["backend-mmap"] } # linux-loader 0.14 依赖 0.18，必须与其一致（2026-07 从 0.17 上调）
+# bzimage：直接加载 bzImage 所需的特性（0.14 默认只开 pe）。
+linux-loader = { version = "0.14", default-features = false, features = ["bzimage"] }
 vmm-sys-util = "0.15"
 event-manager = "0.4"
 # 基础工具库
