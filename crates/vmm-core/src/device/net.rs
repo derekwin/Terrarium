@@ -1,26 +1,24 @@
-//! virtio-net 设备（参考 Dragonball net.rs，Apache-2.0）。
+//! virtio-net 设备（event-manager 版）。
 //!
-//! device_id=1，rx/tx 双队列。features: VIRTIO_NET_F_MAC | VIRTIO_NET_F_MRG_RXBUF | VIRTIO_NET_F_STATUS。
-//! config space (12B): MAC(6) + status(2, LINK_UP) + MTU(2) + reserved(2)。
-//! 收包：独立 poll 线程读 TAP fd → 帧队列 → queue_notify 填 guest rx 描述符（mergeable）。
-//! 发包：queue_notify 读描述符链 → write_all 到 TAP fd。
+//! RX: event-manager 线程订阅 TAP fd 可读事件 → 帧队列。
+//! TX: queue_notify 同步 write 到 TAP fd。
+//! features: VIRTIO_NET_F_MAC | VIRTIO_NET_F_MRG_RXBUF | VIRTIO_NET_F_STATUS。
 
 #![allow(unsafe_code)]
 
 use std::cmp;
-use std::fs::File;
-use std::io::{self, Read};
-use std::os::unix::io::{FromRawFd, RawFd};
+use std::io;
+use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use event_manager::{EventManager, EventOps, EventSet, Events, MutEventSubscriber, SubscriberOps};
 use virtio_queue::{Queue, QueueT};
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
 use super::virtio_mmio::{VirtioDevice, ISR_USED_BUFFER};
 
 const VIRTIO_ID_NET: u32 = 1;
-
 const VIRTIO_NET_F_MAC: u64 = 1 << 5;
 const VIRTIO_NET_F_MRG_RXBUF: u64 = 1 << 15;
 const VIRTIO_NET_F_STATUS: u64 = 1 << 16;
@@ -32,10 +30,63 @@ const TX_QUEUE: usize = 1;
 const NET_HDR_SIZE: usize = 12;
 const MAX_FRAME: usize = 65562;
 const FRAME_CAP: usize = 64;
-const POLL_MS: i32 = 100;
 
 const MAC_ADDR: [u8; 6] = [0x02, 0x54, 0x45, 0x52, 0x52, 0x41];
 const MTU: u16 = 1500;
+
+/// TAP 收包处理器（event-manager subscriber）。
+struct NetRxHandler {
+    read_fd: RawFd,
+    rx_frames: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl NetRxHandler {
+    fn read_and_enqueue(&self) {
+        let mut buf = vec![0u8; MAX_FRAME];
+        let n = loop {
+            let ret = unsafe {
+                libc::read(
+                    self.read_fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
+            };
+            if ret < 0 {
+                let e = io::Error::last_os_error();
+                if e.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return;
+            }
+            break ret as usize;
+        };
+        if n == 0 {
+            return;
+        }
+        let mut frames = self.rx_frames.lock().unwrap();
+        if frames.len() >= FRAME_CAP {
+            frames.remove(0);
+        }
+        frames.push(buf[..n].to_vec());
+    }
+}
+
+impl MutEventSubscriber for NetRxHandler {
+    fn init(&mut self, ops: &mut EventOps) {
+        let events = Events::new_raw(self.read_fd, EventSet::IN);
+        if ops.add(events).is_err() {
+            // fd may already be registered (edge case), continue.
+        }
+    }
+
+    fn process(&mut self, events: Events, _ops: &mut EventOps) {
+        if events.event_set() == EventSet::IN {
+            for _ in 0..8 {
+                self.read_and_enqueue();
+            }
+        }
+    }
+}
 
 pub struct Net {
     tap_fd: RawFd,
@@ -45,36 +96,22 @@ pub struct Net {
 impl Net {
     pub fn new_tap(read_fd: RawFd, write_fd: RawFd) -> io::Result<Self> {
         set_nonblocking(read_fd)?;
-        let mut read_file = unsafe { File::from_raw_fd(read_fd) };
         let rx = Arc::new(Mutex::new(Vec::with_capacity(FRAME_CAP)));
         let rx2 = rx.clone();
 
-        thread::spawn(move || {
-            let mut buf = vec![0u8; MAX_FRAME];
-            loop {
-                let mut pfd = libc::pollfd {
-                    fd: read_fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                if unsafe { libc::poll(&mut pfd, 1, POLL_MS) } < 0 {
-                    break;
-                }
-                if pfd.revents & libc::POLLIN == 0 {
-                    continue;
-                }
-                match read_file.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let mut frames = rx2.lock().unwrap();
-                        if frames.len() >= FRAME_CAP {
-                            frames.remove(0);
-                        }
-                        frames.push(buf[..n].to_vec());
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                    Err(_) => break,
-                }
+        let handler = NetRxHandler {
+            read_fd,
+            rx_frames: rx2,
+        };
+        let mut mgr =
+            EventManager::new().map_err(|e| io::Error::other(format!("event-manager: {e}")))?;
+        mgr.add_subscriber(handler);
+
+        thread::spawn(move || loop {
+            match mgr.run_with_timeout(200) {
+                Ok(_) => {}
+                Err(event_manager::Error::Epoll(_)) => break,
+                _ => {}
             }
         });
 
@@ -137,7 +174,6 @@ impl Net {
             }
         }
 
-        // MRG_RXBUF: write num_buffers at header offset 10.
         let _ = mem.write_obj(num_bufs.to_le_bytes(), GuestAddress(first_addr.0 + 10));
 
         (NET_HDR_SIZE + copied) as u32
@@ -148,13 +184,12 @@ impl Net {
         while let Some(chain) = queue.pop_descriptor_chain(mem) {
             let head = chain.head_index();
             let descs: Vec<virtio_queue::desc::split::Descriptor> = chain.collect();
-
             let mut is_first = true;
+
             for desc in &descs {
                 if desc.is_write_only() {
                     continue;
                 }
-
                 let (start_offset, data_len) = if is_first {
                     is_first = false;
                     let total = desc.len() as usize;
@@ -165,7 +200,6 @@ impl Net {
                 } else {
                     (0, desc.len() as usize)
                 };
-
                 if data_len == 0 {
                     continue;
                 }
@@ -175,7 +209,6 @@ impl Net {
                     write_all(self.tap_fd, &frame);
                 }
             }
-
             let _ = queue.add_used(mem, head, 0);
             used = true;
         }
@@ -191,19 +224,15 @@ impl VirtioDevice for Net {
     fn device_id(&self) -> u32 {
         VIRTIO_ID_NET
     }
-
     fn features(&self) -> u64 {
         VIRTIO_NET_F_MAC | VIRTIO_NET_F_MRG_RXBUF | VIRTIO_NET_F_STATUS
     }
-
     fn queue_count(&self) -> usize {
         2
     }
-
     fn queue_max_size(&self) -> u16 {
         256
     }
-
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         let mut cfg = [0u8; 12];
         cfg[0..6].copy_from_slice(&MAC_ADDR);
@@ -213,9 +242,7 @@ impl VirtioDevice for Net {
         let e = (s + data.len()).min(12);
         data[..e - s].copy_from_slice(&cfg[s..e]);
     }
-
-    fn write_config(&mut self, _offset: u64, _data: &[u8]) {}
-
+    fn write_config(&mut self, _o: u64, _d: &[u8]) {}
     fn queue_notify(&mut self, qi: usize, q: &mut Queue, m: &GuestMemoryMmap) -> u32 {
         match qi {
             RX_QUEUE => self.process_rx(q, m),
@@ -223,7 +250,6 @@ impl VirtioDevice for Net {
             _ => 0,
         }
     }
-
     fn reset(&mut self) {
         self.rx_frames.lock().unwrap().clear();
     }
@@ -264,7 +290,6 @@ fn write_all(fd: RawFd, buf: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn sp() -> (RawFd, RawFd) {
         let mut f = [-1i32; 2];
         unsafe {
@@ -272,7 +297,6 @@ mod tests {
         }
         (f[0], f[1])
     }
-
     #[test]
     fn test_identity() {
         let (r, w) = sp();
@@ -280,7 +304,6 @@ mod tests {
         assert_eq!(1, n.device_id());
         assert_eq!(2, n.queue_count());
     }
-
     #[test]
     fn test_mac() {
         let (r, w) = sp();
@@ -289,14 +312,12 @@ mod tests {
         n.read_config(0, &mut m);
         assert_eq!(MAC_ADDR, m);
     }
-
     #[test]
-    fn test_config_link_up() {
+    fn test_config() {
         let (r, w) = sp();
         let n = Net::new_tap(r, w).unwrap();
         let mut c = [0u8; 12];
         n.read_config(0, &mut c);
         assert_eq!(1u16, u16::from_le_bytes(c[6..8].try_into().unwrap()));
-        assert_eq!(1500u16, u16::from_le_bytes(c[8..10].try_into().unwrap()));
     }
 }

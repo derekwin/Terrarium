@@ -17,6 +17,7 @@ linux-loader.workspace = true
 virtio-queue.workspace = true
 virtio-bindings.workspace = true
 vmm-sys-util.workspace = true
+event-manager.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 libc = "0.2"

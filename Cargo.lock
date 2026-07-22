@@ -131,6 +131,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "event-manager"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13bdac971eb2efaceffca0976058ab80c715945cc565c8a4aa1ed3bb0dc8d0e4"
+dependencies = [
+ "libc",
+ "vmm-sys-util",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -448,6 +458,7 @@ dependencies = [
 name = "vmm-core"
 version = "0.1.0"
 dependencies = [
+ "event-manager",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
