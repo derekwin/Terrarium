@@ -28,6 +28,10 @@ Terrarium（日常简称 **terra**）是面向 AI Agent 工作负载的轻量 VM
 
 **M0 已基本完成**（2026-07）：workspace 骨架、`cargo xtask kernel`（内核 + initramfs 一键构建）、
 vmm-core 最小 VMM（可启动裁剪 Linux 内核到 guest shell）、boot smoke 集成测试均已就位。
+**M1 Task 0 已完成**（2026-07）：`vmm-core/src/device/` 的 virtio-mmio 设备框架
+（`MmioDevice` 分发 trait、`DeviceManager` 地址/IRQ 分配与 cmdline 生成、
+virtio-mmio v2 传输层 `VirtioMmio<D: VirtioDevice>`、ADR 0003）；
+尚无具体设备注册（blk 是 Task 1）。
 仍属目标形态、**尚未存在**的内容：`vmm-api` 协议（空 crate）、`terra-vmm` 薄壳二进制
 （占位 main，M0 后期由 boot 示例演化）、CI 实跑、Python SDK。README 中的完整模块划分
 （vmm-devices / sandboxd / observe / controller 等）是 M1+ 目标，不是现状。
@@ -103,7 +107,7 @@ balloon 列为可选 backlog，非验收项。
 
 **明确不做**（同 M0 纪律）：快照/CRIU（M3）、sandboxd/eBPF/SDK/CLI/MCP（M2）、sched_ext（M4）、PCI/ACPI/UEFI（永远）。
 
-- **Task 0 — virtio-mmio 设备框架 + ADR 0003**：
+- **Task 0 — virtio-mmio 设备框架 + ADR 0003**（已完成 2026-07）：
   - MMIO 布局：设备窗口基址 `0xd000_0000`，每设备 4KiB、步长 4KiB；IRQ（GSI）从 5 起顺排
   - guest 声明：内核 cmdline `virtio_mmio.device=4K@0xd0000000:5 …`（`CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES` 已就位）
   - `KVM_EXIT_MMIO` 按地址分发 → 设备 trait（寄存器读写 / reset / queue activate / notify）；virtqueue 描述符链经 vm-memory 访问
