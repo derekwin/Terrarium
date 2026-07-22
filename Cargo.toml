@@ -11,6 +11,7 @@ members = [
     "crates/observe",
     "crates/controller",
     "crates/cli",
+    "crates/mcp",
     "xtask",
 ]
 
