@@ -166,6 +166,15 @@ balloon 列为可选 backlog，非验收项。
 4. 多 vCPU 启动，guest 内 CPU 上下线生效
 5. `cargo test` 全过；冷启动 ≤1s（带默认设备）不回归；clippy / fmt 干净；ADR 0003 / 0004 就位
 
+### M1 遗留待办（2026-07 review 退回项，M2 动工前必须清零）
+
+1. **clippy 门禁红**：`cargo clippy --workspace --all-targets -- -D warnings` 21 错
+   （`mem.rs` 12、`vsock.rs` 7、`arch/x86_64.rs` 1；含 2 个无 SAFETY 标注的 unsafe 块）
+2. **vsock 半成品**：`vsock.rs` 只有包头解析，无宿主 Unix socket 桥接、无双向收发
+   smoke（Task 5 要求未达到；sandboxd / observe 的 vsock 通道依赖此项，是 M2 硬前置）
+3. **缺 smoke**：mem resize（验收 #3）、多 vCPU（#4）、vsock（#1）三个集成测试
+4. `.omo/` 等工具残留不得入库（已加 .gitignore）
+
 ## 6.2 M1 实现须知（工具链 / API 事实 / 已踩的坑）
 
 **工具链与环境**
@@ -189,6 +198,50 @@ balloon 列为可选 backlog，非验收项。
 - 串口：Linux 8250 tty 写路径要 THRE 中断 + IRQ4（已接）；loopback 自检要 MCR_LOOP 环回（已接）；RTC 必须有 mc146818 仿真（`rtc.rs`），否则内核每次读时钟等 1.26s
 - 内核侧耗时大头是设备仿真缺失与 PIO 密集型子系统（PNP 等），裁剪项都在 xtask 内核片段里并有注释；加新设备时优先检查对应 `CONFIG_*` 是否要补
 - 遗留已知项：guest 内 `serial8250_init` 耗 ~260ms 根因未定位（记在第 8 节 M0 验收现状），不阻塞开发
+
+## 6.3 M2 任务分解（前置：6.1 遗留待办清零；按序执行，每步一个 commit）
+
+**M2 目标**（README 定义）：沙箱层 sandboxd 全隔离栈 + eBPF 观测遥测；Python SDK / CLI / MCP Server 可用；host 侧 controller 成形。
+
+**硬前置**：6.1「M1 遗留待办」清零——尤其 vsock 桥接（sandboxd / observe 的 host↔guest 通道依赖它）。
+
+**明确不做**（同前纪律）：快照/CRIU（M3）、sched_ext（M4）、PCI/ACPI/UEFI（永远）。SDK 的 snapshot / pause / resume 本里程碑只占位返回未实现。
+
+- **Task 0 — M1 遗留清零 + guest 内核 M2 功能集**：
+  - 清零 6.1 遗留待办 1~4（clippy、vsock 桥接、三个 smoke、工具残留）
+  - 内核片段回加沙箱/eBPF 所需功能（M1 裁剪基准之上）：`CONFIG_OVERLAY_FS=y`、`CONFIG_CGROUPS=y`、`CONFIG_SECCOMP=y`、`CONFIG_SECCOMP_FILTER=y`、`CONFIG_SECURITY_LANDLOCK=y`、`CONFIG_LSM="landlock,lockdown,yama,integrity,bpf"`、`CONFIG_BPF_SYSCALL=y`、`CONFIG_BPF_LSM=y`、`CONFIG_DEBUG_INFO_BTF=y`（CO-RE 需要内核 BTF；宿主需 `pahole`（dwarves），先 `command -v pahole` 确认，缺失就停下来报告，不要绕过）；`CONFIG_NAMESPACES`/`CONFIG_USER_NS`/`CONFIG_NET_NS` 确认未被裁掉
+  - ADR 0005：guest 内核功能集边界——哪些功能为沙箱层回加、为什么其余仍裁
+- **Task 1 — sandboxd 骨架与 vsock 通道**：
+  - `crates/sandboxd`：guest 内常驻守护，**静态 musl 构建**（`rustup target add x86_64-unknown-linux-musl`；不依赖 guest 动态库）；xtask 把产物放进 rootfs `/sbin/sandboxd`，rootfs 的 init 负责拉起
+  - vsock 通道：sandboxd 作 guest 侧 server，host（controller/CLI）作 client；协议风格与 vmm-api 一致（serde_json 文本帧），命令面 M2 最小集：`exec {argv, env, cwd}` / `status` / `terminate` / `logs`
+  - ADR 0006：sandbox 控制协议与通道选型
+  - 本 Task 闭环：`exec` 先以**普通子进程**跑命令并回传 exit code + stdout/stderr（隔离栈 Task 2 才加）
+- **Task 2 — 隔离栈**：
+  - 每沙箱一个执行单元：`clone`/`unshare`（pid/mount/uts/ipc/net/user+uid_map）→ `pivot_root` 进 OverlayFS（lower=rootfs 只读、upper=per-sandbox tmpfs）→ cgroup v2 配额（`cpu.max`/`memory.max`）→ Landlock 路径白名单 → seccomp-bpf 危险 syscall 清单
+  - sandbox 定义结构（id、overlay、配额、白名单）放 vmm-api 或独立 `sandbox-api` crate（动工前定，别两边各写一份）
+  - guest 内集成 smoke：沙箱内 `ls` 正常、白名单外路径访问被拒、超 memory.max 被 OOM kill、无 net namespace 出网失败
+- **Task 3 — observe（eBPF 观测守护）**：
+  - `crates/observe`：guest 内 eBPF 守护，CO-RE。**框架选型走 ADR**：建议 aya（纯 Rust，无 libbpf C 依赖，交叉 musl 友好）；libbpf-rs 为备选——基线外依赖逐个写理由
+  - 按沙箱粒度（cgroup id 关联）采集：syscall 计数、文件打开、网络连接、资源用量；聚合后经 vsock 上报 host
+  - smoke：沙箱内跑已知负载（固定次数 open/connect），host 侧读到对应计数
+- **Task 4 — 安全管控**：
+  - BPF LSM 动态策略钩子（`file_open`/`socket_connect` 等），按沙箱下发路径与网络出口白名单（与 Task 2 静态 Landlock 互补：Landlock 管静态文件集，BPF LSM 管运行时可更新的动态策略）
+  - 按会话资源计量：`cpu.stat`/`memory.stat` 采集并入 observe 上报流
+- **Task 5 — controller + SDK / CLI / MCP**：
+  - `crates/controller`：host 资源控制器库：create / list / destroy VM（经 vmm-api socket 派生管理 terra-vmm 进程）、sandbox 路由（`Sandbox` 句柄封装 `(vm, sandbox)`，见 README「How a sandbox maps to a VM」）；调度/放置/warm pool 只留接口不实现（M2 不做投机）
+  - `sdk/python`：`create / exec / terminate / ls / resize`（各带 `.aio` 异步变体；`snapshot / pause / resume` 占位 NotImplemented）；Unix socket 直连 controller；只需标准库（socket + json），不引第三方 Python 依赖
+  - `crates/cli`：`terra create / exec / ls / terminate` 薄命令行（clap）
+  - `crates/mcp`：MCP server（`create / run / terminate` 工具，stdio transport；协议手实现 JSON-RPC 子集，不引重型框架）
+  - 冒烟：Python SDK create → exec 拿输出 → terminate；MCP 用标准 client 探针走通
+- **Task 6 — 测试、benchmark 与文档收尾**：全部 smoke 常驻 `cargo test`（guest 内 smoke 用 marker 断言模式同 boot_smoke）；冷启动 ≤1s 回归；ADR 补齐；AGENTS.md 状态更新
+
+### M2 验收标准
+
+1. Python SDK / CLI 一条命令 create sandbox 并 exec 拿到输出；terminate 正确回收
+2. 隔离栈生效：白名单外路径拒绝、非白名单网络出口拒绝、超配额被 cgroup 限制
+3. observe 上报与沙箱内已知负载一致（计数级核对）
+4. MCP server 被标准 MCP client 调通 create / run / terminate
+5. `cargo test` 全过；clippy / fmt 干净；冷启动 ≤1s 不回归；ADR 0005 / 0006 就位
 
 ## 7. 测试策略
 
@@ -252,4 +305,4 @@ balloon 列为可选 backlog，非验收项。
 
 ## 12. 后续里程碑预览（仅供接口设计参考，不要实现）
 
-M1 动态资源（见 6.1 节任务分解）→ M2 沙箱层 sandboxd 与 eBPF 观测、SDK/CLI/MCP → M3 三级快照 → M4 sched_ext 与密度。vmm-core 的设备管理抽象、VM 配置结构（`max_vcpu_count`、内存上限等字段）应能为 M1 直接扩展。
+M1 动态资源（见 6.1 节）→ M2 沙箱层 sandboxd、eBPF 观测、SDK/CLI/MCP（见 6.3 节）→ M3 三级快照 → M4 sched_ext 与密度。vmm-core 的设备管理抽象、VM 配置结构（`max_vcpu_count`、内存上限等字段）应能为后续里程碑直接扩展。
