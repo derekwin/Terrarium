@@ -77,6 +77,11 @@ impl Mem {
         self.requested_size.clone()
     }
 
+    /// 获取 config_changed 的 Arc clone（供 API handler 写入以触发中断）。
+    pub fn config_changed_arc(&self) -> Arc<AtomicBool> {
+        self.config_changed.clone()
+    }
+
     /// 处理 resize 命令：更新 requested_size，标记 config change。
     pub fn resize(&mut self, new_size_bytes: u64) {
         let clamped = new_size_bytes.min(self.region_size);
