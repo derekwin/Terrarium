@@ -26,6 +26,9 @@ struct Args {
     /// 内核命令行
     #[arg(long, default_value = "console=ttyS0 reboot=k panic=-1 tsc=reliable")]
     cmdline: String,
+    /// virtio-blk 后端磁盘镜像路径（可选，M1 Task 1）
+    #[arg(long)]
+    disk: Option<PathBuf>,
 }
 
 fn main() {
@@ -36,6 +39,7 @@ fn main() {
         kernel_path: args.kernel,
         initrd_path: args.initrd,
         kernel_cmdline: args.cmdline,
+        disk_path: args.disk,
         ..VmConfig::default()
     };
 
