@@ -12,6 +12,7 @@ pub mod net;
 pub mod rng;
 mod virtio_mmio;
 pub mod vsock;
+pub mod watchdog;
 
 pub use balloon::Balloon;
 pub use blk::Blk;
@@ -23,6 +24,7 @@ pub use virtio_mmio::{
     STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FAILED, STATUS_FEATURES_OK, STATUS_NEEDS_RESET,
 };
 pub use vsock::Vsock;
+pub use watchdog::Watchdog;
 
 /// virtio-mmio 设备窗口基址（3.25GiB，位于 3GiB 低端内存顶之上、4GiB 之下）。
 pub const MMIO_BASE: u64 = 0xd000_0000;

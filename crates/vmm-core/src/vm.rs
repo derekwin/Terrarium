@@ -19,7 +19,7 @@ use tracing::{debug, warn};
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 use crate::arch;
-use crate::device::{Balloon, Blk, DeviceManager, Mem, Net, Rng, VirtioMmio};
+use crate::device::{Balloon, Blk, DeviceManager, Mem, Net, Rng, VirtioMmio, Watchdog};
 use crate::rtc::{Rtc, RTC_PORT_DATA, RTC_PORT_INDEX};
 use crate::serial::{Serial, SERIAL_PORT_BASE, SERIAL_PORT_SIZE};
 
@@ -70,7 +70,7 @@ impl Default for VmConfig {
             mem_size_mib: 128,
             kernel_path: PathBuf::new(),
             initrd_path: None,
-            kernel_cmdline: "console=ttyS0 reboot=k panic=-1 tsc=reliable".to_string(),
+            kernel_cmdline: "console=ttyS0 reboot=k panic=-1 tsc=reliable acpi=off".to_string(),
             max_vcpu_count: 1,
             disk_path: None,
             mem_hotplug_max: None,
@@ -310,6 +310,13 @@ impl<W: io::Write> Vm<W> {
             device_manager.register(Box::new(mmio))?;
         }
 
+        // Watchdog（无条件注册）。
+        {
+            let wd = Watchdog::new();
+            let mmio = VirtioMmio::new(wd, memory.clone())?;
+            device_manager.register(Box::new(mmio))?;
+        }
+
         // 内核命令行：先插入用户配置，再追加已注册 MMIO 设备的声明
         // （virtio_mmio.device=…；无设备时为空串，行为与 M0 一致）。
         let mut cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE).map_err(Error::Cmdline)?;
@@ -362,11 +369,11 @@ impl<W: io::Write> Vm<W> {
             arch::setup_mp_table(&memory, config.max_vcpu_count)?;
         }
 
-        // guest CPUID：不设的话扩展叶子（如 0x80000001 的 NX/LM 位）会读成全零，
-        // 内核据此走到错误路径。直接用 KVM 支持的集合，M0 不做裁剪。
-        let cpuid = kvm
+        // guest CPUID：归一化后设入 vCPU（裁剪 KVM PV feature bits 确保跨宿主迁移兼容）。
+        let mut cpuid = kvm
             .get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
             .map_err(Error::GetSupportedCpuid)?;
+        arch::normalize_cpuid(&mut cpuid);
 
         // vCPU 初始化（M0 单 vCPU；Vec 结构为多 vCPU 预留）。
         let mut vcpus = Vec::with_capacity(usize::from(config.max_vcpu_count));
