@@ -7,16 +7,16 @@
 
 pub mod blk;
 pub mod mem;
-pub mod vsock;
 mod virtio_mmio;
+pub mod vsock;
 
 pub use blk::Blk;
 pub use mem::Mem;
-pub use vsock::Vsock;
 pub use virtio_mmio::{
     VirtioDevice, VirtioMmio, ISR_CONFIG_CHANGE, ISR_USED_BUFFER, STATUS_ACKNOWLEDGE,
     STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FAILED, STATUS_FEATURES_OK, STATUS_NEEDS_RESET,
 };
+pub use vsock::Vsock;
 
 /// virtio-mmio 设备窗口基址（3.25GiB，位于 3GiB 低端内存顶之上、4GiB 之下）。
 pub const MMIO_BASE: u64 = 0xd000_0000;
