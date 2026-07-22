@@ -505,7 +505,7 @@ pub fn build_boot_params(
     mem_size: u64,
     cmdline_size: u32,
     initrd: Option<(u32, u32)>,
-    boot_cpus: u8,
+    _boot_cpus: u8,
 ) -> Result<bootparam::boot_params> {
     const KERNEL_LOADER_OTHER: u8 = 0xff;
 
