@@ -295,6 +295,39 @@ balloon 列为可选 backlog，非验收项。
 9. ✅ ADR 0005-0007 就位：内核功能集、sandbox 协议、eBPF 框架选型
 10. ✅ clippy / fmt 干净，全部测试通过
 
+### M2 收尾任务包（2026-07 review 退回项，**当前唯一要做的事**，清零前不谈 M3）
+
+review 结论：骨架齐备但主干数据通路不存在（host 没有任何路径能把命令送进 sandbox），
+验收 #1/#2/#3 不成立。以下按序执行，每项一个 commit。
+
+- **R1 — sandboxd 通道改 vsock（硬阻塞项）**：sandboxd 现绑 guest 本地 Unix socket，
+  host 物理不可达。改为：sandboxd 用 AF_VSOCK listen 固定端口（建议 5000，cid=VMADDR_CID_ANY）；
+  host 侧复用 M1 virtio-vsock 设备的桥接（guest port → 宿主 Unix socket 文件，见 6c2b46a），
+  controller/CLI 经该桥接 socket 收发。协议帧沿用 ADR 0006 的 serde_json 格式不变。
+  验收：host echo 客户端 ↔ guest sandboxd 双向收发 smoke
+- **R2 — exec 全链路路由**：定案（不许再悬空）：vmm-api 增加 `exec_sandbox {argv, env, cwd}`，
+  terra-vmm 收到后经 vsock 桥转发给 sandboxd 并回传结果；terra CLI 加 `exec` 子命令
+  （经目标 VM 的 api socket）；Python SDK 的 `TERRA_SOCK` 指向目标 VM 的 api socket
+  （create 返回值里带 socket 路径，README 的 Sandbox 句柄语义）。端到端 smoke：
+  `terra create` → `terra exec echo hello` 断言输出 → `terra terminate`
+- **R3 — resize_mem 端到端**：vmm-api 的 `resize_mem` 真正写入 virtio-mem 设备的
+  `requested_size`（`Arc<AtomicU64>` 已在）并触发 config change 中断；guest 内 `free`
+  可见变化、不重启。mem_smoke 改为真断言：resize 后 guest 侧输出（经 /init 脚本把
+  `free -m` 关键行打到 console）匹配预期，删掉只断言 `TERRA_GUEST_SHELL_READY` 的版本
+- **R4 — BPF LSM 动态策略（或签字降级）**：实现 `file_open`/`socket_connect` 钩子、
+  按沙箱下发路径与网络出口白名单（ADR 0008）；若选降级，把验收 #2 网络条款改写为
+  net namespace 全无网 semantics，由项目所有者在 ADR 签字确认，不得默默消失
+- **R5 — eBPF observe 排期**：ADR 0007 的 procfs 过渡版是否作为 M2 验收 #3 的达标形态，
+  由项目所有者签字确认（ADR 落款为开发方代签，需补认）；aya 版 eBPF observe 明确
+  排入 M3 范围或独立 backlog，写入本文件
+
+### M2 收尾验收（在原验收标准之上修订）
+
+1. `terra create` → `terra exec` 拿到 guest 内真实输出 → `terra terminate` 全链路 smoke 通过
+2. resize_mem 后 guest `free` 可见、不重启（smoke 断言）
+3. observe（procfs 过渡版或 eBPF）上报与沙箱内已知负载一致；BPF LSM 或降级 ADR 就位
+4. 原验收 #1/#2/#4/#5 维持不变
+
 ## 9. 代码风格与工作方式
 
 - 仓库文档与注释主要使用**中文**；commit message 用 **conventional commits**（英文）
