@@ -1,10 +1,9 @@
-//! sandboxd：guest 内 sandbox 守护进程（M2 Task 1）。
+//! sandboxd：guest 内 sandbox 守护进程（M2 Task 1-2）。
 //!
 //! 监听 `/run/sandboxd.sock` Unix socket，接收 JSON 命令并执行。
 //! 静态 musl 编译，不依赖 guest 动态库。
 //!
-//! M2 命令面：exec / status / terminate / logs。
-//! exec 先以普通子进程实现（隔离栈 Task 2 才加）。
+//! 命令面：exec / exec_sandboxed / status / terminate / logs。
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -12,11 +11,13 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
+mod sandbox;
+
 /// 客户端请求。
 #[derive(Debug, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 enum Request {
-    /// 执行命令。
+    /// 执行命令（普通子进程，无隔离）。
     Exec {
         argv: Vec<String>,
         #[serde(default)]
@@ -24,11 +25,20 @@ enum Request {
         #[serde(default = "default_cwd")]
         cwd: String,
     },
+    /// 在隔离沙箱中执行命令（namespace + overlay + cgroup + Landlock + seccomp）。
+    ExecSandboxed {
+        argv: Vec<String>,
+        #[serde(default)]
+        env: std::collections::HashMap<String, String>,
+        #[serde(default = "default_cwd")]
+        cwd: String,
+        sandbox: sandbox::SandboxConfigInput,
+    },
     /// 查询守护进程状态。
     Status,
     /// 停止守护进程。
     Terminate,
-    /// 查询沙箱日志（Task 2 接入）。
+    /// 查询沙箱日志。
     Logs,
 }
 
@@ -117,6 +127,15 @@ fn handle_client(mut stream: UnixStream) -> bool {
                 let resp = handle_exec(&argv, &env, &cwd);
                 let _ = send(&mut stream, &resp);
             }
+            Request::ExecSandboxed {
+                argv,
+                env,
+                cwd,
+                sandbox: sb,
+            } => {
+                let resp = handle_exec_sandboxed(&argv, &env, &cwd, sb);
+                let _ = send(&mut stream, &resp);
+            }
             Request::Status => {
                 let _ = send(&mut stream, &Response::ok());
             }
@@ -160,6 +179,27 @@ fn handle_exec(
             Response::ok_data(data)
         }
         Err(e) => Response::err(format!("exec: {e}")),
+    }
+}
+
+fn handle_exec_sandboxed(
+    argv: &[String],
+    env: &std::collections::HashMap<String, String>,
+    cwd: &str,
+    sb_config: sandbox::SandboxConfigInput,
+) -> Response {
+    use serde_json::json;
+    let config: sandbox::SandboxConfig = sb_config.into();
+    match sandbox::exec_in_sandbox(&config, argv, env, cwd) {
+        Ok(result) => {
+            let data = json!({
+                "exit_code": result.exit_code,
+                "stdout": base64_encode(&result.stdout),
+                "stderr": base64_encode(&result.stderr),
+            });
+            Response::ok_data(data)
+        }
+        Err(e) => Response::err(format!("sandbox exec: {e}")),
     }
 }
 
