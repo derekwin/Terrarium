@@ -529,6 +529,26 @@ pub fn build_boot_params(
     Ok(params)
 }
 
+/// CPUID 归一化：裁剪宿主特有 feature bits，确保跨宿主迁移兼容。
+///
+/// 主要清除：KVM PV feature bits (KVM_FEATURE_CLOCKSOURCE_STABLE 等)、
+/// 性能计数器特性（不同 CPU 型号有不同计数器宽度）。
+pub fn normalize_cpuid(cpuid: &mut kvm_bindings::CpuId) {
+    for entry in cpuid.as_mut_slice().iter_mut() {
+        match entry.function {
+            0x1 => {
+                // ECX: clear hypervisor bit (bit 31) — guest sees real CPU model.
+                entry.ecx &= !(1u32 << 31);
+            }
+            0x4000_0001 => {
+                // KVM PV feature bits: clear all (guest shouldn't see PV features).
+                entry.eax = 0;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// 在 guest 内存中写入 MP table（多 vCPU 枚举）。
 ///
 /// 内核通过 MP Floating Pointer Structure 发现 MP Configuration Table，
