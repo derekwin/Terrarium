@@ -85,9 +85,11 @@ pub trait VirtioDevice: Send {
     fn read_config(&self, offset: u64, data: &mut [u8]);
     /// 写设备配置空间。
     fn write_config(&mut self, offset: u64, data: &[u8]);
-    /// 队列被 kick（guest 写 QueueNotify）；返回需要置位的 ISR 位
-    /// （通常有可用描述符被消费后置 [`ISR_USED_BUFFER`]）。
-    fn queue_notify(&mut self, queue: usize) -> u32;
+    /// 队列被 kick（guest 写 QueueNotify）。`queue` 是被 kick 的 virtqueue、
+    /// `mem` 是 guest 内存（描述符链遍历与数据读写用）；返回需要置位的
+    /// ISR 位（通常有可用描述符被消费后置 [`ISR_USED_BUFFER`]）。
+    fn queue_notify(&mut self, queue_index: usize, queue: &mut Queue, mem: &GuestMemoryMmap)
+        -> u32;
     /// 设备自发中断位（如 config change 的 [`ISR_CONFIG_CHANGE`]），
     /// 传输层每次读 ISR / 刷新 IRQ 电平时并入。
     fn pending_interrupts(&self) -> u32 {
@@ -210,8 +212,11 @@ impl<D: VirtioDevice> VirtioMmio<D> {
                 }
             }
             REG_QUEUE_NOTIFY => {
-                // 写入值即队列索引；设备返回需要置位的 ISR 位。
-                self.isr |= self.device.queue_notify(v as usize);
+                // 写入值即队列索引；非法索引不 kick 设备。设备返回需要置位的 ISR 位。
+                let idx = v as usize;
+                if let Some(queue) = self.queues.get_mut(idx) {
+                    self.isr |= self.device.queue_notify(idx, queue, &self.mem);
+                }
             }
             REG_INTERRUPT_ACK => self.isr &= !v,
             REG_STATUS => {
@@ -378,8 +383,13 @@ mod tests {
             let start = offset as usize;
             self.config[start..start + data.len()].copy_from_slice(data);
         }
-        fn queue_notify(&mut self, queue: usize) -> u32 {
-            self.notified.push(queue);
+        fn queue_notify(
+            &mut self,
+            queue_index: usize,
+            _queue: &mut Queue,
+            _mem: &GuestMemoryMmap,
+        ) -> u32 {
+            self.notified.push(queue_index);
             ISR_USED_BUFFER
         }
         fn pending_interrupts(&self) -> u32 {
