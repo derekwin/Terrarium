@@ -1,2 +1,4 @@
 target/
 # guest 内核与 initramfs 产物（cargo xtask kernel 生成，不进 git）
+# 外部 coding agent 的工具残留（会话状态等，不入库）
+.omo/
