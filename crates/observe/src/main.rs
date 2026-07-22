@@ -49,6 +49,12 @@ struct AggregatedMetrics {
     total_open_fds: u32,
     total_rchar: u64,
     total_wchar: u64,
+    /// cgroup CPU 使用量（微秒，来自 cpu.stat usage_usec）。
+    cpu_usage_usec: Option<u64>,
+    /// cgroup 内存使用量（字节，来自 memory.current）。
+    memory_current: Option<u64>,
+    /// cgroup 内存上限（来自 memory.max）。
+    memory_max: Option<u64>,
 }
 
 /// 扫描 /proc，收集所有进程的指标。
@@ -138,6 +144,31 @@ fn aggregate(metrics: &[ProcMetrics]) -> SandboxMetrics {
         entry.total_open_fds += m.open_fds;
         entry.total_rchar += m.rchar;
         entry.total_wchar += m.wchar;
+    }
+
+    // 读取所有 terra- 前缀的 cgroup 资源统计。
+    if let Ok(entries) = fs::read_dir("/sys/fs/cgroup") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("terra-") {
+                let cg_path = format!("/sys/fs/cgroup/{name_str}");
+                let cg_entry = cgroups.entry(name_str.to_string()).or_default();
+                if let Ok(cpu_stat) = fs::read_to_string(format!("{cg_path}/cpu.stat")) {
+                    for line in cpu_stat.lines() {
+                        if let Some(val) = line.strip_prefix("usage_usec ") {
+                            cg_entry.cpu_usage_usec = val.trim().parse().ok();
+                        }
+                    }
+                }
+                if let Ok(mem_current) = fs::read_to_string(format!("{cg_path}/memory.current")) {
+                    cg_entry.memory_current = mem_current.trim().parse().ok();
+                }
+                if let Ok(mem_max) = fs::read_to_string(format!("{cg_path}/memory.max")) {
+                    cg_entry.memory_max = mem_max.trim().parse().ok();
+                }
+            }
+        }
     }
 
     SandboxMetrics {
