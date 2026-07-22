@@ -16,7 +16,7 @@ use tracing::{debug, warn};
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 use crate::arch;
-use crate::device::DeviceManager;
+use crate::device::{Blk, DeviceManager, VirtioMmio};
 use crate::rtc::{Rtc, RTC_PORT_DATA, RTC_PORT_INDEX};
 use crate::serial::{Serial, SERIAL_PORT_BASE, SERIAL_PORT_SIZE};
 
@@ -43,6 +43,8 @@ pub struct VmConfig {
     pub kernel_cmdline: String,
     /// vCPU 上限。M0 仅支持 1；M1 将按此上限预创建 vCPU、guest 内逻辑上下线。
     pub max_vcpu_count: u8,
+    /// virtio-blk 后端磁盘路径（M1 Task 1；None 时不注册 blk 设备）。
+    pub disk_path: Option<PathBuf>,
 }
 
 impl VmConfig {
@@ -63,6 +65,7 @@ impl Default for VmConfig {
             initrd_path: None,
             kernel_cmdline: "console=ttyS0 reboot=k panic=-1 tsc=reliable".to_string(),
             max_vcpu_count: 1,
+            disk_path: None,
         }
     }
 }
@@ -148,6 +151,12 @@ pub enum Error {
     /// 设置 IRQ 线电平失败。
     #[error("设置 IRQ 线电平失败: {0}")]
     SetIrqLine(kvm_ioctls::Error),
+    /// 创建 blk 设备失败。
+    #[error("创建 blk 设备失败: {0}")]
+    Blk(io::Error),
+    /// 设备注册失败。
+    #[error("设备注册失败: {0}")]
+    Device(#[from] crate::device::Error),
 }
 
 /// 一个运行中的 VM 实例。
@@ -239,9 +248,15 @@ impl<W: io::Write> Vm<W> {
         let entry_addr = loader_result.kernel_load.raw_value();
         debug!(entry = entry_addr, "内核已加载");
 
-        // MMIO 设备管理器：M1 Task 0 尚无具体设备注册（Task 1 起经 VmConfig 配置），
-        // 空管理器不改变 cmdline 与运行时行为。
-        let device_manager = DeviceManager::new();
+        // MMIO 设备管理器：注册 virtio-blk（若配置了 disk_path），
+        // 其余设备在后续里程碑注册。
+        let mut device_manager = DeviceManager::new();
+
+        if let Some(ref disk_path) = config.disk_path {
+            let blk = Blk::new(disk_path).map_err(Error::Blk)?;
+            let mmio = VirtioMmio::new(blk, memory.clone())?;
+            device_manager.register(Box::new(mmio))?;
+        }
 
         // 内核命令行：先插入用户配置，再追加已注册 MMIO 设备的声明
         // （virtio_mmio.device=…；无设备时为空串，行为与 M0 一致）。

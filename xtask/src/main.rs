@@ -78,6 +78,9 @@ CONFIG_SERIAL_8250_NR_UARTS=1
 CONFIG_SERIAL_8250_RUNTIME_UARTS=1
 # LZ4 解压最快，缩短冷启动（默认 gzip 解压 12MB 量级镜像要几百毫秒）
 CONFIG_KERNEL_LZ4=y
+# M1 Task 1：virtio-blk 与 ext4 根文件系统
+CONFIG_VIRTIO_BLK=y
+CONFIG_EXT4_FS=y
 "#;
 
 #[derive(Parser)]
@@ -95,6 +98,8 @@ enum Command_ {
         #[arg(long, default_value = DEFAULT_KERNEL_VERSION)]
         version: String,
     },
+    /// 创建 ext4 rootfs 镜像（依赖 kernel 子命令先跑过）
+    Rootfs,
 }
 
 fn main() {
@@ -103,6 +108,12 @@ fn main() {
         Command_::Kernel { version } => {
             if let Err(e) = kernel(&version) {
                 eprintln!("xtask kernel 失败: {e}");
+                std::process::exit(1);
+            }
+        }
+        Command_::Rootfs => {
+            if let Err(e) = rootfs() {
+                eprintln!("xtask rootfs 失败: {e}");
                 std::process::exit(1);
             }
         }
@@ -272,12 +283,26 @@ fn build_initramfs(src_dir: &Path, guest_dir: &Path) -> Result<PathBuf, String> 
         run("make", &[&format!("-j{nproc}")], Some(&tree))?;
     }
 
-    // 2. /init：挂载 devtmpfs 后 exec /bin/sh（console 由内核 cmdline 指向 ttyS0）。
-    // echo 的就绪标记是给 boot smoke test 断言用的（提示符本身不带换行、形式不稳定）。
+    // 2. /init：挂载 devtmpfs 后，若检测到 /dev/vda 则切到 ext4 rootfs；
+    // 否则直接 exec /bin/sh（console 由内核 cmdline 指向 ttyS0）。
+    // echo 的就绪标记是给 boot smoke test 断言用的。
     let init = root.join("init");
     std::fs::write(
         &init,
-        "#!/bin/sh\n/bin/mount -t devtmpfs devtmpfs /dev\necho TERRA_GUEST_SHELL_READY\nexec /bin/sh\n",
+        "#!/bin/sh\n\
+         /bin/mount -t devtmpfs devtmpfs /dev\n\
+         if [ -b /dev/vda ]; then\n\
+           /bin/mount -t ext4 /dev/vda /newroot || exec /bin/sh\n\
+           if [ -f /newroot/terra_persist ]; then\n\
+             echo TERRA_PERSIST_OK\n\
+           else\n\
+             echo first > /newroot/terra_persist\n\
+             echo TERRA_FIRST_WRITE_OK\n\
+           fi\n\
+           exec /bin/switch_root /newroot /bin/sh\n\
+         fi\n\
+         echo TERRA_GUEST_SHELL_READY\n\
+         exec /bin/sh\n",
     )
     .map_err(|e| e.to_string())?;
 
@@ -293,10 +318,13 @@ fn build_initramfs(src_dir: &Path, guest_dir: &Path) -> Result<PathBuf, String> 
         format!(
             "dir /bin 0755 0 0\n\
              dir /dev 0755 0 0\n\
+             dir /newroot 0755 0 0\n\
              file /init {} 0755 0 0\n\
              file /bin/busybox {} 0755 0 0\n\
              slink /bin/sh /bin/busybox 0777 0 0\n\
              slink /bin/mount /bin/busybox 0777 0 0\n\
+             slink /bin/switch_root /bin/busybox 0777 0 0\n\
+             slink /bin/echo /bin/busybox 0777 0 0\n\
              nod /dev/console 0600 0 0 c 5 1\n\
              nod /dev/null 0666 0 0 c 1 3\n",
             init.display(),
@@ -321,6 +349,61 @@ fn build_initramfs(src_dir: &Path, guest_dir: &Path) -> Result<PathBuf, String> 
         None,
     )?;
     Ok(out)
+}
+
+fn rootfs() -> Result<(), String> {
+    let guest_dir = guest_dir()?;
+    let src_dir = guest_dir.join("src");
+
+    // 1. 检查必需工具。
+    for tool in &["mkfs.ext4", "debugfs"] {
+        run("which", &[tool], None).map_err(|_| format!("{tool} 未安装或不在 PATH 中"))?;
+    }
+
+    // 2. 找到 busybox（来自 kernel 子命令产物）。
+    let busybox = src_dir
+        .join(format!("busybox-{BUSYBOX_VERSION}"))
+        .join("busybox")
+        .canonicalize()
+        .map_err(|e| format!("找不到 busybox ({}): {e}", BUSYBOX_VERSION))?;
+    if !busybox.exists() {
+        return Err("busybox 未构建，请先运行 `cargo xtask kernel`".to_string());
+    }
+
+    // 3. 创建 64MiB 空 ext4 镜像。
+    let out = guest_dir.join("rootfs.ext4");
+    run("truncate", &["-s", "64M", out.to_str().unwrap()], None)?;
+    run("mkfs.ext4", &["-q", "-F", out.to_str().unwrap()], None)?;
+
+    // 4. 用 debugfs 填充（免 root）。
+    let out_str = out.to_str().unwrap().to_string();
+    let busybox_str = busybox.to_str().unwrap().to_string();
+    let script = format!(
+        "mkdir /bin\n\
+         write {busybox_str} /bin/busybox\n\
+         symlink /bin/sh /bin/busybox\n\
+         symlink /bin/echo /bin/busybox\n"
+    );
+    let mut child = Command::new("debugfs")
+        .args(["-w", "-f", "-", &out_str])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("启动 debugfs 失败: {e}"))?;
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .map_err(|e| format!("写 debugfs 命令失败: {e}"))?;
+    let status = child.wait().map_err(|e| format!("debugfs 失败: {e}"))?;
+    if !status.success() {
+        return Err(format!("debugfs 退出码非零: {status}"));
+    }
+
+    println!("产物就绪:");
+    println!("  rootfs:   {}", out.display());
+    Ok(())
 }
 
 /// 找到刚解压的内核源码树（src_dir 下唯一的 linux-* 目录）
