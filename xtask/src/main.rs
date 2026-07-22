@@ -311,19 +311,20 @@ fn build_initramfs(src_dir: &Path, guest_dir: &Path) -> Result<PathBuf, String> 
     std::fs::write(
         &init,
         "#!/bin/sh\n\
-         /bin/mount -t devtmpfs devtmpfs /dev\n\
-         if [ -b /dev/vda ]; then\n\
-           /bin/mount -t ext4 /dev/vda /newroot || exec /bin/sh\n\
-           if [ -f /newroot/terra_persist ]; then\n\
-             echo TERRA_PERSIST_OK\n\
-           else\n\
-             echo first > /newroot/terra_persist\n\
-             echo TERRA_FIRST_WRITE_OK\n\
-           fi\n\
-           exec /bin/switch_root /newroot /bin/sh\n\
-         fi\n\
-         echo TERRA_GUEST_SHELL_READY\n\
-         exec /bin/sh\n",
+          /bin/mount -t devtmpfs devtmpfs /dev\n\
+          if [ -b /dev/vda ]; then\n\
+            /bin/mount -t ext4 /dev/vda /newroot || exec /bin/sh\n\
+            if [ -f /newroot/terra_persist ]; then\n\
+              echo TERRA_PERSIST_OK\n\
+            else\n\
+              echo first > /newroot/terra_persist\n\
+              echo TERRA_FIRST_WRITE_OK\n\
+            fi\n\
+            /newroot/sbin/sandboxd &\n\
+            exec /bin/switch_root /newroot /bin/sh\n\
+          fi\n\
+          echo TERRA_GUEST_SHELL_READY\n\
+          exec /bin/sh\n",
     )
     .map_err(|e| e.to_string())?;
 
@@ -396,14 +397,38 @@ fn rootfs() -> Result<(), String> {
     run("truncate", &["-s", "64M", out.to_str().unwrap()], None)?;
     run("mkfs.ext4", &["-q", "-F", out.to_str().unwrap()], None)?;
 
-    // 4. 用 debugfs 填充（免 root）。
+    // 4. 编译 sandboxd（musl 静态链接）并放入 rootfs。
+    let ws_root = workspace_root();
+    println!("+ cargo build --target x86_64-unknown-linux-musl --release -p sandboxd");
+    run(
+        "cargo",
+        &[
+            "build",
+            "--target",
+            "x86_64-unknown-linux-musl",
+            "--release",
+            "-p",
+            "sandboxd",
+        ],
+        Some(&ws_root),
+    )?;
+    let sandboxd_bin = ws_root
+        .join("target/x86_64-unknown-linux-musl/release/sandboxd")
+        .canonicalize()
+        .map_err(|e| format!("找不到 sandboxd 二进制: {e}"))?;
+
+    // 5. 用 debugfs 填充（免 root）。
     let out_str = out.to_str().unwrap().to_string();
     let busybox_str = busybox.to_str().unwrap().to_string();
+    let sandboxd_str = sandboxd_bin.to_str().unwrap().to_string();
     let script = format!(
         "mkdir /bin\n\
          write {busybox_str} /bin/busybox\n\
          symlink /bin/sh /bin/busybox\n\
-         symlink /bin/echo /bin/busybox\n"
+         symlink /bin/echo /bin/busybox\n\
+         mkdir /sbin\n\
+         write {sandboxd_str} /sbin/sandboxd\n\
+         mkdir /run\n"
     );
     let mut child = Command::new("debugfs")
         .args(["-w", "-f", "-", &out_str])
