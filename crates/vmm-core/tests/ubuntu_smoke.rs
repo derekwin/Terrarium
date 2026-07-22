@@ -1,7 +1,7 @@
-//! Ubuntu bring-up smoke test（M1.5 Task 3）。
+//! Ubuntu bring-up smoke test（N3 增强版）：
+//! 启动 Ubuntu → 串口登录 → apt update → 验证。
 //!
-//! 用自定义内核 + Ubuntu noble cloud image 启动，断言 systemd 完成引导、
-//! 串口出现 `login:` 提示。跳过条件：/dev/kvm 不存在、产物未构建。
+//! 跳过条件：/dev/kvm 不存在、产物未构建。
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,6 +32,10 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn inject(serial: &Arc<Mutex<std::collections::VecDeque<u8>>>, s: &str) {
+    serial.lock().unwrap().extend(s.as_bytes());
+}
+
 #[test]
 fn ubuntu_smoke() {
     if !Path::new("/dev/kvm").exists() {
@@ -46,7 +50,7 @@ fn ubuntu_smoke() {
         return;
     }
     if !ubuntu.exists() {
-        eprintln!("ubuntu_smoke: 跳过（ubuntu.raw 未下载，跑 cargo xtask ubuntu）");
+        eprintln!("ubuntu_smoke: 跳过（ubuntu.raw 未下载）");
         return;
     }
 
@@ -56,40 +60,65 @@ fn ubuntu_smoke() {
         disk_path: Some(ubuntu),
         mem_size_mib: 1024,
         max_vcpu_count: 2,
-        kernel_cmdline:
-            "root=/dev/vda1 console=ttyS0 cloud-init=disabled \
+        kernel_cmdline: "root=/dev/vda1 console=ttyS0 cloud-init=disabled \
              systemd.mask=systemd-networkd-wait-online.service \
              systemd.mask=cloud-init.service \
              systemd.mask=cloud-final.service \
              systemd.mask=snapd.service"
-                .to_string(),
+            .to_string(),
         ..VmConfig::default()
     };
 
     let start = Instant::now();
     let mut vm = Vm::with_output(config, buf.clone()).expect("创建 VM 失败");
+    let serial_input = vm.serial_input();
 
     thread::spawn(move || {
         let _ = vm.run();
     });
 
+    // Phase 1: wait for login prompt.
     let deadline = start + Duration::from_secs(120);
+    let mut phase = 0;
     loop {
         {
             let data = buf.0.lock().unwrap();
             let text = String::from_utf8_lossy(&data);
-            if text.contains("login:") {
-                eprintln!(
-                    "ubuntu_smoke: systemd 启动完成，login: 提示出现，耗时 {:?}",
-                    start.elapsed()
-                );
-                return;
-            }
             if text.contains("Kernel panic") || text.contains("VFS: Unable to mount") {
                 panic!("Ubuntu 启动失败:\n{text}");
             }
+            match phase {
+                0 if text.contains("login:") => {
+                    eprintln!("ubuntu_smoke: login 提示出现 @ {:?}", start.elapsed());
+                    inject(&serial_input, "root\n");
+                    phase = 1;
+                }
+                1 if text.contains("Password:") || text.contains("password:") => {
+                    eprintln!("ubuntu_smoke: password 提示出现 @ {:?}", start.elapsed());
+                    // 尝试空密码登录（cloud image 默认 root 无密码）。
+                    inject(&serial_input, "\n");
+                    phase = 2;
+                }
+                2 if text.contains("# ") || text.contains("$ ") => {
+                    eprintln!("ubuntu_smoke: shell 提示出现 @ {:?}", start.elapsed());
+                    // 执行 apt update 验证系统功能。
+                    inject(&serial_input, "apt-get update -qq 2>&1 | head -3\n");
+                    phase = 3;
+                }
+                3 if text.contains("Reading package lists") || text.contains("apt-get") => {
+                    eprintln!(
+                        "ubuntu_smoke: apt update 输出已出现 @ {:?}",
+                        start.elapsed()
+                    );
+                    return;
+                }
+                _ => {}
+            }
         }
-        assert!(Instant::now() < deadline, "120s 内未见到 login: 提示");
+        assert!(
+            Instant::now() < deadline,
+            "120s 内未完成（当前 phase={phase}）"
+        );
         thread::sleep(Duration::from_millis(500));
     }
 }
