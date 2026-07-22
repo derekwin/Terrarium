@@ -1,0 +1,18 @@
+[package]
+name = "sandboxd"
+description = "guest 内 sandbox 守护进程：musl 静态链接，不依赖 guest 动态库"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "sandboxd"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
