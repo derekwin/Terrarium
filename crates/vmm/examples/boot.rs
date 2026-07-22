@@ -29,6 +29,9 @@ struct Args {
     /// virtio-blk 后端磁盘镜像路径（可选，M1 Task 1）
     #[arg(long)]
     disk: Option<PathBuf>,
+    /// virtio-net 后端 fd 路径（可选，M1.5 Task 0）
+    #[arg(long)]
+    net: Option<PathBuf>,
 }
 
 fn main() {

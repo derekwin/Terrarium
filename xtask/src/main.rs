@@ -102,6 +102,8 @@ CONFIG_LSM="landlock,lockdown,yama,integrity,bpf"
 CONFIG_BPF_SYSCALL=y
 CONFIG_BPF_LSM=y
 CONFIG_DEBUG_INFO_BTF=y
+# M1.5 Task 0：virtio-net
+CONFIG_VIRTIO_NET=y
 "#;
 
 #[derive(Parser)]

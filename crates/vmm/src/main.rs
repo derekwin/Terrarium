@@ -40,6 +40,9 @@ struct Args {
     /// API Unix socket 路径
     #[arg(long)]
     api_socket: PathBuf,
+    /// virtio-net 后端 fd 路径
+    #[arg(long)]
+    net: Option<PathBuf>,
 }
 
 fn main() {
@@ -62,6 +65,7 @@ fn main() {
         kernel_cmdline: "console=ttyS0 reboot=k panic=-1 tsc=reliable".to_string(),
         max_vcpu_count: args.max_vcpus,
         mem_hotplug_max: None,
+        net_backend: None,
     };
 
     let mut vm = Vm::new(config).expect("创建 VM 失败");
