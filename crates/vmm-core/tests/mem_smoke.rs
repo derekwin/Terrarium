@@ -1,19 +1,12 @@
-//! virtio-mem smoke test（N1 修复版）：
-//! 启动 → resize → 断言 guest 内 `free -m` MemTotal 变化。
-//!
-//! 跳过条件：/dev/kvm 不存在、guest 产物未构建。
-
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-
 use vmm_core::{Vm, VmConfig};
 
 #[derive(Clone)]
 struct SharedBuf(Arc<Mutex<Vec<u8>>>);
-
 impl Write for SharedBuf {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().extend_from_slice(buf);
@@ -23,90 +16,93 @@ impl Write for SharedBuf {
         Ok(())
     }
 }
-
-fn workspace_root() -> PathBuf {
+fn ws() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
-        .expect("vmm-core 必须位于 workspace 的 crates/ 下")
+        .unwrap()
         .to_path_buf()
+}
+fn text(buf: &SharedBuf) -> String {
+    String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned()
+}
+fn parse_val(line: &str, prefix: &str) -> Option<u64> {
+    line.strip_prefix(prefix)
+        .and_then(|v| v.trim().parse::<u64>().ok())
 }
 
 #[test]
 fn mem_smoke() {
     if !Path::new("/dev/kvm").exists() {
-        eprintln!("mem_smoke: 跳过（/dev/kvm 不存在）");
+        eprintln!("mem_smoke: 跳过");
         return;
     }
-    let guest_dir = workspace_root().join("target/guest");
-    let kernel = guest_dir.join("bzImage");
-    let initrd = guest_dir.join("initramfs.cpio.gz");
-    if !kernel.exists() || !initrd.exists() {
-        eprintln!("mem_smoke: 跳过（guest 产物未构建）");
+    let g = ws().join("target/guest");
+    let (k, i) = (g.join("bzImage"), g.join("initramfs.cpio.gz"));
+    if !k.exists() || !i.exists() {
+        eprintln!("mem_smoke: 跳过");
         return;
     }
 
     let buf = SharedBuf(Arc::new(Mutex::new(Vec::new())));
-    let config = VmConfig {
-        kernel_path: kernel,
-        initrd_path: Some(initrd),
+    let c = VmConfig {
+        kernel_path: k,
+        initrd_path: Some(i),
+        mem_size_mib: 128,
         mem_hotplug_max: Some(128),
-        kernel_cmdline: "console=ttyS0 reboot=k panic=-1 tsc=reliable".to_string(),
+        kernel_cmdline: "console=ttyS0 reboot=k panic=-1 tsc=reliable".into(),
         ..VmConfig::default()
     };
-
-    let start = Instant::now();
-    let mut vm = Vm::with_output(config, buf.clone()).expect("创建 VM 失败");
-
-    // 获取 resize handle，然后启动 VM。
-    let resize_target = vm.resize_target();
-    let mem_config = vm.mem_config_changed();
-
+    let mut vm = Vm::with_output(c, buf.clone()).unwrap();
+    let rt = vm.resize_target();
+    let rc = vm.mem_config_changed();
     thread::spawn(move || {
         let _ = vm.run();
     });
 
-    // 等待 guest 启动完成。
-    let deadline = start + Duration::from_secs(20);
+    let t0 = Instant::now();
+
+    // Phase 1: get initial MEM_TOTAL.
+    let mut initial = 0u64;
     loop {
-        let data = buf.0.lock().unwrap();
-        let text = String::from_utf8_lossy(&data);
-        if text.contains("TERRA_GUEST_SHELL_READY") {
+        for l in text(&buf).lines() {
+            if let Some(v) = parse_val(l, "MEM_TOTAL=") {
+                initial = v;
+                break;
+            }
+        }
+        if initial > 0 {
             break;
         }
-        drop(data);
-        assert!(Instant::now() < deadline, "20s 内未启动");
-        thread::sleep(Duration::from_millis(100));
-    }
-
-    // 触发 resize（64MiB → 128MiB）。
-    if let (Some(target), Some(config)) = (&resize_target, &mem_config) {
-        target.store(128 << 20, std::sync::atomic::Ordering::SeqCst);
-        config.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    // 等待 guest 输出 free -m 的 MemTotal 变化标记。
-    // guest 侧 /init 脚本会执行 free -m 并打印 MEM_TOTAL=<value>。
-    let deadline = start + Duration::from_secs(30);
-    loop {
-        let data = buf.0.lock().unwrap();
-        let text = String::from_utf8_lossy(&data);
-        if text.contains("virtio_mem") {
-            eprintln!(
-                "mem_smoke: virtio-mem 设备已识别，耗时 {:?}",
-                start.elapsed()
-            );
-            // 只要设备被识别就算通过——virtio-mem driver 已加载。
-            return;
-        }
-        if text.contains("MEM_TOTAL=") {
-            eprintln!("mem_smoke: free -m 输出已捕获，耗时 {:?}", start.elapsed());
-            return;
-        }
-        drop(data);
         assert!(
-            Instant::now() < deadline,
-            "30s 内未检测到 virtio-mem 或 MEM_TOTAL"
+            Instant::now() < t0 + Duration::from_secs(20),
+            "未读到初始 MEM_TOTAL"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+    eprintln!("mem_smoke: 初始 MEM_TOTAL={initial}");
+
+    // Phase 2: trigger resize.
+    if let (Some(t), Some(c)) = (&rt, &rc) {
+        t.store(256 << 20, std::sync::atomic::Ordering::SeqCst);
+        c.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    // Phase 3: wait for updated MEM_TOTAL.
+    loop {
+        for l in text(&buf).lines() {
+            if let Some(v) = parse_val(l, "MEM_TOTAL=") {
+                if v > initial {
+                    let delta = v - initial;
+                    eprintln!("mem_smoke: resize 后 MEM_TOTAL={v}, 增大 {delta} KiB");
+                    assert!(delta >= 32 * 1024, "只增大了 {delta} KiB");
+                    return;
+                }
+            }
+        }
+        assert!(
+            Instant::now() < t0 + Duration::from_secs(30),
+            "resize 后 MEM_TOTAL 未变化"
         );
         thread::sleep(Duration::from_millis(200));
     }
