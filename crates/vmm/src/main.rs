@@ -6,7 +6,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -69,6 +69,24 @@ fn main() {
     };
 
     let mut vm = Vm::new(config).expect("创建 VM 失败");
+    let resize_target = vm.resize_target();
+    let serial_input = vm.serial_input();
+
+    // 串口输入线程：host stdin → guest serial。
+    thread::spawn(move || {
+        use std::io::Read;
+        let stdin = std::io::stdin();
+        let mut buf = [0u8; 256];
+        loop {
+            match stdin.lock().read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    serial_input.lock().unwrap().extend(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+    });
 
     // vCPU 线程：运行 VM。guest 通常不主动关机（停在 shell），
     // 进程退出时内核自动清理 KVM 资源。
@@ -83,13 +101,14 @@ fn main() {
         .set_nonblocking(true)
         .expect("设置 nonblocking 失败");
     let stop_api = stop_flag.clone();
+    let res = resize_target.clone();
     let api_handle = thread::spawn(move || loop {
         if stop_api.load(Ordering::SeqCst) {
             break;
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                handle_client(stream, &stop_api, mem_size, max_vcpus, disk_attached);
+                handle_client(stream, &stop_api, mem_size, max_vcpus, disk_attached, &res);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(std::time::Duration::from_millis(100));
@@ -116,6 +135,7 @@ fn handle_client(
     mem_size_mib: usize,
     max_vcpu_count: u8,
     disk_attached: bool,
+    resize_target: &Option<Arc<AtomicU64>>,
 ) {
     let reader = BufReader::new(stream.try_clone().unwrap());
     for line in reader.lines() {
@@ -142,6 +162,7 @@ fn handle_client(
             mem_size_mib,
             max_vcpu_count,
             disk_attached,
+            resize_target,
         );
         if send_response(&mut stream, &response).is_err() {
             break;
@@ -155,6 +176,7 @@ fn handle_request(
     mem_size_mib: usize,
     max_vcpu_count: u8,
     disk_attached: bool,
+    resize_target: &Option<Arc<AtomicU64>>,
 ) -> Response {
     match req {
         Request::Stop => {
@@ -170,7 +192,13 @@ fn handle_request(
             let data = serde_json::to_value(info).unwrap();
             Response::ok_with(data)
         }
-        Request::ResizeMem { .. } => Response::error("resize_mem 尚未实现（M1 Task 3）"),
+        Request::ResizeMem { bytes } => match resize_target {
+            Some(target) => {
+                target.store(bytes, Ordering::SeqCst);
+                Response::ok()
+            }
+            None => Response::error("virtio-mem device not configured"),
+        },
     }
 }
 

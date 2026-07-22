@@ -199,24 +199,31 @@ impl VirtioDevice for Net {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::io::AsRawFd;
+
+    #[allow(unsafe_code)]
+    fn socketpair() -> (i32, i32) {
+        let mut fds = [-1i32; 2];
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(ret, 0);
+        (fds[0], fds[1])
+    }
 
     #[test]
     fn test_device_identity() {
-        let (s1, _s2) = UnixStream::pair().unwrap();
-        let fd = s1.as_raw_fd();
-        let net = Net::new_tap(fd, fd).unwrap();
+        let (rfd, wfd) = socketpair();
+        let net = Net::new_tap(rfd, wfd).unwrap();
         assert_eq!(1, net.device_id());
         assert_eq!(VIRTIO_NET_F_MAC, net.features());
         assert_eq!(2, net.queue_count());
         assert_eq!(256, net.queue_max_size());
+        // RX thread holds cloned fd, drop won't close the original.
     }
 
     #[test]
     fn test_mac_config() {
-        let (s1, _s2) = UnixStream::pair().unwrap();
-        let fd = s1.as_raw_fd();
-        let net = Net::new_tap(fd, fd).unwrap();
+        let (rfd, wfd) = socketpair();
+        let net = Net::new_tap(rfd, wfd).unwrap();
         let mut mac = [0u8; 6];
         net.read_config(0, &mut mac);
         assert_eq!([0x02, 0x54, 0x45, 0x52, 0x52, 0x41], mac);

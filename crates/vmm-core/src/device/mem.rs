@@ -72,6 +72,11 @@ impl Mem {
         }
     }
 
+    /// 获取 requested_size 的 Arc clone（供 API handler 直接写入）。
+    pub fn requested_size_arc(&self) -> Arc<AtomicU64> {
+        self.requested_size.clone()
+    }
+
     /// 处理 resize 命令：更新 requested_size，标记 config change。
     pub fn resize(&mut self, new_size_bytes: u64) {
         let clamped = new_size_bytes.min(self.region_size);
