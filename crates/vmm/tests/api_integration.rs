@@ -18,16 +18,19 @@ fn workspace_root() -> PathBuf {
 }
 
 fn start_terra_vmm(socket: &str, kernel: &str, initrd: &str) -> Child {
-    let ws_path = workspace_root()
-        .to_str()
-        .unwrap()
-        .to_string();
+    let ws_path = workspace_root().to_str().unwrap().to_string();
     Command::new("cargo")
         .args([
-            "run", "-p", "vmm", "--",
-            "--kernel", kernel,
-            "--initrd", initrd,
-            "--api-socket", socket,
+            "run",
+            "-p",
+            "vmm",
+            "--",
+            "--kernel",
+            kernel,
+            "--initrd",
+            initrd,
+            "--api-socket",
+            socket,
         ])
         .current_dir(&ws_path)
         .stdout(std::process::Stdio::null())
@@ -60,11 +63,7 @@ fn api_status_and_stop() {
     let socket = format!("/tmp/terra-api-test-{}.sock", std::process::id());
     let _ = std::fs::remove_file(&socket);
 
-    let mut child = start_terra_vmm(
-        &socket,
-        kernel.to_str().unwrap(),
-        initrd.to_str().unwrap(),
-    );
+    let mut child = start_terra_vmm(&socket, kernel.to_str().unwrap(), initrd.to_str().unwrap());
 
     // 等待 socket 出现并给 VM 充足的初始化时间。
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -74,8 +73,7 @@ fn api_status_and_stop() {
     }
     thread::sleep(Duration::from_secs(2));
 
-    let mut stream =
-        UnixStream::connect(&socket).expect("连接 socket 失败");
+    let mut stream = UnixStream::connect(&socket).expect("连接 socket 失败");
 
     // Status
     stream.write_all(b"{\"cmd\":\"status\"}\n").unwrap();

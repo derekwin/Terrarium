@@ -192,7 +192,7 @@ impl<W: io::Write> Vm<W> {
     ///
     /// `out` 是 guest 串口输出的去向。
     pub fn with_output(config: VmConfig, out: W) -> Result<Self, Error> {
-        if config.max_vcpu_count != 1 {
+        if config.max_vcpu_count == 0 {
             return Err(Error::UnsupportedVcpuCount(config.max_vcpu_count));
         }
         let mem_size = config.mem_size_mib << 20;
@@ -295,12 +295,23 @@ impl<W: io::Write> Vm<W> {
         };
 
         // boot params（zero page）。
-        let params = arch::build_boot_params(setup_header, mem_size as u64, cmdline_size, initrd)?;
+        let params = arch::build_boot_params(
+            setup_header,
+            mem_size as u64,
+            cmdline_size,
+            initrd,
+            config.max_vcpu_count,
+        )?;
         LinuxBootConfigurator::write_bootparams(
             &BootParams::new(&params, GuestAddress(arch::ZERO_PAGE_START)),
             &memory,
         )
         .map_err(Error::BootParams)?;
+
+        // MP table：多 vCPU 枚举（内核据此发现非 BSP 的 CPU）。
+        if config.max_vcpu_count > 1 {
+            arch::setup_mp_table(&memory, config.max_vcpu_count)?;
+        }
 
         // guest CPUID：不设的话扩展叶子（如 0x80000001 的 NX/LM 位）会读成全零，
         // 内核据此走到错误路径。直接用 KVM 支持的集合，M0 不做裁剪。
@@ -436,14 +447,14 @@ mod tests {
     }
 
     #[test]
-    fn test_vm_config_rejects_multi_vcpu() {
+    fn test_vm_config_rejects_zero_vcpu() {
         let config = VmConfig {
-            max_vcpu_count: 2,
+            max_vcpu_count: 0,
             ..VmConfig::new("/nonexistent")
         };
         assert!(matches!(
             Vm::new(config),
-            Err(Error::UnsupportedVcpuCount(2))
+            Err(Error::UnsupportedVcpuCount(0))
         ));
     }
 

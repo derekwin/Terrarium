@@ -50,6 +50,9 @@ pub const HIMEM_START: u64 = 0x0010_0000;
 /// EBDA 起始地址；[0, EBDA_START) 是 e820 中的第一段可用 RAM。
 pub const EBDA_START: u64 = 0x9fc00;
 
+/// MP table 起始地址（EBDA_START - 1KiB = 640KiB 基本内存末尾）。
+pub const MPTABLE_START: u64 = 0x9f800;
+
 /// e820 表项类型：可用 RAM（内核 uapi `asm/e820.h`）。
 const E820_RAM: u32 = 1;
 
@@ -496,11 +499,13 @@ pub fn add_e820_entry(
 /// - `mem_size`：guest 内存总字节数（本项目 M0 只支持单段内存、不跨越 3GiB MMIO hole）；
 /// - `cmdline_size`：命令行字节数（含 NUL）；
 /// - `initrd`：`Some((加载地址, 字节数))`。
+/// - `boot_cpus`：启动时激活的 vCPU 数（用于 MP table）。
 pub fn build_boot_params(
     setup_header: bootparam::setup_header,
     mem_size: u64,
     cmdline_size: u32,
     initrd: Option<(u32, u32)>,
+    boot_cpus: u8,
 ) -> Result<bootparam::boot_params> {
     const KERNEL_LOADER_OTHER: u8 = 0xff;
 
@@ -522,6 +527,174 @@ pub fn build_boot_params(
     add_e820_entry(&mut params, HIMEM_START, mem_size - HIMEM_START, E820_RAM)?;
 
     Ok(params)
+}
+
+/// 在 guest 内存中写入 MP table（多 vCPU 枚举）。
+///
+/// 内核通过 MP Floating Pointer Structure 发现 MP Configuration Table，
+/// 从中读取 CPU 数量和 LAPIC ID。放在 640KiB 基本内存末尾（`MPTABLE_START`）。
+pub fn setup_mp_table(mem: &impl Bytes<GuestAddress>, num_cpus: u8) -> Result<()> {
+    use vm_memory::Address;
+
+    let base = GuestAddress(MPTABLE_START);
+    let ioapic_id = num_cpus + 1;
+
+    // 辅助函数：写 u8/u16/u32/u64 小端字节
+    let write_u8 = |addr: GuestAddress, v: u8| -> Result<()> {
+        mem.write_slice(&[v], addr).map_err(|_| Error::WriteGdt)
+    };
+    let write_u16 = |addr: GuestAddress, v: u16| -> Result<()> {
+        mem.write_slice(&v.to_le_bytes(), addr)
+            .map_err(|_| Error::WriteGdt)
+    };
+    let write_u32 = |addr: GuestAddress, v: u32| -> Result<()> {
+        mem.write_slice(&v.to_le_bytes(), addr)
+            .map_err(|_| Error::WriteGdt)
+    };
+    let _write_u64 = |addr: GuestAddress, v: u64| -> Result<()> {
+        mem.write_slice(&v.to_le_bytes(), addr)
+            .map_err(|_| Error::WriteGdt)
+    };
+    let write_slice = |addr: GuestAddress, data: &[u8]| -> Result<()> {
+        mem.write_slice(data, addr).map_err(|_| Error::WriteGdt)
+    };
+
+    // 1. MP Floating Pointer Structure (16 bytes)
+    let mut pos = base;
+    // signature: "_MP_"
+    write_slice(pos, b"_MP_")?;
+    // physptr: points to MP config table (next 16 bytes)
+    write_u32(pos.unchecked_add(4), (pos.0 + 16) as u32)?;
+    // length: 1 paragraph (16 bytes)
+    write_u8(pos.unchecked_add(8), 1)?;
+    // spec: version 4
+    write_u8(pos.unchecked_add(9), 4)?;
+    // checksum placeholder (will fixup later)
+    write_u8(pos.unchecked_add(10), 0)?;
+    // feature bytes: 0
+    write_u8(pos.unchecked_add(11), 0)?;
+    write_u8(pos.unchecked_add(12), 0)?;
+    write_u8(pos.unchecked_add(13), 0)?;
+    write_u8(pos.unchecked_add(14), 0)?;
+    write_u8(pos.unchecked_add(15), 0)?;
+
+    // Fix MP floating pointer checksum
+    let mut mpf_bytes = vec![0u8; 16];
+    mem.read_slice(&mut mpf_bytes, base)
+        .map_err(|_| Error::WriteGdt)?;
+    let sum: u8 = mpf_bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b));
+    write_u8(pos.unchecked_add(10), (!sum).wrapping_add(1))?;
+
+    // 2. MP Configuration Table
+    // Skip header placeholder (44 bytes), fill later
+    let table_base = pos.unchecked_add(16);
+    let header_pos = table_base;
+    pos = table_base.unchecked_add(44);
+    let mut checksum: u8 = 0;
+
+    // Helper: record checksum for written bytes
+    let mut write_and_sum = |addr: GuestAddress, data: &[u8]| -> Result<()> {
+        write_slice(addr, data)?;
+        for b in data {
+            checksum = checksum.wrapping_add(*b);
+        }
+        Ok(())
+    };
+
+    // CPU entries (20 bytes each)
+    for cpu_id in 0..num_cpus {
+        let mut cpu_bytes = [0u8; 20];
+        cpu_bytes[0] = 0; // entry_type = processor
+        cpu_bytes[1] = cpu_id; // apic_id
+        cpu_bytes[2] = 0x14; // apic_version
+        cpu_bytes[3] = if cpu_id == 0 { 3 } else { 1 }; // flags: BSP+enabled or just enabled
+                                                        // cpu_signature: stepping 0x600
+        cpu_bytes[4..8].copy_from_slice(&0x600u32.to_le_bytes());
+        // feature_flags: FPU(0x1) | APIC(0x200) = 0x201
+        cpu_bytes[8..12].copy_from_slice(&0x201u32.to_le_bytes());
+        // reserved[8]: already zero
+        write_and_sum(pos, &cpu_bytes)?;
+        pos = pos.unchecked_add(20);
+    }
+
+    // ISA bus entry (8 bytes)
+    write_and_sum(pos, &[1, 0, b'I', b'S', b'A', b' ', b' ', b' '])?;
+    pos = pos.unchecked_add(8);
+
+    // PCI bus entry (8 bytes)
+    write_and_sum(pos, &[1, 1, b'P', b'C', b'I', b' ', b' ', b' '])?;
+    pos = pos.unchecked_add(8);
+
+    // IOAPIC entry (8 bytes)
+    let mut ioapic_bytes = [0u8; 8];
+    ioapic_bytes[0] = 2; // entry_type = IOAPIC
+    ioapic_bytes[1] = ioapic_id;
+    ioapic_bytes[2] = 0x14; // apic_version
+    ioapic_bytes[3] = 1; // flags: usable
+    ioapic_bytes[4..8].copy_from_slice(&0xfec0_0000u32.to_le_bytes());
+    write_and_sum(pos, &ioapic_bytes)?;
+    pos = pos.unchecked_add(8);
+
+    // Interrupt source entries (8 bytes each, IRQ 0-15, skip IRQ 2)
+    for i in 0..16u8 {
+        if i == 2 {
+            continue;
+        }
+        let dst_irq = if i == 0 { 2u8 } else { i };
+        let mut int_bytes = [0u8; 8];
+        int_bytes[0] = 3; // entry_type = intsrc
+        int_bytes[1] = 0; // irq_type = INT
+                          // flags: u16le, 0 (conforms to spec)
+        int_bytes[4] = 0; // src_bus = ISA
+        int_bytes[5] = i; // src_irq
+        int_bytes[6] = ioapic_id; // dst_apic
+        int_bytes[7] = dst_irq;
+        write_and_sum(pos, &int_bytes)?;
+        pos = pos.unchecked_add(8);
+    }
+
+    // Local interrupt: ExtINT (8 bytes)
+    write_and_sum(pos, &[4, 3, 0, 0, 0, 0, 0, 0])?;
+    pos = pos.unchecked_add(8);
+
+    // Local interrupt: NMI (8 bytes)
+    write_and_sum(pos, &[4, 1, 0, 0, 0, 0, 0xff, 1])?;
+    pos = pos.unchecked_add(8);
+
+    // 3. Fill MP Configuration Table header (44 bytes)
+    let table_length = pos.unchecked_offset_from(header_pos) as u16;
+    // Write header fields
+    write_slice(header_pos, b"PCMP")?;
+    write_u16(header_pos.unchecked_add(4), table_length)?;
+    write_u8(header_pos.unchecked_add(6), 4)?; // spec version
+                                               // checksum placeholder
+    write_u8(header_pos.unchecked_add(7), 0)?;
+    // OEM: "TERRA   "
+    write_slice(header_pos.unchecked_add(8), b"TERRA   ")?;
+    // Product: "TERRA       "
+    write_slice(header_pos.unchecked_add(16), b"TERRA       ")?;
+    // oemptr, oemsize
+    write_u32(header_pos.unchecked_add(28), 0)?;
+    write_u16(header_pos.unchecked_add(32), 0)?;
+    // entry_count
+    write_u16(header_pos.unchecked_add(34), num_cpus as u16 + 2 + 15 + 2)?;
+    // lapic address
+    write_u32(header_pos.unchecked_add(36), 0xfee0_0000)?;
+    // ext_length, ext_checksum, reserved
+    write_u16(header_pos.unchecked_add(40), 0)?;
+    write_u8(header_pos.unchecked_add(42), 0)?;
+    write_u8(header_pos.unchecked_add(43), 0)?;
+
+    // Fix header checksum
+    let mut header_bytes = vec![0u8; 44];
+    mem.read_slice(&mut header_bytes, header_pos)
+        .map_err(|_| Error::WriteGdt)?;
+    checksum = checksum.wrapping_add(header_bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)));
+    // Subtract placeholder checksum byte
+    checksum = checksum.wrapping_sub(header_bytes[7]);
+    write_u8(header_pos.unchecked_add(7), (!checksum).wrapping_add(1))?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -602,7 +775,7 @@ mod tests {
         };
         let mem_size: u64 = 128 << 20;
         let params =
-            build_boot_params(setup_header, mem_size, 32, Some((0x7000_0000, 0x1000))).unwrap();
+            build_boot_params(setup_header, mem_size, 32, Some((0x7000_0000, 0x1000)), 1).unwrap();
 
         // setup_header 原样保留，type_of_loader 被覆写。
         // 注意：hdr/e820_table 是 packed 字段，按值拷贝后再断言。

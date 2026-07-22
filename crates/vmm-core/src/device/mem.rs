@@ -143,7 +143,8 @@ impl Mem {
     }
 
     fn handle_plug(&self, addr: u64, nb_blocks: u16) -> io::Result<()> {
-        let offset = addr.checked_sub(MEM_HOTPLUG_BASE)
+        let offset = addr
+            .checked_sub(MEM_HOTPLUG_BASE)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "地址不在热插拔区"))?;
         let size = nb_blocks as u64 * BLOCK_SIZE;
         if offset + size > self.region_size {
@@ -151,7 +152,8 @@ impl Mem {
         }
 
         // 预填充物理页（MADV_POPULATE_WRITE）。
-        let host_addr = self.hotplug_mem
+        let host_addr = self
+            .hotplug_mem
             .get_host_address(GuestAddress(offset))
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         self.madvise_populate(host_addr as *mut u8, size as usize)?;
@@ -161,7 +163,8 @@ impl Mem {
     }
 
     fn handle_unplug(&self, addr: u64, nb_blocks: u16) -> io::Result<()> {
-        let offset = addr.checked_sub(MEM_HOTPLUG_BASE)
+        let offset = addr
+            .checked_sub(MEM_HOTPLUG_BASE)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "地址不在热插拔区"))?;
         let size = nb_blocks as u64 * BLOCK_SIZE;
         if offset + size > self.region_size {
@@ -169,7 +172,8 @@ impl Mem {
         }
 
         // 释放物理页（MADV_DONTNEED）。
-        let host_addr = self.hotplug_mem
+        let host_addr = self
+            .hotplug_mem
             .get_host_address(GuestAddress(offset))
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         self.madvise_dontneed(host_addr as *mut u8, size as usize)?;
@@ -183,7 +187,8 @@ impl Mem {
     fn handle_unplug_all(&self) -> io::Result<()> {
         let current = self.plugged_size.load(Ordering::SeqCst);
         if current > 0 {
-            let host_addr = self.hotplug_mem
+            let host_addr = self
+                .hotplug_mem
                 .get_host_address(GuestAddress(0))
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
             self.madvise_dontneed(host_addr as *mut u8, current as usize)?;
@@ -217,11 +222,7 @@ impl Mem {
         // MADV_POPULATE_WRITE 预填充页表项，减少 guest 首次访问时的缺页开销。
         #[cfg(target_os = "linux")]
         unsafe {
-            let ret = libc::madvise(
-                ptr as *mut libc::c_void,
-                len,
-                libc::MADV_POPULATE_WRITE,
-            );
+            let ret = libc::madvise(ptr as *mut libc::c_void, len, libc::MADV_POPULATE_WRITE);
             if ret != 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -241,11 +242,7 @@ impl Mem {
         // MADV_DONTNEED 释放物理页，guest 再次访问时重新缺页（返回零页）。
         #[cfg(target_os = "linux")]
         unsafe {
-            let ret = libc::madvise(
-                ptr as *mut libc::c_void,
-                len,
-                libc::MADV_DONTNEED,
-            );
+            let ret = libc::madvise(ptr as *mut libc::c_void, len, libc::MADV_DONTNEED);
             if ret != 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -355,8 +352,7 @@ mod tests {
     use super::*;
 
     fn test_mem() -> Mem {
-        let hotplug_mem =
-            GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 64 << 20)]).unwrap();
+        let hotplug_mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 64 << 20)]).unwrap();
         Mem::new(64, hotplug_mem)
     }
 
