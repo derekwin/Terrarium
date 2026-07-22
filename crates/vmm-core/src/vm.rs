@@ -16,7 +16,7 @@ use tracing::{debug, warn};
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 use crate::arch;
-use crate::device::{Blk, DeviceManager, VirtioMmio};
+use crate::device::{Blk, DeviceManager, Mem, VirtioMmio};
 use crate::rtc::{Rtc, RTC_PORT_DATA, RTC_PORT_INDEX};
 use crate::serial::{Serial, SERIAL_PORT_BASE, SERIAL_PORT_SIZE};
 
@@ -258,6 +258,19 @@ impl<W: io::Write> Vm<W> {
         if let Some(ref disk_path) = config.disk_path {
             let blk = Blk::new(disk_path).map_err(Error::Blk)?;
             let mmio = VirtioMmio::new(blk, memory.clone())?;
+            device_manager.register(Box::new(mmio))?;
+        }
+
+        if let Some(hotplug_mib) = config.mem_hotplug_max {
+            use crate::device::mem::MEM_HOTPLUG_BASE;
+            let hotplug_bytes = (hotplug_mib as u64) << 20;
+            let hotplug_mem = GuestMemoryMmap::from_ranges(&[(
+                GuestAddress(MEM_HOTPLUG_BASE),
+                hotplug_bytes as usize,
+            )])
+            .map_err(Error::GuestMemory)?;
+            let mem = Mem::new(hotplug_mib, hotplug_mem);
+            let mmio = VirtioMmio::new(mem, memory.clone())?;
             device_manager.register(Box::new(mmio))?;
         }
 

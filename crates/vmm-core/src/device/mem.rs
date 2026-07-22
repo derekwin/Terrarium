@@ -105,7 +105,7 @@ impl Mem {
         let req_addr = req_desc.addr();
         let mut req_buf = [0u8; 24];
         mem.read_slice(&mut req_buf, req_addr)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         let req_type = u16::from_le_bytes(req_buf[0..2].try_into().unwrap());
         let addr = u64::from_le_bytes(req_buf[4..12].try_into().unwrap());
@@ -133,13 +133,9 @@ impl Mem {
             VIRTIO_MEM_RESP_ERROR
         };
         mem.write_obj(resp_state.to_le_bytes(), resp_addr)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
-        if result.is_ok() {
-            Ok(2) // 响应长度 = 状态 u16 = 2 字节
-        } else {
-            Ok(2)
-        }
+        Ok(2)
     }
 
     fn handle_plug(&self, addr: u64, nb_blocks: u16) -> io::Result<()> {
@@ -155,8 +151,8 @@ impl Mem {
         let host_addr = self
             .hotplug_mem
             .get_host_address(GuestAddress(offset))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        self.madvise_populate(host_addr as *mut u8, size as usize)?;
+            .map_err(io::Error::other)?;
+        self.madvise_populate(host_addr, size as usize)?;
 
         self.plugged_size.fetch_add(size, Ordering::SeqCst);
         Ok(())
@@ -175,8 +171,8 @@ impl Mem {
         let host_addr = self
             .hotplug_mem
             .get_host_address(GuestAddress(offset))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        self.madvise_dontneed(host_addr as *mut u8, size as usize)?;
+            .map_err(io::Error::other)?;
+        self.madvise_dontneed(host_addr, size as usize)?;
 
         let current = self.plugged_size.load(Ordering::SeqCst);
         let new_size = current.saturating_sub(size);
@@ -190,8 +186,8 @@ impl Mem {
             let host_addr = self
                 .hotplug_mem
                 .get_host_address(GuestAddress(0))
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-            self.madvise_dontneed(host_addr as *mut u8, current as usize)?;
+                .map_err(io::Error::other)?;
+            self.madvise_dontneed(host_addr, current as usize)?;
             self.plugged_size.store(0, Ordering::SeqCst);
         }
         Ok(())
@@ -208,12 +204,13 @@ impl Mem {
         let usable = self.requested_size.load(Ordering::SeqCst);
 
         mem.write_obj(plugged.to_le_bytes(), resp_addr)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         mem.write_obj(usable.to_le_bytes(), resp_addr.unchecked_add(8))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         Ok(())
     }
 
+    #[allow(unsafe_code)]
     fn madvise_populate(&self, ptr: *mut u8, len: usize) -> io::Result<()> {
         if len == 0 {
             return Ok(());
@@ -234,6 +231,7 @@ impl Mem {
         Ok(())
     }
 
+    #[allow(unsafe_code)]
     fn madvise_dontneed(&self, ptr: *mut u8, len: usize) -> io::Result<()> {
         if len == 0 {
             return Ok(());
