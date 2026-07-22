@@ -71,7 +71,7 @@ fn main() {
         net_backend: None,
     };
 
-    let mut vm = Vm::new(config).expect("创建 VM 失败");
+    let vm = Vm::new(config).expect("创建 VM 失败");
     let resize_target = vm.resize_target();
     let mem_config = vm.mem_config_changed();
     let blk_cap = vm.blk_capacity();
