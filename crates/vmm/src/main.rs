@@ -47,8 +47,7 @@ fn main() {
 
     // 移除旧 socket 文件（如果存在）。
     let _ = std::fs::remove_file(&args.api_socket);
-    let listener =
-        UnixListener::bind(&args.api_socket).expect("绑定 API Unix socket 失败");
+    let listener = UnixListener::bind(&args.api_socket).expect("绑定 API Unix socket 失败");
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let mem_size = args.mem;
@@ -62,6 +61,7 @@ fn main() {
         disk_path: args.disk,
         kernel_cmdline: "console=ttyS0 reboot=k panic=-1 tsc=reliable".to_string(),
         max_vcpu_count: args.max_vcpus,
+        mem_hotplug_max: None,
     };
 
     let mut vm = Vm::new(config).expect("创建 VM 失败");
@@ -132,7 +132,13 @@ fn handle_client(
             }
         };
 
-        let response = handle_request(request, stop_flag, mem_size_mib, max_vcpu_count, disk_attached);
+        let response = handle_request(
+            request,
+            stop_flag,
+            mem_size_mib,
+            max_vcpu_count,
+            disk_attached,
+        );
         if send_response(&mut stream, &response).is_err() {
             break;
         }
@@ -160,9 +166,7 @@ fn handle_request(
             let data = serde_json::to_value(info).unwrap();
             Response::ok_with(data)
         }
-        Request::ResizeMem { .. } => {
-            Response::error("resize_mem 尚未实现（M1 Task 3）")
-        }
+        Request::ResizeMem { .. } => Response::error("resize_mem 尚未实现（M1 Task 3）"),
     }
 }
 
