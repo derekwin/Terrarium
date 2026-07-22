@@ -3,9 +3,12 @@
 //! 流程：`Vm::new` 完成「建 VM → 建内存 → 建 irqchip → 加载内核/initrd →
 //! 写 boot params → 初始化 vCPU」；`Vm::run` 进入 vCPU 退出处理循环。
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
 
 use kvm_bindings::{kvm_pit_config, kvm_userspace_memory_region};
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
@@ -181,6 +184,10 @@ pub struct Vm<W: io::Write = io::Stdout> {
     // MMIO 设备（virtio-mmio）；M1 Task 0 尚无具体设备注册，管理器为空，
     // 空管理器不改变任何行为（cmdline 为空串、无 MMIO 分发、无 IRQ）。
     device_manager: DeviceManager,
+    /// 串口输入缓冲（host stdin → guest serial）。宿主侧注入，run 循环每轮消费。
+    serial_input: Arc<Mutex<VecDeque<u8>>>,
+    /// virtio-mem resize 目标大小（API handler 写入，Mem 设备读取）。
+    resize_target: Option<Arc<AtomicU64>>,
 }
 
 impl Vm<io::Stdout> {
@@ -257,6 +264,7 @@ impl<W: io::Write> Vm<W> {
         // MMIO 设备管理器：注册 virtio-blk（若配置了 disk_path），
         // 其余设备在后续里程碑注册。
         let mut device_manager = DeviceManager::new();
+        let mut resize_target: Option<Arc<AtomicU64>> = None;
 
         if let Some(ref disk_path) = config.disk_path {
             let blk = Blk::new(disk_path).map_err(Error::Blk)?;
@@ -273,6 +281,7 @@ impl<W: io::Write> Vm<W> {
             )])
             .map_err(Error::GuestMemory)?;
             let mem = Mem::new(hotplug_mib, hotplug_mem);
+            resize_target = Some(mem.requested_size_arc());
             let mmio = VirtioMmio::new(mem, memory.clone())?;
             device_manager.register(Box::new(mmio))?;
         }
@@ -365,7 +374,19 @@ impl<W: io::Write> Vm<W> {
             serial: Serial::new(out),
             rtc: Rtc::new(),
             device_manager,
+            serial_input: Arc::new(Mutex::new(VecDeque::new())),
+            resize_target,
         })
+    }
+
+    /// 获取串口输入缓冲（供 host 侧注入 stdin 数据）。
+    pub fn serial_input(&self) -> Arc<Mutex<VecDeque<u8>>> {
+        self.serial_input.clone()
+    }
+
+    /// 获取 virtio-mem resize 目标（供 API handler 写入）。
+    pub fn resize_target(&self) -> Option<Arc<AtomicU64>> {
+        self.resize_target.clone()
     }
 
     /// 运行 vCPU 直到 guest 关机（KVM_EXIT_SHUTDOWN）。
@@ -381,6 +402,7 @@ impl<W: io::Write> Vm<W> {
             vm_fd,
             rtc,
             device_manager,
+            serial_input,
             ..
         } = self;
         let mut last_irq_level = false;
@@ -450,6 +472,12 @@ impl<W: io::Write> Vm<W> {
                     vm_fd.set_irq_line(irq, level).map_err(Error::SetIrqLine)?;
                     device_irq_levels[idx] = level;
                 }
+            }
+            // 从宿主注入串口输入（host stdin → guest serial）。
+            let mut input = serial_input.lock().unwrap();
+            if !input.is_empty() {
+                let data: Vec<u8> = input.drain(..).collect();
+                serial.enqueue_input(&data);
             }
         }
     }
