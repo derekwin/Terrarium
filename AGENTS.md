@@ -114,29 +114,48 @@ balloon 列为可选 backlog，非验收项。
   - 中断：`KVM_IRQ_LINE` 经 in-kernel irqchip 注入，ISR 读清后按电平语义重算
   - 依赖新增（rust-vmm 官方，符合依赖基线，动工时说明）：`virtio-queue`（+`virtio-bindings`）——描述符链解析自己重写易错且无益
   - ADR 0003：virtio-mmio 地址/IRQ 布局与中断模型
-- **Task 1 — virtio-blk + rootfs**：
-  - xtask 新增 `cargo xtask rootfs`：复用静态 busybox，`mkfs.ext4` + `debugfs` 填充（免 root）产出 `target/guest/rootfs.ext4`
-  - 内核片段加 `CONFIG_VIRTIO_BLK=y`、`CONFIG_EXT4_FS=y`
-  - vmm-core：virtio-blk 设备，后端为宿主普通文件；vCPU 线程内同步 IO（M1 不引入 event loop，设备增多后再议）
-  - `/init` 改为挂载 `/dev/vda` 后 `switch_root`；blk smoke test（guest 写文件 → 重开 VM 读回）
-- **Task 2 — terra-vmm 薄壳 + vmm-api socket**：
-  - `crates/vmm` 由 boot 示例演化为 terra-vmm：每 VM 一进程，监听 Unix socket（路径经 argv 指定），VMM 进程内不做 REST
-  - vmm-api：定义请求/响应协议。建议 Unix seqpacket + serde_json 文本帧（新增 `serde`/`serde_json` 依赖，理由：协议序列化手写易错）；若对依赖敏感可退化为定长二进制帧——动工前定 ADR 0004
-  - M1 命令面：`stop`、`status`、`resize_mem`（Task 3 接入）；VM 配置随进程启动参数传入
-  - 测试替身：集成测试直接用 Unix socket 对话，不建独立 controller 进程（controller 属 M2）
-- **Task 3 — virtio-mem 内存伸缩**：
-  - 地址空间改两段：低端 `[0, 3GiB)` + virtio-mem 热插拔区（起点与上限在 VM 配置预声明，即「启动预创建」）
-  - virtio-mem 设备启动即挂载、`requested_size`=初始内存；resize 走 config change，不新增设备、不热插拔
-  - 内核片段加 `CONFIG_VIRTIO_MEM=y` 及 `CONFIG_MEMORY_HOTPLUG` 相关系列
-  - e820 预留热插拔区（virtio-mem 自枚举，无需 ACPI）
-  - `resize_mem` API 落地：guest 内 `free` 可见、不重启；mem smoke test
-- **Task 4 — 多 vCPU 与 CPU 逻辑上下线**：
-  - MP table（ADR 0002 已注明需求）；`max_vcpu_count` 放开；每 vCPU 一线程，设备共享加锁
-  - 全部 vCPU 启动即创建（预创建），guest 内经 `/sys/devices/system/cpu/cpuN/online` 上下线
-  - 内核片段加 `CONFIG_SMP=y`、`CONFIG_HOTPLUG_CPU=y`
-- **Task 5 — vsock**：
-  - virtio-vsock 设备，桥到宿主 Unix domain socket（Firecracker 模型）；内核片段加 `CONFIG_VIRTIO_VSOCKETS=y`
-  - smoke：guest vsock 客户端 ↔ host 端点双向收发（为 M2 sandboxd / eBPF 上报铺路）
+- **Task 1 — virtio-blk + rootfs**（实现引导）：
+  - **trait 接缝调整（先做）**：Task 0 的 `VirtioDevice::queue_notify(queue_index)` 拿不到队列对象。把签名改成可访问队列与内存的形态，建议 `fn queue_notify(&mut self, queue_index: usize, queue: &mut Queue, mem: &GuestMemoryMmap) -> u32`；同步改 `VirtioMmio` 调用点与全部 mock/测试。最小改动，不做泛化
+  - **virtio-blk 设备**（新文件 `crates/vmm-core/src/device/blk.rs`，实现 `VirtioDevice`）：device_id=2；单队列（size 128）；features 只给 `VIRTIO_F_VERSION_1` + `VIRTIO_BLK_F_FLUSH`(bit 9)。config space 偏移 0 起 u64 capacity（512 字节扇区数）。请求格式（virtio-blk spec）：描述符链 = [16B 请求头 type:u32le, ioprio:u32le, sector:u64le] [data…] [1B 状态]；type IN=0（文件 → data）/ OUT=1（data → 文件）/ FLUSH=4（fdatasync）；状态 OK=0 / IOERR=1 / UNSUPP=2；越界 sector → IOERR。处理完 `add_used(head, written_len)` 并返回 `ISR_USED_BUFFER`。后端 = 宿主普通文件（`std::os::unix::fs::FileExt::read_at/write_at`，零新依赖），capacity = 文件长度/512
+  - **xtask rootfs**：新子命令 `cargo xtask rootfs` 产出 `target/guest/rootfs.ext4`（64MiB）：`mkfs.ext4` 建空镜像，`debugfs -w` 填充（免 root；先 `command -v mkfs.ext4 debugfs` 确认可用）：写入 busybox 静态二进制为 /bin/busybox，`symlink` 建 /bin/sh。busybox 二进制来自 kernel 子命令的构建产物（`target/guest/src/busybox-*/busybox`），rootfs 依赖 kernel 先跑过
+  - **内核片段**（xtask `KERNEL_CONFIG_FRAGMENT`）：加 `CONFIG_VIRTIO_BLK=y`、`CONFIG_EXT4_FS=y`；增量重编即可
+  - **/init 改造**（xtask 生成 initramfs 处；/newroot 目录与 switch_root applet 链接加入 spec）：
+    ```sh
+    #!/bin/sh
+    /bin/mount -t devtmpfs devtmpfs /dev
+    if [ -b /dev/vda ]; then
+      /bin/mount -t ext4 /dev/vda /newroot || exec /bin/sh
+      if [ -f /newroot/terra_persist ]; then echo TERRA_PERSIST_OK; else echo first > /newroot/terra_persist; echo TERRA_FIRST_WRITE_OK; fi
+      exec /bin/switch_root /newroot /bin/sh
+    fi
+    echo TERRA_GUEST_SHELL_READY
+    exec /bin/sh
+    ```
+  - **接入**：`VmConfig` 加 `disk_path: Option<PathBuf>`（M1 单盘，不做设备列表抽象）；Some 时建 blk 设备包 `VirtioMmio` 注册进 `DeviceManager`；boot 示例加 `--disk`
+  - **blk smoke**：复制 rootfs 到临时目录，首启断言 `TERRA_FIRST_WRITE_OK`、同副本再启断言 `TERRA_PERSIST_OK`；/dev/kvm 或产物缺失时跳过
+  - 单元测试：GuestMemoryMmap + `std::env::temp_dir()` 临时文件，手工构造队列与请求链，覆盖 IN/OUT/FLUSH/越界；不加 dev-dependency
+- **Task 2 — terra-vmm 薄壳 + vmm-api socket**（实现引导）：
+  - `crates/vmm` 的占位 main 演化为 terra-vmm：argv 携带完整 VM 配置（--kernel/--initrd/--disk/--mem/--max-vcpus/--api-socket <path>）+ 串口输入接线（host stdin → serial `enqueue_input`，M0 留的接口在此接通）；监听 Unix socket
+  - vmm-api crate：请求/响应协议。建议 Unix seqpacket + serde_json 文本帧——**新增 `serde`/`serde_json` 依赖需在 ADR 0004 写明理由**（备选：定长二进制帧，零新依赖）。M1 命令面：`stop`（干净退出进程）、`status`（内存/vCPU/设备清单与运行状态）、`resize_mem {bytes}`（Task 3 接入，Task 2 先返回未实现错误）
+  - 控制线程与 vCPU 线程的关系：API 线程读共享状态用 `Arc<Mutex<…>>`；`stop` 用「向 vCPU 线程发信号使其 KVM_RUN 返回 EINTR + 原子退出标志」或 `VmFd` 的 kick 语义，别用 detach 僵尸线程
+  - 测试：集成测试直接 Unix socket 对话 terra-vmm 子进程（不建 controller）；协议编解码纯逻辑单测
+- **Task 3 — virtio-mem 内存伸缩**（实现引导）：
+  - 地址空间两段：低端 `[0, 3GiB)`（现状）+ 热插拔区建议 `[4GiB, 4GiB+mem_hotplug_max)`，`mem_hotplug_max` 进 VmConfig（预声明上限=「启动预创建」）；e820 不报热插拔区（保留），virtio-mem 自枚举
+  - 设备（virtio spec 1.1，device_id=14）：config space 含 block_size（建议 2MiB）、usable_region_size、requested_size 等；requestq 处理 guest 的 PLUG/UNPLUG/STATE 请求；**resize = VMM 改 config 里 requested_size → 发 config change 中断（ISR bit1，Task 0 的 `pending_interrupts()` 路径 + ConfigGeneration 递增）→ guest 驱动重读配置并 plug/unplug**
+  - 宿主侧后端：热插拔区用独立 memslot（anon mmap），plug 时 `MADV_POPULATE_WRITE` 或惰性 fault，unplug 时 `MADV_DONTNEED` 回收
+  - 内核片段：`CONFIG_VIRTIO_MEM=y`、`CONFIG_MEMORY_HOTPLUG=y`、`CONFIG_MEMORY_HOTREMOVE=y`（注意依赖链，olddefconfig 后确认实际生效值）
+  - `resize_mem` API 接通；mem smoke：启动 → resize 增大 → guest `free` 可见 → resize 减小 → 不重启完成
+- **Task 4 — 多 vCPU 与 CPU 逻辑上下线**（实现引导）：
+  - MP table：放 640KiB 基本内存末尾 1KiB（ADR 0002 注明）；可从 dragonball `dbs_boot/src/x86_64/mptable.rs` 移植（文件头标来源 + 登记 THIRD-PARTY）
+  - `max_vcpu_count` 放开：每 vCPU 一个 OS 线程跑各自的 KVM_RUN 循环；vcpus[0] 之外的 vCPU 也需要完整 regs/sregs/msrs/fpu/lint 初始化（ap 起点：实模式 sipi 语义由 KVM 处理，BSP 先跑、内核经 STARTUP IPI 拉 AP）
+  - 共享设备：`DeviceManager`（含队列）包 `Mutex`，所有 vCPU 线程的退出处理共用；virtio-queue 单线程语义由外层锁保证
+  - 内核片段：`CONFIG_SMP=y`、`CONFIG_HOTPLUG_CPU=y`、放开 `CONFIG_NR_CPUS`；CPU 上下线由 guest 内写 `/sys/devices/system/cpu/cpuN/online`（/init 脚本或 vsock 命令触发）
+  - smoke：2 vCPU 启动，guest `nproc`/`/proc/cpuinfo` 验证，下线再上线路径走通
+- **Task 5 — vsock**（实现引导）：
+  - virtio-vsock（device_id=13）：3 队列（rx/tx/event）；features 只给 `VIRTIO_F_VERSION_1`（M1 不做 stream seqpacket 区分的花哨语义，先 stream）
+  - 模型按 Firecracker：guest cid=3（host=2），guest 连接的 (port) 映射到宿主 Unix socket 路径；数据包格式见 virtio-vsock spec（44 字节头：src/dst cid、port、type、op、len、flags 等）
+  - 内核片段：`CONFIG_VSOCKETS=y`、`CONFIG_VIRTIO_VSOCKETS=y`
+  - smoke：host 起 Unix socket 端点，guest 内 busybox `nc` 风格小程序（initramfs 里可用 busybox `nc` 的 vsock 变体或自写 5 行 C 静态编译进 rootfs）双向收发
 - **Task 6 — 测试、benchmark 与文档收尾**：全部 smoke 常驻 `cargo test`；冷启动 ≤1s 回归（带默认设备）；ADR 补齐；AGENTS.md 状态更新
 
 ### M1 验收标准
@@ -146,6 +165,30 @@ balloon 列为可选 backlog，非验收项。
 3. `resize_mem` 经 API socket 下发，guest 内 `free` 可见、不重启
 4. 多 vCPU 启动，guest 内 CPU 上下线生效
 5. `cargo test` 全过；冷启动 ≤1s（带默认设备）不回归；clippy / fmt 干净；ADR 0003 / 0004 就位
+
+## 6.2 M1 实现须知（工具链 / API 事实 / 已踩的坑）
+
+**工具链与环境**
+
+- 必须用 `export PATH="$HOME/.cargo/bin:$PATH"` 后的 cargo（rustup stable）；`/usr/bin/cargo` 是 1.75 系统旧版，会报 `edition2024` 错误
+- 本机有 `/dev/kvm` 可用；guest 产物在 `target/guest/`（不进 git）：改 xtask 的内核片段或 /init 后重跑 `cargo xtask kernel`（增量编译，约 1~2 分钟）；rootfs 产物由 `cargo xtask rootfs`（Task 1 新增）产出
+- 参考源码已稀疏克隆在 `target/ref/kata-containers/`（commit `809ab7d`）：dragonball 的 dbs_boot / dbs_arch / dbs_virtio_devices 等。许可纪律见第 3 节：可整文件/片段拷贝，但必须文件头标来源 + 登记 THIRD-PARTY
+- 门禁（每个 commit 前必跑）：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`
+- commit：每 Task 一个，conventional commits 英文；只提交值得上传 GitHub 的内容（源码/文档/配置；target/ 已 gitignore，别往里放别的东西）
+
+**关键 crate API 事实（实测，避免重踩）**
+
+- `vm-memory` 必须全树单一版本（现 0.18；linux-loader 0.14 与 virtio-queue 0.18 都依赖 0.18）。`GuestMemoryMmap` 可廉价 Clone（内部 Arc）
+- `kvm-ioctls` 0.25 不再 re-export kvm-bindings，KVM 结构体从 `kvm-bindings` 0.14 直接拿
+- `virtio-queue` 0.18：`Queue` 操作走 `QueueT` trait（`Queue::new(max_size)` 要求 2 的幂且 ≤32768）；`set_size`/`set_*_address` **静默失败**（错误只进 `log` crate 的日志），队列合法性只能靠 `is_valid(&mem)` 在 QueueReady 时校验；EVENT_IDX 常量在 virtio-bindings 里叫 `VIRTIO_RING_F_EVENT_IDX`，`VIRTIO_F_VERSION_1` 在 `virtio_bindings::bindings::virtio_config`
+
+**KVM / 启动链路已踩的坑（细节见 ADR 0002）**
+
+- VMCS 的 segment limit 必须按 G 位缩放后写入，KVM 不代劳（M0 最大坑，`kvm_segment_from_gdt` 已处理）
+- irqchip 与 PIT（`create_pit2` + `KVM_PIT_SPEAKER_DUMMY`）必须先于 vCPU 创建；LAPIC LINT0=ExtINT/LINT1=NMI 必须显式设（`arch::set_lint`）
+- 串口：Linux 8250 tty 写路径要 THRE 中断 + IRQ4（已接）；loopback 自检要 MCR_LOOP 环回（已接）；RTC 必须有 mc146818 仿真（`rtc.rs`），否则内核每次读时钟等 1.26s
+- 内核侧耗时大头是设备仿真缺失与 PIO 密集型子系统（PNP 等），裁剪项都在 xtask 内核片段里并有注释；加新设备时优先检查对应 `CONFIG_*` 是否要补
+- 遗留已知项：guest 内 `serial8250_init` 耗 ~260ms 根因未定位（记在第 8 节 M0 验收现状），不阻塞开发
 
 ## 7. 测试策略
 
