@@ -10,11 +10,13 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use virtio_queue::{DescriptorChain, Queue, QueueT};
 use vm_memory::{Bytes, GuestMemoryMmap};
 
-use super::virtio_mmio::{VirtioDevice, ISR_USED_BUFFER};
+use super::virtio_mmio::{VirtioDevice, ISR_CONFIG_CHANGE, ISR_USED_BUFFER};
 
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
@@ -28,7 +30,8 @@ const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
 
 pub struct Blk {
     file: File,
-    capacity: u64,
+    capacity: Arc<AtomicU64>,
+    config_changed: Arc<AtomicBool>,
 }
 
 impl Blk {
@@ -37,8 +40,21 @@ impl Blk {
         let file_len = file.metadata()?.len();
         Ok(Blk {
             file,
-            capacity: file_len / 512,
+            capacity: Arc::new(AtomicU64::new(file_len / 512)),
+            config_changed: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub fn capacity_arc(&self) -> Arc<AtomicU64> {
+        self.capacity.clone()
+    }
+    pub fn config_changed_arc(&self) -> Arc<AtomicBool> {
+        self.config_changed.clone()
+    }
+
+    pub fn resize(&self, new_bytes: u64) {
+        self.capacity.store(new_bytes / 512, Ordering::SeqCst);
+        self.config_changed.store(true, Ordering::SeqCst);
     }
 
     fn process_one(&mut self, chain: DescriptorChain<&GuestMemoryMmap>) -> io::Result<usize> {
@@ -104,7 +120,7 @@ impl Blk {
         let mut offset = sector
             .checked_mul(512)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "扇区号溢出"))?;
-        let file_len = self.capacity * 512;
+        let file_len = self.capacity.load(Ordering::SeqCst) * 512;
         let mut total = 0usize;
 
         for (i, desc) in descs.iter().enumerate() {
@@ -138,7 +154,7 @@ impl Blk {
         let mut offset = sector
             .checked_mul(512)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "扇区号溢出"))?;
-        let file_len = self.capacity * 512;
+        let file_len = self.capacity.load(Ordering::SeqCst) * 512;
         let mut total = 0usize;
 
         for (i, desc) in descs.iter().enumerate() {
@@ -181,7 +197,7 @@ impl VirtioDevice for Blk {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        let cap_bytes = self.capacity.to_le_bytes();
+        let cap_bytes = self.capacity.load(Ordering::SeqCst).to_le_bytes();
         let start = offset as usize;
         if start < 8 {
             let end = (start + data.len()).min(8);
@@ -208,6 +224,14 @@ impl VirtioDevice for Blk {
 
         if used_any {
             ISR_USED_BUFFER
+        } else {
+            0
+        }
+    }
+
+    fn pending_interrupts(&self) -> u32 {
+        if self.config_changed.swap(false, Ordering::SeqCst) {
+            ISR_CONFIG_CHANGE
         } else {
             0
         }
@@ -312,7 +336,7 @@ mod tests {
         let disk_path = test_file_path();
         let _disk = make_disk(&disk_path);
         let (_mem, _queue, blk) = setup(&disk_path);
-        assert_eq!(2048, blk.capacity);
+        assert_eq!(2048, blk.capacity.load(Ordering::SeqCst));
 
         let mut buf = [0xffu8; 8];
         blk.read_config(0, &mut buf);

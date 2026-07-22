@@ -74,6 +74,8 @@ fn main() {
     let mut vm = Vm::new(config).expect("创建 VM 失败");
     let resize_target = vm.resize_target();
     let mem_config = vm.mem_config_changed();
+    let blk_cap = vm.blk_capacity();
+    let blk_cfg = vm.blk_config_changed();
     let serial_input = vm.serial_input();
 
     // 串口输入线程：host stdin → guest serial。
@@ -107,6 +109,8 @@ fn main() {
     let stop_api = stop_flag.clone();
     let res = resize_target.clone();
     let config = mem_config.clone();
+    let bcap = blk_cap.clone();
+    let bcfg = blk_cfg.clone();
     let api_handle = thread::spawn(move || loop {
         if stop_api.load(Ordering::SeqCst) {
             break;
@@ -121,6 +125,8 @@ fn main() {
                     disk_attached,
                     &res,
                     &config,
+                    &bcap,
+                    &bcfg,
                 );
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -142,6 +148,7 @@ fn main() {
     let _ = std::fs::remove_file(&args.api_socket);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_client(
     mut stream: UnixStream,
     stop_flag: &AtomicBool,
@@ -150,6 +157,8 @@ fn handle_client(
     disk_attached: bool,
     resize_target: &Option<Arc<AtomicU64>>,
     mem_config: &Option<Arc<AtomicBool>>,
+    blk_cap: &Option<Arc<AtomicU64>>,
+    blk_cfg: &Option<Arc<AtomicBool>>,
 ) {
     let reader = BufReader::new(stream.try_clone().unwrap());
     for line in reader.lines() {
@@ -178,6 +187,8 @@ fn handle_client(
             disk_attached,
             resize_target,
             mem_config,
+            blk_cap,
+            blk_cfg,
         );
         if send_response(&mut stream, &response).is_err() {
             break;
@@ -185,6 +196,7 @@ fn handle_client(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_request(
     req: Request,
     stop_flag: &AtomicBool,
@@ -193,6 +205,8 @@ fn handle_request(
     disk_attached: bool,
     resize_target: &Option<Arc<AtomicU64>>,
     mem_config: &Option<Arc<AtomicBool>>,
+    blk_cap: &Option<Arc<AtomicU64>>,
+    blk_cfg: &Option<Arc<AtomicBool>>,
 ) -> Response {
     match req {
         Request::Stop => {
@@ -215,6 +229,14 @@ fn handle_request(
                 Response::ok()
             }
             _ => Response::error("virtio-mem device not configured"),
+        },
+        Request::ResizeDisk { bytes } => match (blk_cap, blk_cfg) {
+            (Some(cap), Some(cfg)) => {
+                cap.store(bytes / 512, Ordering::SeqCst);
+                cfg.store(true, Ordering::SeqCst);
+                Response::ok()
+            }
+            _ => Response::error("virtio-blk device not configured"),
         },
     }
 }
