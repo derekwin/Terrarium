@@ -498,8 +498,9 @@ impl<W: io::Write + Send + 'static> Vm<W> {
                                 continue
                             }
                             Err(e) => {
-                                debug!(err=%e, "AP vCPU 退出");
-                                break;
+                                warn!(err=%e, "AP vCPU 出错，1s 后重试");
+                                thread::sleep(std::time::Duration::from_secs(1));
+                                // continue: KVM_RUN 重试
                             }
                         }
                     }

@@ -22,6 +22,11 @@ const VIRTIO_ID_NET: u32 = 1;
 const VIRTIO_NET_F_MAC: u64 = 1 << 5;
 const VIRTIO_NET_F_MRG_RXBUF: u64 = 1 << 15;
 const VIRTIO_NET_F_STATUS: u64 = 1 << 16;
+const VIRTIO_NET_F_MQ: u64 = 1 << 22;
+const VIRTIO_NET_F_CSUM: u64 = 1 << 0;
+const VIRTIO_NET_F_GUEST_CSUM: u64 = 1 << 1;
+const VIRTIO_NET_F_GUEST_TSO4: u64 = 1 << 7;
+const VIRTIO_NET_F_HOST_TSO4: u64 = 1 << 11;
 const VIRTIO_NET_S_LINK_UP: u16 = 1;
 
 const RX_QUEUE: usize = 0;
@@ -225,7 +230,14 @@ impl VirtioDevice for Net {
         VIRTIO_ID_NET
     }
     fn features(&self) -> u64 {
-        VIRTIO_NET_F_MAC | VIRTIO_NET_F_MRG_RXBUF | VIRTIO_NET_F_STATUS
+        VIRTIO_NET_F_MAC
+            | VIRTIO_NET_F_MRG_RXBUF
+            | VIRTIO_NET_F_STATUS
+            | VIRTIO_NET_F_MQ
+            | VIRTIO_NET_F_CSUM
+            | VIRTIO_NET_F_GUEST_CSUM
+            | VIRTIO_NET_F_GUEST_TSO4
+            | VIRTIO_NET_F_HOST_TSO4
     }
     fn queue_count(&self) -> usize {
         2

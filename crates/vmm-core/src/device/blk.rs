@@ -27,6 +27,7 @@ const VIRTIO_BLK_S_IOERR: u8 = 1;
 const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
 const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
+const VIRTIO_BLK_F_DISCARD: u64 = 1 << 13;
 
 pub struct Blk {
     file: File,
@@ -185,7 +186,7 @@ impl VirtioDevice for Blk {
     }
 
     fn features(&self) -> u64 {
-        VIRTIO_BLK_F_FLUSH
+        VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_DISCARD
     }
 
     fn queue_count(&self) -> usize {
@@ -326,7 +327,8 @@ mod tests {
         let _disk = make_disk(&disk_path);
         let (_mem, _queue, blk) = setup(&disk_path);
         assert_eq!(2, blk.device_id());
-        assert_eq!(VIRTIO_BLK_F_FLUSH, blk.features());
+        assert!(blk.features() & VIRTIO_BLK_F_FLUSH != 0);
+        assert!(blk.features() & VIRTIO_BLK_F_DISCARD != 0);
         assert_eq!(1, blk.queue_count());
         assert_eq!(128, blk.queue_max_size());
     }

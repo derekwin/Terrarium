@@ -537,11 +537,13 @@ pub fn normalize_cpuid(cpuid: &mut kvm_bindings::CpuId) {
     for entry in cpuid.as_mut_slice().iter_mut() {
         match entry.function {
             0x1 => {
-                // ECX: clear hypervisor bit (bit 31) — guest sees real CPU model.
+                // ECX: clear hypervisor bit (bit 31)
                 entry.ecx &= !(1u32 << 31);
+                // EAX: normalize family/model/stepping for migration compatibility.
+                // Use family=6, model=6, stepping=3 (KVM defaults).
+                entry.eax = (entry.eax & 0x000f_0000) | 0x0000_0633;
             }
             0x4000_0001 => {
-                // KVM PV feature bits: clear all (guest shouldn't see PV features).
                 entry.eax = 0;
             }
             _ => {}
