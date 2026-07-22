@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use kvm_bindings::{kvm_pit_config, kvm_userspace_memory_region};
@@ -188,6 +188,8 @@ pub struct Vm<W: io::Write = io::Stdout> {
     serial_input: Arc<Mutex<VecDeque<u8>>>,
     /// virtio-mem resize 目标大小（API handler 写入，Mem 设备读取）。
     resize_target: Option<Arc<AtomicU64>>,
+    /// virtio-mem config change 信号（API handler 置位，Mem 设备消费）。
+    mem_config_changed: Option<Arc<AtomicBool>>,
 }
 
 impl Vm<io::Stdout> {
@@ -265,6 +267,7 @@ impl<W: io::Write> Vm<W> {
         // 其余设备在后续里程碑注册。
         let mut device_manager = DeviceManager::new();
         let mut resize_target: Option<Arc<AtomicU64>> = None;
+        let mut mem_config_changed: Option<Arc<AtomicBool>> = None;
 
         if let Some(ref disk_path) = config.disk_path {
             let blk = Blk::new(disk_path).map_err(Error::Blk)?;
@@ -282,6 +285,7 @@ impl<W: io::Write> Vm<W> {
             .map_err(Error::GuestMemory)?;
             let mem = Mem::new(hotplug_mib, hotplug_mem);
             resize_target = Some(mem.requested_size_arc());
+            mem_config_changed = Some(mem.config_changed_arc());
             let mmio = VirtioMmio::new(mem, memory.clone())?;
             device_manager.register(Box::new(mmio))?;
         }
@@ -376,6 +380,7 @@ impl<W: io::Write> Vm<W> {
             device_manager,
             serial_input: Arc::new(Mutex::new(VecDeque::new())),
             resize_target,
+            mem_config_changed,
         })
     }
 
@@ -387,6 +392,10 @@ impl<W: io::Write> Vm<W> {
     /// 获取 virtio-mem resize 目标（供 API handler 写入）。
     pub fn resize_target(&self) -> Option<Arc<AtomicU64>> {
         self.resize_target.clone()
+    }
+
+    pub fn mem_config_changed(&self) -> Option<Arc<AtomicBool>> {
+        self.mem_config_changed.clone()
     }
 
     /// 运行 vCPU 直到 guest 关机（KVM_EXIT_SHUTDOWN）。

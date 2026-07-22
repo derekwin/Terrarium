@@ -70,6 +70,7 @@ fn main() {
 
     let mut vm = Vm::new(config).expect("创建 VM 失败");
     let resize_target = vm.resize_target();
+    let mem_config = vm.mem_config_changed();
     let serial_input = vm.serial_input();
 
     // 串口输入线程：host stdin → guest serial。
@@ -102,13 +103,22 @@ fn main() {
         .expect("设置 nonblocking 失败");
     let stop_api = stop_flag.clone();
     let res = resize_target.clone();
+    let config = mem_config.clone();
     let api_handle = thread::spawn(move || loop {
         if stop_api.load(Ordering::SeqCst) {
             break;
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                handle_client(stream, &stop_api, mem_size, max_vcpus, disk_attached, &res);
+                handle_client(
+                    stream,
+                    &stop_api,
+                    mem_size,
+                    max_vcpus,
+                    disk_attached,
+                    &res,
+                    &config,
+                );
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(std::time::Duration::from_millis(100));
@@ -136,6 +146,7 @@ fn handle_client(
     max_vcpu_count: u8,
     disk_attached: bool,
     resize_target: &Option<Arc<AtomicU64>>,
+    mem_config: &Option<Arc<AtomicBool>>,
 ) {
     let reader = BufReader::new(stream.try_clone().unwrap());
     for line in reader.lines() {
@@ -163,6 +174,7 @@ fn handle_client(
             max_vcpu_count,
             disk_attached,
             resize_target,
+            mem_config,
         );
         if send_response(&mut stream, &response).is_err() {
             break;
@@ -177,6 +189,7 @@ fn handle_request(
     max_vcpu_count: u8,
     disk_attached: bool,
     resize_target: &Option<Arc<AtomicU64>>,
+    mem_config: &Option<Arc<AtomicBool>>,
 ) -> Response {
     match req {
         Request::Stop => {
@@ -192,12 +205,13 @@ fn handle_request(
             let data = serde_json::to_value(info).unwrap();
             Response::ok_with(data)
         }
-        Request::ResizeMem { bytes } => match resize_target {
-            Some(target) => {
+        Request::ResizeMem { bytes } => match (resize_target, mem_config) {
+            (Some(target), Some(config)) => {
                 target.store(bytes, Ordering::SeqCst);
+                config.store(true, Ordering::SeqCst);
                 Response::ok()
             }
-            None => Response::error("virtio-mem device not configured"),
+            _ => Response::error("virtio-mem device not configured"),
         },
     }
 }

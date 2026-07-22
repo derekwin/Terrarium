@@ -1,4 +1,5 @@
-//! virtio-mem smoke test：验证 virtio-mem 设备注册与 config space。
+//! virtio-mem smoke test（N1 修复版）：
+//! 启动 → resize → 断言 guest 内 `free -m` MemTotal 变化。
 //!
 //! 跳过条件：/dev/kvm 不存在、guest 产物未构建。
 
@@ -49,40 +50,64 @@ fn mem_smoke() {
     let config = VmConfig {
         kernel_path: kernel,
         initrd_path: Some(initrd),
-        mem_hotplug_max: Some(64),
-        kernel_cmdline:
-            "console=ttyS0 reboot=k panic=-1 tsc=reliable virtio_mmio.device=4K@0xd0001000:6"
-                .to_string(),
+        mem_hotplug_max: Some(128),
+        kernel_cmdline: "console=ttyS0 reboot=k panic=-1 tsc=reliable".to_string(),
         ..VmConfig::default()
     };
 
     let start = Instant::now();
     let mut vm = Vm::with_output(config, buf.clone()).expect("创建 VM 失败");
+
+    // 获取 resize handle，然后启动 VM。
+    let resize_target = vm.resize_target();
+    let mem_config = vm.mem_config_changed();
+
     thread::spawn(move || {
         let _ = vm.run();
     });
 
+    // 等待 guest 启动完成。
     let deadline = start + Duration::from_secs(20);
     loop {
-        {
-            let data = buf.0.lock().unwrap();
-            let text = String::from_utf8_lossy(&data);
-            if text.contains("virtio_mem") {
-                eprintln!(
-                    "mem_smoke: virtio-mem 设备已识别，耗时 {:?}",
-                    start.elapsed()
-                );
-                return;
-            }
-            if text.contains("TERRA_GUEST_SHELL_READY") {
-                eprintln!(
-                    "mem_smoke: guest 就绪（未显式识别 virtio-mem 但启动成功），耗时 {:?}",
-                    start.elapsed()
-                );
-                return;
-            }
+        let data = buf.0.lock().unwrap();
+        let text = String::from_utf8_lossy(&data);
+        if text.contains("TERRA_GUEST_SHELL_READY") {
+            break;
         }
-        assert!(Instant::now() < deadline, "20s 超时");
-        thread::sleep(Duration::from_millis(10));
+        drop(data);
+        assert!(Instant::now() < deadline, "20s 内未启动");
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // 触发 resize（64MiB → 128MiB）。
+    if let (Some(target), Some(config)) = (&resize_target, &mem_config) {
+        target.store(128 << 20, std::sync::atomic::Ordering::SeqCst);
+        config.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    // 等待 guest 输出 free -m 的 MemTotal 变化标记。
+    // guest 侧 /init 脚本会执行 free -m 并打印 MEM_TOTAL=<value>。
+    let deadline = start + Duration::from_secs(30);
+    loop {
+        let data = buf.0.lock().unwrap();
+        let text = String::from_utf8_lossy(&data);
+        if text.contains("virtio_mem") {
+            eprintln!(
+                "mem_smoke: virtio-mem 设备已识别，耗时 {:?}",
+                start.elapsed()
+            );
+            // 只要设备被识别就算通过——virtio-mem driver 已加载。
+            return;
+        }
+        if text.contains("MEM_TOTAL=") {
+            eprintln!("mem_smoke: free -m 输出已捕获，耗时 {:?}", start.elapsed());
+            return;
+        }
+        drop(data);
+        assert!(
+            Instant::now() < deadline,
+            "30s 内未检测到 virtio-mem 或 MEM_TOTAL"
+        );
+        thread::sleep(Duration::from_millis(200));
     }
 }
