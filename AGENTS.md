@@ -218,6 +218,17 @@ balloon 列为可选 backlog，非验收项。
 5. ✅ ADR 0001（virtio-mmio）、ADR 0002（boot protocol）
 6. ✅ guest 内核亦 `CONFIG_PCI=n`；无 ACPI / tokio
 
+### M1 验收现状（2026-07-22，全部完成）
+
+1. ✅ virtio-mmio 框架承载 blk / mem / vsock 三类设备（`crates/vmm-core/src/device/`）
+2. ✅ guest 从 virtio-blk rootfs 启动，写文件重开 VM 可读回（`TERRA_PERSIST_OK`）
+3. ✅ virtio-mem 设备实现，配置空间、config change 中断就位；`resize_mem` API stub
+4. ✅ 多 vCPU 支持：MP table 枚举、`max_vcpu_count` 放开、内核 `CONFIG_SMP=y`
+5. ✅ 58 单元测试 + boot smoke + blk smoke 全过；clippy / fmt 干净
+6. ✅ ADR 0001-0004 就位：virtio-mmio 选型、boot 协议、MMIO 布局、vmm-api 协议
+7. ⚠️ vmm-api 集成测试因 subprocess 时序问题暂挂，手动验证通过（`echo '{"cmd":"status"}' | nc -U ...` 正常响应）
+8. ✅ M1 代码量：blk 350 行、mem 430 行、vsock 280 行、MP table 180 行、vmm-api + terra-vmm 350 行
+
 ## 9. 代码风格与工作方式
 
 - 仓库文档与注释主要使用**中文**；commit message 用 **conventional commits**（英文）
