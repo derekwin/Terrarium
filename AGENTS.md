@@ -79,7 +79,7 @@ README 中列出的完整模块划分（vmm-devices / vmm-snapshot / sandboxd / 
 - `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`：必须干净
 - CI（`.github/workflows/ci.yml`）：fmt + clippy + test + doc
 
-## 6. M0 任务分解（当前唯一要做的事，按序执行，每步一个 commit）
+## 6. M0 任务分解（已完成 2026-07，存档参考）
 
 **只做 M0**：搭仓库骨架，实现最小 VMM，能直接启动裁剪 Linux 内核进入 guest shell。
 
@@ -95,6 +95,53 @@ README 中列出的完整模块划分（vmm-devices / vmm-snapshot / sandboxd / 
   - vCPU run 循环：处理 `KVM_EXIT_IO`（串口）、`KVM_EXIT_HLT` / `KVM_EXIT_SHUTDOWN`
   - 架构分层：`vmm-core/src/arch/x86_64.rs` 放平台相关代码，公共接口不出现 x86 专有类型
 - **Task 3 — 测试**：见下节
+
+## 6.1 M1 任务分解（当前唯一要做的事，按序执行，每步一个 commit）
+
+**M1 目标**：动态资源——virtio-blk / virtio-mem / vsock + 「启动预创建 + 运行调整」模型落地。
+balloon 列为可选 backlog，非验收项。
+
+**明确不做**（同 M0 纪律）：快照/CRIU（M3）、sandboxd/eBPF/SDK/CLI/MCP（M2）、sched_ext（M4）、PCI/ACPI/UEFI（永远）。
+
+- **Task 0 — virtio-mmio 设备框架 + ADR 0003**：
+  - MMIO 布局：设备窗口基址 `0xd000_0000`，每设备 4KiB、步长 4KiB；IRQ（GSI）从 5 起顺排
+  - guest 声明：内核 cmdline `virtio_mmio.device=4K@0xd0000000:5 …`（`CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES` 已就位）
+  - `KVM_EXIT_MMIO` 按地址分发 → 设备 trait（寄存器读写 / reset / queue activate / notify）；virtqueue 描述符链经 vm-memory 访问
+  - 中断：`KVM_IRQ_LINE` 经 in-kernel irqchip 注入，ISR 读清后按电平语义重算
+  - 依赖新增（rust-vmm 官方，符合依赖基线，动工时说明）：`virtio-queue`（+`virtio-bindings`）——描述符链解析自己重写易错且无益
+  - ADR 0003：virtio-mmio 地址/IRQ 布局与中断模型
+- **Task 1 — virtio-blk + rootfs**：
+  - xtask 新增 `cargo xtask rootfs`：复用静态 busybox，`mkfs.ext4` + `debugfs` 填充（免 root）产出 `target/guest/rootfs.ext4`
+  - 内核片段加 `CONFIG_VIRTIO_BLK=y`、`CONFIG_EXT4_FS=y`
+  - vmm-core：virtio-blk 设备，后端为宿主普通文件；vCPU 线程内同步 IO（M1 不引入 event loop，设备增多后再议）
+  - `/init` 改为挂载 `/dev/vda` 后 `switch_root`；blk smoke test（guest 写文件 → 重开 VM 读回）
+- **Task 2 — terra-vmm 薄壳 + vmm-api socket**：
+  - `crates/vmm` 由 boot 示例演化为 terra-vmm：每 VM 一进程，监听 Unix socket（路径经 argv 指定），VMM 进程内不做 REST
+  - vmm-api：定义请求/响应协议。建议 Unix seqpacket + serde_json 文本帧（新增 `serde`/`serde_json` 依赖，理由：协议序列化手写易错）；若对依赖敏感可退化为定长二进制帧——动工前定 ADR 0004
+  - M1 命令面：`stop`、`status`、`resize_mem`（Task 3 接入）；VM 配置随进程启动参数传入
+  - 测试替身：集成测试直接用 Unix socket 对话，不建独立 controller 进程（controller 属 M2）
+- **Task 3 — virtio-mem 内存伸缩**：
+  - 地址空间改两段：低端 `[0, 3GiB)` + virtio-mem 热插拔区（起点与上限在 VM 配置预声明，即「启动预创建」）
+  - virtio-mem 设备启动即挂载、`requested_size`=初始内存；resize 走 config change，不新增设备、不热插拔
+  - 内核片段加 `CONFIG_VIRTIO_MEM=y` 及 `CONFIG_MEMORY_HOTPLUG` 相关系列
+  - e820 预留热插拔区（virtio-mem 自枚举，无需 ACPI）
+  - `resize_mem` API 落地：guest 内 `free` 可见、不重启；mem smoke test
+- **Task 4 — 多 vCPU 与 CPU 逻辑上下线**：
+  - MP table（ADR 0002 已注明需求）；`max_vcpu_count` 放开；每 vCPU 一线程，设备共享加锁
+  - 全部 vCPU 启动即创建（预创建），guest 内经 `/sys/devices/system/cpu/cpuN/online` 上下线
+  - 内核片段加 `CONFIG_SMP=y`、`CONFIG_HOTPLUG_CPU=y`
+- **Task 5 — vsock**：
+  - virtio-vsock 设备，桥到宿主 Unix domain socket（Firecracker 模型）；内核片段加 `CONFIG_VIRTIO_VSOCKETS=y`
+  - smoke：guest vsock 客户端 ↔ host 端点双向收发（为 M2 sandboxd / eBPF 上报铺路）
+- **Task 6 — 测试、benchmark 与文档收尾**：全部 smoke 常驻 `cargo test`；冷启动 ≤1s 回归（带默认设备）；ADR 补齐；AGENTS.md 状态更新
+
+### M1 验收标准
+
+1. virtio-mmio 框架承载 blk / mem / vsock 三类设备，guest 全部识别可用
+2. guest 从 virtio-blk rootfs 启动，写文件重开 VM 可读回
+3. `resize_mem` 经 API socket 下发，guest 内 `free` 可见、不重启
+4. 多 vCPU 启动，guest 内 CPU 上下线生效
+5. `cargo test` 全过；冷启动 ≤1s（带默认设备）不回归；clippy / fmt 干净；ADR 0003 / 0004 就位
 
 ## 7. 测试策略
 
@@ -147,4 +194,4 @@ README 中列出的完整模块划分（vmm-devices / vmm-snapshot / sandboxd / 
 
 ## 12. 后续里程碑预览（仅供接口设计参考，不要实现）
 
-M1 动态资源（virtio-blk / virtio-mem / balloon / vsock + 预创建调整模型）→ M2 沙箱层 sandboxd 与 eBPF 观测、SDK/CLI/MCP → M3 三级快照 → M4 sched_ext 与密度。vmm-core 的设备管理抽象、VM 配置结构（`max_vcpu_count`、内存上限等字段）应能为 M1 直接扩展。
+M1 动态资源（见 6.1 节任务分解）→ M2 沙箱层 sandboxd 与 eBPF 观测、SDK/CLI/MCP → M3 三级快照 → M4 sched_ext 与密度。vmm-core 的设备管理抽象、VM 配置结构（`max_vcpu_count`、内存上限等字段）应能为 M1 直接扩展。
