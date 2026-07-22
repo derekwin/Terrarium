@@ -5,15 +5,19 @@
 //! 定时器/串口等 legacy 设备）。guest 经内核 cmdline `virtio_mmio.device=`
 //! 声明设备（`CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES`），不引入 ACPI。
 
+pub mod balloon;
 pub mod blk;
 pub mod mem;
 pub mod net;
+pub mod rng;
 mod virtio_mmio;
 pub mod vsock;
 
+pub use balloon::Balloon;
 pub use blk::Blk;
 pub use mem::Mem;
 pub use net::Net;
+pub use rng::Rng;
 pub use virtio_mmio::{
     VirtioDevice, VirtioMmio, ISR_CONFIG_CHANGE, ISR_USED_BUFFER, STATUS_ACKNOWLEDGE,
     STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FAILED, STATUS_FEATURES_OK, STATUS_NEEDS_RESET,
