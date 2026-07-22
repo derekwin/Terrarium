@@ -46,7 +46,7 @@ fn main() {
         ..VmConfig::default()
     };
 
-    if let Err(e) = Vm::new(config).and_then(|mut vm| vm.run()) {
+    if let Err(e) = Vm::new(config).and_then(|vm| vm.run()) {
         eprintln!("terra-boot: {e}");
         std::process::exit(1);
     }

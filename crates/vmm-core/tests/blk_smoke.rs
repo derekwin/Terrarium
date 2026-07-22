@@ -68,7 +68,7 @@ fn blk_smoke() {
     };
 
     let start = Instant::now();
-    let mut vm = Vm::with_output(config, buf.clone()).expect("创建 VM 失败");
+    let vm = Vm::with_output(config, buf.clone()).expect("创建 VM 失败");
 
     thread::spawn(move || {
         if let Err(e) = vm.run() {

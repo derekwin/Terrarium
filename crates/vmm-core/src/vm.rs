@@ -174,25 +174,17 @@ pub enum Error {
 /// KVM VM fd、guest 内存与全部 vCPU fd。泛型 `W` 是串口输出去向
 /// （生产为 `io::Stdout`，测试可注入缓冲）。
 pub struct Vm<W: io::Write = io::Stdout> {
-    vm_fd: VmFd, // 设备 IRQ 线刷新（set_irq_line）与后续 M1 设备接线用。
-    #[allow(dead_code)] // 持有 guest 内存映射，生命周期必须覆盖整个 VM；M1 设备模型会访问。
+    vm_fd: VmFd,
+    #[allow(dead_code)]
     memory: GuestMemoryMmap,
-    // 结构上预留多 vCPU（M1 按 max_vcpu_count 预创建）；M0 只创建并运行 vcpus[0]。
     vcpus: Vec<VcpuFd>,
-    serial: Serial<W>,
-    rtc: Rtc,
-    // MMIO 设备（virtio-mmio）；M1 Task 0 尚无具体设备注册，管理器为空，
-    // 空管理器不改变任何行为（cmdline 为空串、无 MMIO 分发、无 IRQ）。
-    device_manager: DeviceManager,
-    /// 串口输入缓冲（host stdin → guest serial）。宿主侧注入，run 循环每轮消费。
+    serial: Arc<Mutex<Serial<W>>>,
+    rtc: Arc<Mutex<Rtc>>,
+    device_manager: Arc<Mutex<DeviceManager>>,
     serial_input: Arc<Mutex<VecDeque<u8>>>,
-    /// virtio-mem resize 目标大小（API handler 写入，Mem 设备读取）。
     resize_target: Option<Arc<AtomicU64>>,
-    /// virtio-mem config change 信号（API handler 置位，Mem 设备消费）。
     mem_config_changed: Option<Arc<AtomicBool>>,
-    /// virtio-blk 容量（API handler 写入，Blk 设备 config space 暴露）。
     blk_capacity: Option<Arc<AtomicU64>>,
-    /// virtio-blk config change 信号。
     blk_config_changed: Option<Arc<AtomicBool>>,
 }
 
@@ -401,9 +393,9 @@ impl<W: io::Write> Vm<W> {
             vm_fd,
             memory,
             vcpus,
-            serial: Serial::new(out),
-            rtc: Rtc::new(),
-            device_manager,
+            serial: Arc::new(Mutex::new(Serial::new(out))),
+            rtc: Arc::new(Mutex::new(Rtc::new())),
+            device_manager: Arc::new(Mutex::new(device_manager)),
             serial_input: Arc::new(Mutex::new(VecDeque::new())),
             resize_target,
             mem_config_changed,
@@ -438,9 +430,7 @@ impl<W: io::Write> Vm<W> {
     ///
     /// 处理的退出原因：PIO（分发给串口/RTC）、MMIO（分发给设备管理器）、
     /// HLT、SHUTDOWN；其余忽略或报错。
-    pub fn run(&mut self) -> Result<(), Error> {
-        // 拆字段借用：vCPU 退出的 data 切片借用 vcpus[0]，
-        // 处理时还需同时借用 serial、device_manager 与 vm_fd，是不同字段。
+    pub fn run(self) -> Result<(), Error> {
         let Self {
             vcpus,
             serial,
@@ -450,12 +440,21 @@ impl<W: io::Write> Vm<W> {
             serial_input,
             ..
         } = self;
-        let mut last_irq_level = false;
-        // 各 MMIO 设备 IRQ 线的上次电平（电平触发，变化才下发 KVM_IRQ_LINE）。
-        let mut device_irq_levels: Vec<bool> =
-            device_manager.irq_lines().map(|(_, level)| level).collect();
+
+        let mut bsp = vcpus.into_iter().next().ok_or_else(|| {
+            Error::VcpuRun(kvm_ioctls::Error::new(22)) // EINVAL
+        })?;
+
+        // AP vCPU 线程：只跑 KVM_RUN，设备 MMIO/PIO 经共享 device_manager 处理。
+        // 当前仅 BSP 执行，后续多核时在此 spawn AP 线程。
+        let mut dev_mgr = device_manager.lock().unwrap();
+        let mut serial = serial.lock().unwrap();
+        let mut rtc = rtc.lock().unwrap();
+        let mut last_irq = false;
+        let mut dev_irqs: Vec<bool> = dev_mgr.irq_lines().map(|(_, l)| l).collect();
+
         loop {
-            match vcpus[0].run() {
+            match bsp.run() {
                 Ok(VcpuExit::IoOut(port, data)) => {
                     if (SERIAL_PORT_BASE..SERIAL_PORT_BASE + SERIAL_PORT_SIZE).contains(&port) {
                         serial
@@ -464,7 +463,7 @@ impl<W: io::Write> Vm<W> {
                     } else if port == RTC_PORT_INDEX || port == RTC_PORT_DATA {
                         rtc.write(port - RTC_PORT_INDEX, data);
                     } else {
-                        debug!(port, len = data.len(), "忽略未分配设备的 PIO 写");
+                        debug!(port, len = data.len(), "忽略 PIO 写");
                     }
                 }
                 Ok(VcpuExit::IoIn(port, data)) => {
@@ -477,48 +476,48 @@ impl<W: io::Write> Vm<W> {
                         } else if p == RTC_PORT_INDEX || p == RTC_PORT_DATA {
                             rtc.read(p - RTC_PORT_INDEX)
                         } else {
-                            0xff // 悬空端口按总线惯例读回全 1
+                            0xff
                         };
                     }
                 }
                 Ok(VcpuExit::MmioRead(addr, data)) => {
-                    device_manager.read(addr, data);
+                    dev_mgr.read(addr, data);
                 }
                 Ok(VcpuExit::MmioWrite(addr, data)) => {
-                    device_manager.write(addr, data);
+                    dev_mgr.write(addr, data);
                 }
-                // 重新 run；有 in-kernel irqchip，KVM 会在中断到来时唤醒 vCPU。
                 Ok(VcpuExit::Hlt) => {}
                 Ok(VcpuExit::Shutdown) => return Ok(()),
-                Ok(VcpuExit::FailEntry(reason, _cpu)) => return Err(Error::VcpuFailEntry(reason)),
+                Ok(VcpuExit::FailEntry(r, _)) => return Err(Error::VcpuFailEntry(r)),
                 Ok(VcpuExit::InternalError) => return Err(Error::VcpuInternalError),
                 Ok(other) => {
-                    warn!(exit = ?other, "未处理的 KVM 退出原因，忽略");
+                    warn!(exit = ?other, "未处理退出");
                 }
                 Err(e) => {
                     if io::Error::from_raw_os_error(e.errno()).kind() == io::ErrorKind::Interrupted
                     {
-                        continue; // EINTR：重试 KVM_RUN
+                        continue;
                     }
                     return Err(Error::VcpuRun(e));
                 }
             }
-            // 每次退出处理后刷新串口 IRQ 电平（电平触发，变化才下发）。
+
+            // Refresh serial IRQ
             let level = serial.irq_level();
-            if level != last_irq_level {
+            if level != last_irq {
                 vm_fd
                     .set_irq_line(crate::serial::SERIAL_IRQ, level)
                     .map_err(Error::SetIrqLine)?;
-                last_irq_level = level;
+                last_irq = level;
             }
-            // 同款刷新各 MMIO 设备的 IRQ 线（无设备时为空迭代，零开销）。
-            for (idx, (irq, level)) in device_manager.irq_lines().enumerate() {
-                if level != device_irq_levels[idx] {
+            // Refresh device IRQs
+            for (idx, (irq, level)) in dev_mgr.irq_lines().enumerate() {
+                if level != dev_irqs[idx] {
                     vm_fd.set_irq_line(irq, level).map_err(Error::SetIrqLine)?;
-                    device_irq_levels[idx] = level;
+                    dev_irqs[idx] = level;
                 }
             }
-            // 从宿主注入串口输入（host stdin → guest serial）。
+            // Drain serial input
             let mut input = serial_input.lock().unwrap();
             if !input.is_empty() {
                 let data: Vec<u8> = input.drain(..).collect();

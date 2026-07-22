@@ -59,7 +59,7 @@ fn boot_smoke() {
         ..VmConfig::new(&kernel)
     };
     let start = Instant::now();
-    let mut vm = Vm::with_output(config, buf.clone()).expect("创建 VM 失败");
+    let vm = Vm::with_output(config, buf.clone()).expect("创建 VM 失败");
     // guest 会一直停在 shell（M0 串口输入未接线，sh 阻塞在 console 读上），
     // vCPU 线程随之常驻；测试进程退出时一并结束。
     std::thread::spawn(move || {
