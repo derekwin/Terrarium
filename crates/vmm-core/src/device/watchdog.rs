@@ -13,11 +13,15 @@ const VIRTIO_ID_WATCHDOG: u32 = 23;
 pub struct Watchdog;
 
 impl Watchdog {
-    pub fn new() -> Self { Watchdog }
+    pub fn new() -> Self {
+        Watchdog
+    }
 }
 
 impl Default for Watchdog {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VirtioDevice for Watchdog {
