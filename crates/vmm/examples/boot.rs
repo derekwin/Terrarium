@@ -32,6 +32,9 @@ struct Args {
     /// virtio-net 后端 fd 路径（可选，M1.5 Task 0）
     #[arg(long)]
     net: Option<PathBuf>,
+    /// vCPU 数量上限
+    #[arg(long, default_value_t = 1)]
+    max_vcpus: u8,
 }
 
 fn main() {
@@ -43,6 +46,8 @@ fn main() {
         initrd_path: args.initrd,
         kernel_cmdline: args.cmdline,
         disk_path: args.disk,
+        net_backend: args.net,
+        max_vcpu_count: args.max_vcpus,
         ..VmConfig::default()
     };
 
