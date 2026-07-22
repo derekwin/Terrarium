@@ -404,6 +404,33 @@ review 结论：四个 Task 骨架正确，但验收 #1/#3/#4/#5 缺真实验证
 原五条验收标准维持不变，全部以真实 smoke 断言为准（不允许「没识别到也算过」
 式的退路分支）；N1 的修复必须同时删除裸 `requested_size_arc` 直写路径，防止再犯。
 
+### M1.5 收尾包第二轮（2026-07 review 退回项，**当前唯一要做的事**）
+
+第一轮收尾（e5b8d46 / a66c243 / 7b6337e）review：N4 收下；N1/N2/N3 的 smoke
+仍然不验证任何东西。规则重申：每个 smoke 必须做**负向自检**——把被测功能关掉
+测试必须变红，提交信息里写明负向自检结果。
+
+- **N1' — mem_smoke 真断言**：/init 改为循环定期打印 `MEM_TOTAL=<kB>`（或 smoke
+  用 N3 的串口注入技术在 resize 后注入 `free` 命令）；测试**解析数值**断言 resize 后
+  MemTotal 比 resize 前增大 ≥ 32MiB（不是 contains 字符串）；删除「virtio_mem 识别
+  即过」分支。负向自检：把 resize 调用注释掉，测试必须红
+- **N2' — net_smoke 先得有网卡**：当前 VmConfig 没挂 `net_backend`，VM 里根本没有
+  网卡，`TERRA_NET=` 空值也命中 contains——此测试现在不可能红。要求：挂 slirp
+  后端；/init 用 busybox `udhcpc` 拿地址（或静态配置 10.0.2.x）后 `ping -c1 10.0.2.2`，
+  输出 `TERRA_NET=<非空IP>` 与 `TERRA_PING_OK` 双 marker；断言两个 marker 且 IP 非空；
+  删除「guest 就绪即过」分支。负向自检：不挂后端时必须红
+- **N3' — apt 断言不许匹配回显**：ubuntu_smoke 挂 net_backend（没网 apt 必然失败，
+  现在的 `|| contains("apt-get")` 匹配的是串口回显的注入命令本身）。要求：断言
+  `Reading package lists` 出现 **且** 输出不含 `Failed to fetch`/`Could not resolve`/
+  `Temporary failure`；断言不得匹配任何注入字符串本身。负向自检：摘掉 net_backend
+  时必须红
+- **N4 已收下**（reboot ×10 真实有效），此轮无需改动
+
+### 元规则（自 2026-07 起对所有 smoke 生效，写在第 9 节并在此强调）
+
+每个新 smoke 提交时必须附**负向自检**证据：关闭/拆除被测功能后测试应变红。
+「没识别到也算过」式的退路分支一律视为缺陷，review 直接退回。
+
 ## 9. 代码风格与工作方式
 
 - 仓库文档与注释主要使用**中文**；commit message 用 **conventional commits**（英文）
@@ -411,6 +438,7 @@ review 结论：四个 Task 骨架正确，但验收 #1/#3/#4/#5 缺真实验证
 - 遇到与本文件冲突的现实（如某 crate 版本 API 对不上），停下来报告冲突和建议，不要绕过约束自行其是
 - 不确定的 API 行为先写 5~20 行的探针程序验证，再写正式实现
 - 最小改动原则：不做投机性抽象，不留半成品
+- **smoke 负向自检元规则（2026-07 起生效）**：每个新 smoke 提交时必须附负向自检证据——关闭/拆除被测功能后测试必须变红（提交信息里写明自检方式与结果）；「没识别到也算过」式的退路分支一律视为缺陷，review 直接退回
 
 ## 10. 安全与许可考虑
 
