@@ -2,6 +2,10 @@
 
 > 面向 AI coding agent 的项目说明文件。读者对本项目零先验知识。
 > 本文档基于仓库当前真实状态撰写；所有"尚未存在"的内容均明确标注。
+>
+> **战略定位以 `POSITIONING.md` 为最高基准**（一句话定位、项目是/不是、
+> 架构不变量）。本文档是执行层：里程碑、任务分解、验收标准与实现须知。
+> 两者冲突时以 POSITIONING.md 为准，并修订本文档对齐。
 
 ## 1. 项目概览
 
@@ -19,8 +23,10 @@ Terrarium（日常简称 **terra**）是面向 AI Agent 工作负载的轻量 VM
 ### 三个不可违背的架构决策
 
 1. **极简设备模型**：只用 virtio-mmio，不引入 PCI / ACPI（永远不引入）。
-2. **「启动预创建 + 运行调整」资源模型**：不做传统热插拔——vCPU 按上限预建、Guest 内逻辑上下线；virtio-mem 启动即挂载、之后经 config change 调整；磁盘容量经 virtio config change 更新。
+2. **「启动预创建 + 运行调整」资源模型**：不做传统热插拔——vCPU 按上限预建、Guest 内逻辑上下线；virtio-mem 启动即挂载、之后经 config change 调整；磁盘容量经 virtio config change 更新；禁止依赖 Guest 内核补丁（如 Dragonball upcall）。
 3. **运行形态**：代码以 crate 组织；运行时每个 VM 一个 `terra-vmm` 进程（组合 crate 的薄壳二进制），由宿主 controller 经 API socket 派生与管理。VMM 进程内不做 REST 服务，不引入控制面逻辑。
+
+补充边界（POSITIONING.md「项目不是」）：不做容器运行时 / Kata 替代；不做 K8s 编排与集群调度（controller 只单机资源闭环）；不做通用云计算 VMM；现阶段不做 GPU 沙箱（架构预留 VFIO 口子但不实现）。
 
 > 注意：`README_zh.md` 的对比表中 VM 层"形态"一栏写的是「库（嵌入控制器进程）」，与正文架构图「每 VM 一个 terra-vmm 进程」不一致；以本文件和架构图为准（每 VM 一进程）。
 
@@ -48,11 +54,11 @@ virtio-mmio v2 传输层 `VirtioMmio<D: VirtioDevice>`、ADR 0003）；
 - **禁止 tokio 等异步运行时**——VMM 事件循环基于 `event-manager`（epoll）
 - `unsafe` 最小化；每个 `unsafe` 块必须有 `// SAFETY:` 注释说明不变量
 - `cargo clippy -- -D warnings`、`cargo fmt --check` 必须通过
-- **许可纪律**（2026-07 经项目所有者修订）：允许从 Firecracker / Dragonball（kata-containers 仓库 `src/dragonball`）/ Cloud Hypervisor **整文件或片段拷贝**（均为 Apache-2.0，与项目许可兼容），但必须满足：
-  1. 拷贝的文件/片段在文件头注明来源（原仓库、路径、commit/版本）并保留原 copyright 与 Apache-2.0 许可头；
+- **许可纪律**（2026-07 二次修订，与 POSITIONING.md 不变量 #19 对齐）：代码为**原创或带 Apache-2.0 attribution 的移植**；允许从 Firecracker / Dragonball（kata-containers 仓库 `src/dragonball`）/ Cloud Hypervisor 移植片段，但**禁止原封不动的整体复制**（整文件搬运仅在确有改造必要时允许，且必须满足下述全部条件）：
+  1. 移植的文件/片段在文件头注明来源（原仓库、路径、commit/版本）并保留原 copyright 与 Apache-2.0 许可头；
   2. 每个来源文件登记到 `THIRD-PARTY`；
-  3. 拷贝后按本项目规范改造（`// SAFETY:` 注释、clippy 干净、中文注释优先），不引入 PCI / ACPI / tokio 等违禁项；
-  4. 只拷贝当前里程碑真正用到的文件，不整目录搬运。
+  3. 移植后按本项目规范改造（`// SAFETY:` 注释、clippy 干净、中文注释优先），不引入 PCI / ACPI / tokio 等违禁项——纯搬运无改造视为整体复制，禁止入库；
+  4. 只移植当前里程碑真正用到的内容，不整目录搬运。
 
 ## 4. 目标仓库结构（M0 需要建出）
 
@@ -455,4 +461,4 @@ review 结论：四个 Task 骨架正确，但验收 #1/#3/#4/#5 缺真实验证
 
 ## 12. 后续里程碑预览（仅供接口设计参考，不要实现）
 
-M1 动态资源（见 6.1 节）→ **M1.5 VM 完备化 + Ubuntu bring-up（见 6.4 节，当前）** → M2 沙箱层 sandboxd、eBPF 观测、SDK/CLI/MCP（见 6.3 节，冻结中）→ M3 三级快照 → M4 sched_ext 与密度。**M2 之后评估 E2B 兼容适配层**（2026-07 与项目所有者定案要做：薄协议翻译层，不动自有内核 API 与 SDK/MCP 主接口，接存量 E2B 用户）。vmm-core 的设备管理抽象、VM 配置结构（`max_vcpu_count`、内存上限等字段）应能为后续里程碑直接扩展。
+M1 动态资源（见 6.1 节）→ **M1.5 VM 完备化 + Ubuntu bring-up（见 6.4 节，当前）** → M2 沙箱层 sandboxd、eBPF 观测、SDK/CLI/MCP（见 6.3 节，冻结中）→ M3 三级快照 → M4 sched_ext 与密度。**E2B 关系**（按 POSITIONING.md 对齐，2026-07）：不做 E2B 克隆，API 模型按自有能力定义；M2 之后可做薄的 E2B 兼容**协议翻译层**接存量用户，但不得反向约束自有 API 设计（不被 E2B 兼容性锁死）。vmm-core 的设备管理抽象、VM 配置结构（`max_vcpu_count`、内存上限等字段）应能为后续里程碑直接扩展。
