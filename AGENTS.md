@@ -282,6 +282,19 @@ balloon 列为可选 backlog，非验收项。
 7. ⚠️ vmm-api 集成测试因 subprocess 时序问题暂挂，手动验证通过（`echo '{"cmd":"status"}' | nc -U ...` 正常响应）
 8. ✅ M1 代码量：blk 350 行、mem 430 行、vsock 280 行、MP table 180 行、vmm-api + terra-vmm 350 行
 
+### M2 验收现状（2026-07-22，全部完成）
+
+1. ✅ M1 遗留待办清零：clippy 门禁、vsock 桥接、三个 smoke、.gitignore
+2. ✅ guest 内核 M2 功能集：OVERLAY_FS / CGROUPS / SECCOMP / LANDLOCK / BPF / BTF
+3. ✅ sandboxd：musl 静态守护，Unix socket JSON 协议，exec/exec_sandboxed/status/terminate
+4. ✅ 隔离栈：namespace + OverlayFS + pivot_root + cgroup v2 + Landlock + seccomp-bpf
+5. ✅ observe：procfs 指标采集 + cgroup 资源计量 + vsock 上报通道
+6. ✅ controller + CLI：VM create/list/destroy，terra create/ls/terminate
+7. ✅ Python SDK：Sandbox/AsyncSandbox，create/exec/terminate，纯标准库
+8. ✅ MCP server：JSON-RPC 2.0 stdio，terra_create/terra_run/terra_terminate
+9. ✅ ADR 0005-0007 就位：内核功能集、sandbox 协议、eBPF 框架选型
+10. ✅ clippy / fmt 干净，全部测试通过
+
 ## 9. 代码风格与工作方式
 
 - 仓库文档与注释主要使用**中文**；commit message 用 **conventional commits**（英文）
