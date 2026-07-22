@@ -104,6 +104,8 @@ CONFIG_BPF_LSM=y
 CONFIG_DEBUG_INFO_BTF=y
 # M1.5 Task 0：virtio-net
 CONFIG_VIRTIO_NET=y
+# M1.5 Task 2：Ubuntu GPT 分区表支持
+CONFIG_EFI_PARTITION=y
 "#;
 
 #[derive(Parser)]
@@ -123,6 +125,8 @@ enum Command_ {
     },
     /// 创建 ext4 rootfs 镜像（依赖 kernel 子命令先跑过）
     Rootfs,
+    /// 下载 Ubuntu noble cloud image（raw 格式）
+    Ubuntu,
 }
 
 fn main() {
@@ -137,6 +141,12 @@ fn main() {
         Command_::Rootfs => {
             if let Err(e) = rootfs() {
                 eprintln!("xtask rootfs 失败: {e}");
+                std::process::exit(1);
+            }
+        }
+        Command_::Ubuntu => {
+            if let Err(e) = ubuntu() {
+                eprintln!("xtask ubuntu 失败: {e}");
                 std::process::exit(1);
             }
         }
@@ -472,6 +482,22 @@ fn rootfs() -> Result<(), String> {
 
     println!("产物就绪:");
     println!("  rootfs:   {}", out.display());
+    Ok(())
+}
+
+fn ubuntu() -> Result<(), String> {
+    let guest_dir = guest_dir()?;
+    let out = guest_dir.join("ubuntu.raw");
+
+    // Ubuntu noble 24.04 cloud image（raw 格式，直接可用）。
+    let url = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img";
+
+    download(url, &out)?;
+
+    let size_mb = std::fs::metadata(&out).map_err(|e| e.to_string())?.len() / 1024 / 1024;
+    println!("产物就绪:");
+    println!("  ubuntu:   {} ({} MiB)", out.display(), size_mb);
+    println!("  启动: cargo run -p vmm --example boot -- --kernel target/guest/bzImage --disk {} --mem 1024 --cmdline 'root=/dev/vda1 console=ttyS0 cloud-init=disabled'", out.display());
     Ok(())
 }
 
