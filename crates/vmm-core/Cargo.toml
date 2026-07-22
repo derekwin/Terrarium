@@ -10,6 +10,7 @@ homepage.workspace = true
 workspace = true
 
 [dependencies]
+kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
 vm-memory.workspace = true
 linux-loader.workspace = true

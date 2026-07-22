@@ -2,9 +2,7 @@
 
 每个重要设计决定一篇短 ADR，按序号命名：`NNNN-标题.md`。
 
-M0 至少包含：
+## 索引
 
-1. 设备模型选型：为什么只用 virtio-mmio，不引入 PCI / ACPI
-2. 启动协议：为什么用 Linux x86 64-bit boot protocol 直接加载 bzImage
-
-（ADR 正文随 M0 Task 2 的实现一同落地。）
+1. [0001: 设备模型只用 virtio-mmio，不引入 PCI / ACPI](0001-virtio-mmio-device-model.md)
+2. [0002: 用 Linux x86 64-bit boot protocol 直接加载 bzImage](0002-linux-boot-protocol.md)

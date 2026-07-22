@@ -26,12 +26,11 @@ Terrarium（日常简称 **terra**）是面向 AI Agent 工作负载的轻量 VM
 
 ## 2. 仓库当前状态（重要）
 
-**当前仓库只有文档，没有任何代码。** 实际文件清单（git 仅一个 `init` commit）：
-
-- `README.md`（英文）、`README_zh.md`（中文）——项目定位、架构、接口愿景、roadmap
-- `AGENTS.md`（本文件）
-
-不存在的内容（不要假设它们已就位）：`Cargo.toml` workspace、`crates/`、`xtask/`、`examples/`、`docs/decisions/`、CI、`LICENSE` / `NOTICE` / `THIRD-PARTY`、Python SDK——全部待建。README 中的模块结构和 Python 接口是**目标形态**，不是现状。
+**M0 已基本完成**（2026-07）：workspace 骨架、`cargo xtask kernel`（内核 + initramfs 一键构建）、
+vmm-core 最小 VMM（可启动裁剪 Linux 内核到 guest shell）、boot smoke 集成测试均已就位。
+仍属目标形态、**尚未存在**的内容：`vmm-api` 协议（空 crate）、`terra-vmm` 薄壳二进制
+（占位 main，M0 后期由 boot 示例演化）、CI 实跑、Python SDK。README 中的完整模块划分
+（vmm-devices / sandboxd / observe / controller 等）是 M1+ 目标，不是现状。
 
 > 文档勘误：旧 AGENTS.md 与仓库结构约定中提到 `README.en.md`，实际英文 README 文件名是 `README.md`，中文是 `README_zh.md`。
 
@@ -72,13 +71,13 @@ terrarium/
 
 README 中列出的完整模块划分（vmm-devices / vmm-snapshot / sandboxd / observe / checkpoint / controller / cli / mcp / sdk-python）属于 M1+ 里程碑，**现在不要创建**。
 
-## 5. 构建与测试命令（目标命令，代码就绪后应可用）
+## 5. 构建与测试命令
 
-- `cargo xtask kernel --version 6.12.x`：一键下载上游稳定版内核，应用最小裁剪配置编译 bzImage，并构建 initramfs（静态 busybox，`/init` 挂载 devtmpfs 后 exec `/bin/sh`，console 指向 `ttyS0`）；产物放 `target/guest/`，不进 git
-- `cargo run --example boot -- --kernel bzImage --initrd initramfs`：在带 `/dev/kvm` 的机器上启动到 guest shell
+- `cargo xtask kernel [--version 6.12.x]`：一键下载上游稳定版内核，应用最小裁剪配置编译 bzImage，并构建 initramfs（静态 busybox，`/init` 挂载 devtmpfs 后 exec `/bin/sh`，console 指向 `ttyS0`）；产物放 `target/guest/`，不进 git
+- `cargo run -p vmm --example boot -- --kernel target/guest/bzImage --initrd target/guest/initramfs.cpio.gz`：在带 `/dev/kvm` 的机器上启动到 guest shell（示例在 `crates/vmm/examples/boot.rs`；虚拟 workspace 根上 `cargo run --example` 不可直接用，需 `-p vmm`）
 - `cargo test`：全部测试（含 boot smoke test）
-- `cargo clippy -- -D warnings`、`cargo fmt --check`：必须干净
-- CI（待建，`.github/workflows/ci.yml`）：fmt + clippy + test + doc
+- `cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`：必须干净
+- CI（`.github/workflows/ci.yml`）：fmt + clippy + test + doc
 
 ## 6. M0 任务分解（当前唯一要做的事，按序执行，每步一个 commit）
 
@@ -107,11 +106,23 @@ README 中列出的完整模块划分（vmm-devices / vmm-snapshot / sandboxd / 
 ## 8. 验收标准（M0 全部满足才算完成）
 
 1. `cargo xtask kernel` 一键产出内核 + initramfs
-2. `cargo run --example boot` 在带 KVM 的机器上启动到 guest shell，总耗时（VMM 进程启动 → shell 提示符）≤ 1s
+2. `cargo run -p vmm --example boot` 在带 KVM 的机器上启动到 guest shell，总耗时（VMM 进程启动 → shell 提示符）≤ 1s
 3. VMM 进程常驻内存（不含 guest 分配）≤ 30MB
 4. `cargo test` 全过（含 boot smoke test）；`clippy -D warnings` 与 `fmt --check` 干净
 5. `docs/decisions/` 下至少 2 篇 ADR：为什么 virtio-mmio 而非 PCI、为什么 boot 流程这样实现
 6. 代码里找不到 PCI / ACPI / tokio 的任何痕迹
+
+### M0 验收现状（2026-07-22，经项目所有者确认接受并转入 M1）
+
+1. ✅ 一键产出（默认内核 6.12.41，bzImage ~10MB ≤ 30MB）
+2. ⚠️ 实测 1.00~1.05s（最优 998ms），边界达标。已知最大单项：guest 内
+   `serial8250_init` 耗 ~260ms（initcall_debug 实测，非 PNP / loopback /
+   IRQ 探测所致，根因未定位，疑为探测路径中的固定延迟叠加 KVM 退出开销）。
+   后续可查；其余 initcall 均 < 55ms。首字节输出 ~175ms。
+3. ✅ VMM 自身 RSS ~3.6MB（不含 guest 分配）
+4. ✅ 21 单元测试 + boot smoke 全过；clippy / fmt 干净
+5. ✅ ADR 0001（virtio-mmio）、ADR 0002（boot protocol）
+6. ✅ guest 内核亦 `CONFIG_PCI=n`；无 ACPI / tokio
 
 ## 9. 代码风格与工作方式
 
