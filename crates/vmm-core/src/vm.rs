@@ -45,6 +45,8 @@ pub struct VmConfig {
     pub max_vcpu_count: u8,
     /// virtio-blk 后端磁盘路径（M1 Task 1；None 时不注册 blk 设备）。
     pub disk_path: Option<PathBuf>,
+    /// virtio-mem 热插拔内存上限（MiB，M1 Task 3；None 时不注册 virtio-mem 设备）。
+    pub mem_hotplug_max: Option<usize>,
 }
 
 impl VmConfig {
@@ -66,6 +68,7 @@ impl Default for VmConfig {
             kernel_cmdline: "console=ttyS0 reboot=k panic=-1 tsc=reliable".to_string(),
             max_vcpu_count: 1,
             disk_path: None,
+            mem_hotplug_max: None,
         }
     }
 }

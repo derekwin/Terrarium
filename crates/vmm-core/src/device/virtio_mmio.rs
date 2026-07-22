@@ -118,6 +118,9 @@ pub struct VirtioMmio<D: VirtioDevice> {
     /// 设备自发位经 `pending_interrupts` 在读出/判电平时并入。
     isr: u32,
     status: u32,
+    /// ConfigGeneration 计数器：每次设备配置变化时递增，
+    /// guest 驱动据此判断是否需要重新读取配置空间。
+    config_generation: u32,
 }
 
 impl<D: VirtioDevice> VirtioMmio<D> {
@@ -140,6 +143,7 @@ impl<D: VirtioDevice> VirtioMmio<D> {
             queue_sel: 0,
             isr: 0,
             status: 0,
+            config_generation: 0,
         })
     }
 
@@ -165,7 +169,7 @@ impl<D: VirtioDevice> VirtioMmio<D> {
                 .map_or(0, |q| u32::from(q.ready())),
             REG_INTERRUPT_STATUS => self.isr | self.device.pending_interrupts(),
             REG_STATUS => self.status,
-            REG_CONFIG_GENERATION => 0, // config change 由 Task 3（virtio-mem）引入
+            REG_CONFIG_GENERATION => self.config_generation,
             _ => {
                 debug!(offset, "读未实现/只写的 virtio-mmio 寄存器，返回 0");
                 0
@@ -262,6 +266,10 @@ impl<D: VirtioDevice> VirtioMmio<D> {
 
     fn selected_queue(&mut self) -> Option<&mut Queue> {
         self.queues.get_mut(self.queue_sel as usize)
+    }
+
+    pub fn notify_config_change(&mut self) {
+        self.config_generation = self.config_generation.wrapping_add(1);
     }
 
     /// 写入新的 Status；对 FEATURES_OK 做协商校验（驱动接受了设备不支持的
