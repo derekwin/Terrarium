@@ -321,6 +321,7 @@ fn build_initramfs(src_dir: &Path, guest_dir: &Path) -> Result<PathBuf, String> 
               echo TERRA_FIRST_WRITE_OK\n\
             fi\n\
             /newroot/sbin/sandboxd &\n\
+            /newroot/sbin/observe &\n\
             exec /bin/switch_root /newroot /bin/sh\n\
           fi\n\
           echo TERRA_GUEST_SHELL_READY\n\
@@ -417,10 +418,29 @@ fn rootfs() -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("找不到 sandboxd 二进制: {e}"))?;
 
-    // 5. 用 debugfs 填充（免 root）。
+    // 编译 observe（musl 静态链接）。
+    run(
+        "cargo",
+        &[
+            "build",
+            "--target",
+            "x86_64-unknown-linux-musl",
+            "--release",
+            "-p",
+            "observe",
+        ],
+        Some(&ws_root),
+    )?;
+    let observe_bin = ws_root
+        .join("target/x86_64-unknown-linux-musl/release/observe")
+        .canonicalize()
+        .map_err(|e| format!("找不到 observe 二进制: {e}"))?;
+
+    // 用 debugfs 填充（免 root）。
     let out_str = out.to_str().unwrap().to_string();
     let busybox_str = busybox.to_str().unwrap().to_string();
     let sandboxd_str = sandboxd_bin.to_str().unwrap().to_string();
+    let observe_str = observe_bin.to_str().unwrap().to_string();
     let script = format!(
         "mkdir /bin\n\
          write {busybox_str} /bin/busybox\n\
@@ -428,6 +448,7 @@ fn rootfs() -> Result<(), String> {
          symlink /bin/echo /bin/busybox\n\
          mkdir /sbin\n\
          write {sandboxd_str} /sbin/sandboxd\n\
+         write {observe_str} /sbin/observe\n\
          mkdir /run\n"
     );
     let mut child = Command::new("debugfs")
