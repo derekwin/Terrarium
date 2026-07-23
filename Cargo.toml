@@ -1,57 +1,23 @@
-# Terrarium workspace
-# 代码以 crate 组织；运行时每个 VM 一个 terra-vmm 进程。
-
 [workspace]
 resolver = "2"
 members = [
-    "crates/vmm",
-    "crates/vmm-api",
-    "crates/vmm-core",
+    "crates/ch-client",
+    "crates/controller",
     "crates/sandboxd",
     "crates/observe",
-    "crates/controller",
+    "crates/checkpoint",
     "crates/cli",
     "crates/mcp",
-    "xtask",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-homepage = "https://github.com/terrarium/terrarium"
+repository = "https://github.com/terrarium/Terrarium"
 
-# 依赖基线见 AGENTS.md 第 3 节：只允许 rust-vmm 官方 crate + 基础工具库。
-# 新增任何依赖须先说明理由。
 [workspace.dependencies]
-# rust-vmm
-kvm-ioctls = "0.25"
-# kvm-ioctls 0.25 不再 re-export kvm-bindings，vCPU 初始化需直接构造
-# kvm_regs/kvm_sregs/kvm_userspace_memory_region 等类型；版本与 kvm-ioctls 0.25
-# 的传递依赖保持一致（2026-07 M0 Task 2 新增，理由如上）。
-kvm-bindings = "0.14"
-# backend-mmap：GuestMemoryMmap 所在的特性（0.18 起非默认）。
-vm-memory = { version = "0.18", features = ["backend-mmap"] } # linux-loader 0.14 依赖 0.18，必须与其一致（2026-07 从 0.17 上调）
-# bzimage：直接加载 bzImage 所需的特性（0.14 默认只开 pe）。
-linux-loader = { version = "0.14", default-features = false, features = ["bzimage"] }
-vmm-sys-util = "0.15"
-event-manager = "0.4"
-# virtio 设备框架（M1）：队列与描述符链解析交给 rust-vmm 官方 crate，
-# 自己重写易错且无益（AGENTS.md 6.1 Task 0 注明）。
-virtio-queue = "0.18"
-virtio-bindings = "0.2"
-# 基础工具库
-thiserror = "2"
-tracing = "0.1"
-clap = { version = "4", features = ["derive"] } # 仅 example/工具二进制用
-# M1 Task 2：vmm-api socket 协议用 serde_json 文本帧（Unix seqpacket）。
-# 备选定长二进制帧（零新依赖），但 JSON 可读性强、调试友好、无需手写编解码。
-# 理由见 ADR 0004。
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-[workspace.lints.rust]
-unsafe_code = "warn" # unsafe 最小化；每个 unsafe 块必须有 // SAFETY: 注释
-
-[workspace.lints.clippy]
-all = "warn"
+thiserror = "2"
+tracing = "0.1"

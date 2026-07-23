@@ -1,16 +1,8 @@
 [package]
 name = "controller"
-description = "host 资源控制器：VM 生命周期管理、sandbox 路由"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-homepage.workspace = true
-
-[lints]
-workspace = true
 
 [dependencies]
-vmm-api = { path = "../vmm-api" }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
+tracing = { workspace = true }
