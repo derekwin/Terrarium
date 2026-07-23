@@ -1,56 +1,52 @@
 # Terrarium
 
-> Short name for daily use: **terra** — CLI command `terra`, Python package `import terra`.
+Terrarium is a lightweight sandbox platform for AI Agent workloads: **microVMs as the isolation boundary, process sandboxes as the execution unit** — providing a secure, elastic, observable, and fault-tolerant agent execution environment.
 
-Terrarium is a lightweight VMM and sandbox runtime for AI agent workloads. Its goal is to provide a secure, elastic, observable, and fault-tolerant execution environment for agents.
+Containers share a kernel with the agent process, limiting how well they constrain untrusted code. Traditional VMs are heavy and statically provisioned. Terrarium combines the best of both: hardware-level isolation with per-agent sandboxing inside the VM, all under a dynamic resource model that scales CPU, memory, and disk on demand.
 
-A container's isolation boundary lives in the same user space as the agent process, which limits how well it can constrain untrusted code; traditional VMs are heavy and statically provisioned. Terrarium uses microVMs as the isolation boundary and process sandboxes as the execution units.
+**Tech stack**: VMM base is a [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor) fork (thin fork — "configure, don't patch"). The self-developed control plane and sandbox layer form the core IP.
 
 ## Core Goals
 
-- **Lightweight and fast**: microVM cold boot < 200ms, per-instance memory overhead < 100MB, minimal virtio-mmio device model, no PCI/ACPI dependency
-- **Dynamic resources**: online scaling of CPU / memory / disk, based on a "pre-create at boot, adjust at runtime" model — vCPUs are created up to a cap and logically onlined/offlined inside the guest; virtio-mem is attached at boot and resized via config change; no guest kernel patches required
+- **Dynamic resources**: CPU, memory, and disk scale online via Cloud Hypervisor's resize API. The model is "pre-create at boot, adjust at runtime" — vCPUs declared up to a cap, virtio-mem attached at boot and resized via config change. No guest kernel patches required.
 - **Two-layer isolation**:
-  - VM layer: KVM hardware isolation as the security boundary
-  - Sandbox layer: namespaces + pivot_root + OverlayFS + cgroup v2 + Landlock + seccomp-bpf, one execution unit per agent
-- **Observability**: in-guest eBPF (CO-RE) collects syscalls / file / network / resource usage per sandbox, reported to the host over vsock
-- **Snapshot and fault tolerance**: three snapshot levels — filesystem CoW snapshots (millisecond-level), per-process CRIU (at agent step boundaries), and full-VM snapshots with userfaultfd lazy restore
-- **Security enforcement**: dynamic BPF LSM policies, allowlists for file paths and network egress, per-session resource metering
+  - **VM layer**: KVM hardware virtualization as the security boundary
+  - **Sandbox layer**: namespaces + OverlayFS + cgroup v2 + Landlock + seccomp-bpf, one execution unit per agent
+- **Observability**: in-guest eBPF (CO-RE) collects syscalls, file, network, and resource usage per sandbox, reported to the host over vsock
+- **Snapshot fault tolerance**: three levels — FS CoW snapshots, per-process CRIU at agent step boundaries, and full VM snapshot/restore via Cloud Hypervisor
+- **Phase-aware scheduling**: sched_ext scheduler on the host reclaims vCPU time during LLM inference wait periods
+- **Warm pools**: pre-booted VMs ready for instant sandbox claims
 
 ## Architecture
 
 ```
-┌─ Host ─────────────────────────────────────────────────┐
-│  Resource controller (Terrarium embedded as a library,  │
-│  no standalone daemon)                                  │
-│  Input: PSI / DAMON working set / eBPF metering         │
-│  Output: dynamic resource adjustments                   │
-│  sched_ext scheduler (reclaims CPU during LLM waits)    │
-│                                                         │
-│  terra-vmm: one process per VM (spawned by controller)  │
-│  ┌─ Terrarium VM (microVM, KVM isolation)────────────┐ │
-│  │  sandboxd: sandbox lifecycle management            │ │
-│  │  ┌───────────┐ ┌───────────┐ ┌───────────┐         │ │
-│  │  │   Agent   │ │   Agent   │ │   Agent   │ ...     │ │
-│  │  │  sandbox  │ │  sandbox  │ │  sandbox  │         │ │
-│  │  └───────────┘ └───────────┘ └───────────┘         │ │
-│  │  eBPF observability daemon  │  checkpoint daemon   │ │
-│  └──────────────────────┬──────────────────────────────┘ │
-│                  vsock control/telemetry channel        │
-└─────────────────────────────────────────────────────────┘
+┌─ Host ──────────────────────────────────────────────────────────┐
+│  terra-controller daemon (sole control plane entry)             │
+│  Input: PSI / DAMON / eBPF metering → Output: CH resize API     │
+│  sched_ext scheduler (phase-aware CPU reclamation)               │
+│                                                                  │
+│  cloud-hypervisor: one process per VM (spawned & managed by      │
+│  controller via unix domain socket API)                          │
+│  ┌─ VM (KVM isolation) ───────────────────────────────────────┐ │
+│  │  sandboxd: sandbox lifecycle management                    │ │
+│  │  ┌───────────┐ ┌───────────┐ ┌───────────┐                │ │
+│  │  │  Agent    │ │  Agent    │ │  Agent    │ ...            │ │
+│  │  │  sandbox  │ │  sandbox  │ │  sandbox  │                │ │
+│  │  └───────────┘ └───────────┘ └───────────┘                │ │
+│  │  observe (eBPF)          │  checkpoint daemon             │ │
+│  └────────────────────┬──────────────────────────────────────┘ │
+│                vsock control / telemetry channel                │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-| | VM layer (Terrarium VMM) | Sandbox layer (sandboxd) |
-|---|---|---|
-| Isolation | KVM hardware virtualization | namespaces + Landlock + seccomp |
-| Resources | virtio-mem / balloon / vCPU / blk dynamic resizing | cgroup v2 quotas and throttling |
-| Monitoring | VM-level resource profile (PSI / DAMON) | per-sandbox eBPF behavior capture |
-| Fault tolerance | full-VM snapshot + uffd lazy restore | FS CoW snapshot + CRIU (step boundary) |
-| Form factor | one terra-vmm process per VM (vmm-core crate + thin shell), managed by the controller | resident daemon inside the guest |
+| Layer | Isolation | Resources | Monitoring | Fault Tolerance | Form Factor |
+|---|---|---|---|---|---|
+| **VM** | KVM hardware virtualization | virtio-mem / vCPU / balloon / blk resize | PSI, DAMON | CH VM snapshot / restore | One CH process per VM, managed by controller |
+| **Sandbox** | namespaces + Landlock + seccomp | cgroup v2 quotas & throttling | per-sandbox eBPF | FS CoW + CRIU (step boundary) | Resident daemon inside guest |
 
-## Usage
+## Usage (M2+)
 
-The sandbox, not the VM, is Terrarium's first-class citizen. Developers only work with a `Sandbox` object:
+The sandbox, not the VM, is Terrarium's first-class citizen:
 
 ```python
 import terra
@@ -60,60 +56,49 @@ with terra.sandbox.create(name='dev', image='python:3.12') as sb:
     proc.wait()
     print(proc.stdout.read())          # 1024
 
-    snap = sb.snapshot()               # full state: filesystem + process memory
+    snap = sb.snapshot()
 
-sb2 = terra.sandbox.create(name='dev2', snapshot=snap)  # restore from snapshot
+sb2 = terra.sandbox.create(name='dev2', snapshot=snap)
 ```
 
-**How a sandbox maps to a VM**: in the default mode, the controller automatically handles VM creation, scaling, and sandbox placement (bin-packing by tenant affinity and resource utilization). The `Sandbox` handle returned by `create()` encapsulates the `(vm, sandbox)` routing information, so subsequent `exec` / `snapshot` calls are routed automatically — developers never need to think about VMs. When explicit control is needed (pausing an entire VM, tenant-exclusive isolation), the VM is also a first-class object:
-
-```python
-vm = terra.vm.create(cpus=8, memory_gb=16)   # dedicated VM
-sb = vm.sandbox.create(image='python:3.12')
-vm.pause()                                   # pauses all sandboxes in the VM
-```
-
-Placement hints can also be passed via `terra.sandbox.create(placement=...)`.
-
-- **Python SDK**: `create / exec / terminate / snapshot / pause / resume / resize / ls`, each with an async `.aio` variant; `num_sandboxes=N` for batch creation, suited for RL rollouts and parallel evals
+- **Python SDK**: `create / exec / terminate / snapshot / pause / resume / resize / ls` with async `.aio` variants
 - **CLI**: `terra sandbox create / exec / ls / terminate / snapshot / pool`
-- **MCP Server**: sandbox capabilities exposed as MCP tools (create / run / snapshot / terminate), ready for agent clients
-- **Warm pools**: `create_pool(image=..., replicas=...)` keeps pre-booted microVMs ready for instant claim; pools can be based on snapshot images
-- **Credentials and networking**: `secrets=` / `env=` injected at creation; sandboxes are network-isolated by default and can reach each other only via ports explicitly exposed with `ports=`
-- **Online adjustment**: `pause() / resume()` for whole-VM suspend and resume; `resize(cpus=..., memory_gb=...)` for live scaling
+- **MCP Server**: sandbox capabilities exposed as MCP tools
+- **Warm pools**: `create_pool(image=..., replicas=...)` for instant claims
+- **Online adjustment**: `pause() / resume()` per VM, `resize(cpus=..., memory_gb=...)` live
 
-## Module Layout
+## Repository Structure
 
 ```
 terrarium/
+├── AGENTS.md / README.md / README_zh.md
+├── LICENSE (Apache-2.0) / NOTICE / THIRD-PARTY
+├── hypervisor/             # Cloud Hypervisor fork (git submodule or vendored branch)
+│   └── PATCHES.md          # local patch registry
 ├── crates/
-│   ├── vmm-core/       # VM lifecycle, address space, vCPU management
-│   ├── vmm-devices/    # virtio-mmio devices: blk / virtio-mem / balloon / vsock
-│   ├── vmm-snapshot/   # VM state serialization + userfaultfd lazy restore
-│   ├── vmm/            # terra-vmm executable (thin shell composing the crates, one process per VM)
-│   ├── vmm-api/        # API socket protocol between controller and terra-vmm
-│   ├── sandboxd/       # in-guest sandbox runtime: isolation stack, lifecycle, snapshot coordination
-│   ├── observe/        # in-guest eBPF observability daemon, reporting over vsock
-│   ├── checkpoint/     # CRIU wrapper and step-boundary quiescence protocol
-│   ├── controller/     # host resource controller: scheduling, placement, warm pools, resource loop
-│   ├── cli/            # command-line tool
-│   └── mcp/            # MCP server
-├── sdk/python/         # Python SDK (sync + asyncio)
-└── xtask/              # build tooling: guest kernel / rootfs packaging
+│   ├── ch-client/          # CH API socket client (create/start/resize/add-disk/snapshot)
+│   ├── controller/         # terra-controller daemon (control plane)
+│   ├── sandboxd/           # in-guest sandbox runtime (M2)
+│   ├── observe/            # in-guest eBPF observability daemon (M2)
+│   ├── checkpoint/         # snapshot coordination (M3)
+│   ├── cli/                # terra CLI (M2)
+│   └── mcp/                # MCP Server (M2)
+├── sdk/python/             # Python SDK (M2)
+├── images/                 # guest kernel config & rootfs build scripts
+├── docs/decisions/         # Architecture Decision Records
+└── .github/workflows/      # CI
 ```
 
 ## Roadmap
 
-- **M0 Skeleton**: minimal VMM based on rust-vmm, direct-booting a stripped kernel to a shell
-- **M1 Dynamic resources**: device layer ready; the "pre-create + adjust" trio (memory / CPU / disk) validated
-- **M2 Sandbox layer and developer interfaces**: sandboxd full isolation stack + eBPF telemetry; Python SDK / CLI / MCP Server usable
-- **M3 Snapshot and fault tolerance**: FS CoW snapshots → full-VM snapshot with lazy restore (exposed via `snapshot / pause / resume` in the SDK) → per-process CRIU
-- **M4 Density and scheduling**: sched_ext scheduling optimizations, single-host density benchmarks, automated resource loop, warm pools online
+- **M0 — CH Base & Dynamic Resource Validation**: fork integration, guest image build, baseline startup, CPU/memory/disk resize testing, ch-client skeleton
+- **M1 — Controller Skeleton & Manual Resource Loop**: full ch-client API, VM lifecycle management, manual resize trigger validation
+- **M2 — Sandbox Layer & Developer Interfaces**: sandboxd full isolation stack, eBPF telemetry, Python SDK / CLI / MCP Server
+- **M3 — Snapshot Fault Tolerance**: FS CoW snapshots → CH VM snapshot/restore → per-process CRIU
+- **M4 — Automation & Density**: PSI/DAMON closed-loop decisions, sched_ext scheduling, warm pools, density benchmarks
 
-## Acknowledgments and License
+## Acknowledgments
 
-Terrarium is built on the [rust-vmm](https://github.com/rust-vmm) ecosystem. Parts of the device
-implementations are derived from [Dragonball](https://github.com/kata-containers/kata-containers)
-(Apache License 2.0); see `NOTICE` and `THIRD-PARTY` for details.
+Terrarium is built on [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor) (Apache License 2.0). We maintain a thin fork with minimal, well-documented patches. See `hypervisor/PATCHES.md` and `THIRD-PARTY` for details.
 
 This project is released under the Apache License 2.0.

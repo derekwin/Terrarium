@@ -1,0 +1,22 @@
+#!/bin/sh
+# Terrarium guest init script
+#
+# This runs as PID 1 inside the guest VM.
+# It sets up essential pseudo-filesystems and drops to a shell.
+
+# Mount essential filesystems
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /tmp
+
+# Bring up loopback
+ip link set lo up 2>/dev/null || true
+
+# Display guest info
+echo "Terrarium guest ready."
+echo "Kernel: $(uname -r)"
+echo "Memory: $(free -m | awk '/Mem:/ {print $2 " MB"}')"
+echo "vCPUs:  $(nproc)"
+
+exec /bin/sh

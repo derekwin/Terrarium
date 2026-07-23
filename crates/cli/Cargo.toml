@@ -1,20 +1,8 @@
 [package]
 name = "cli"
-description = "terra 命令行工具：create / exec / ls / terminate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-homepage.workspace = true
-
-[lints]
-workspace = true
-
-[[bin]]
-name = "terra"
-path = "src/main.rs"
 
 [dependencies]
-controller = { path = "../controller" }
-clap = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
+tracing = { workspace = true }

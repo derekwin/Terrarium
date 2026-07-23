@@ -1,3 +1,2 @@
-# 提供 `cargo xtask ...` 别名（xtask 模式）
-[alias]
-xtask = "run --package xtask --"
+[build]
+rustflags = ["-D", "warnings"]
