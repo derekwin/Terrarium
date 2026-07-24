@@ -1,4 +1,6 @@
 /target/
+linux-*.tar.xz
+linux-*/
 **/*.rs.bk
 *.swp
 *.swo

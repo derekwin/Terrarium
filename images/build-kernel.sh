@@ -14,22 +14,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR="${PROJECT_ROOT}/target/guest"
 
-KERNEL_SRC="linux-${KERNEL_VERSION}"
-KERNEL_TARBALL="${KERNEL_SRC}.tar.xz"
-KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${KERNEL_TARBALL}"
+# Use a cache directory outside the project to avoid polluting the git workspace.
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/terrarium/kernel"
+mkdir -p "$CACHE_DIR"
+
+KERNEL_SRC="${CACHE_DIR}/linux-${KERNEL_VERSION}"
+KERNEL_TARBALL="${CACHE_DIR}/linux-${KERNEL_VERSION}.tar.xz"
+KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${KERNEL_VERSION}.tar.xz"
 
 echo "=== Terrarium Guest Kernel Build ==="
 echo "Kernel version: ${KERNEL_VERSION}"
+echo "Cache dir:      ${CACHE_DIR}"
 echo "Output dir:     ${OUTPUT_DIR}"
 
 # Download kernel source if not present
 if [ ! -d "$KERNEL_SRC" ]; then
     if [ ! -f "$KERNEL_TARBALL" ]; then
         echo "Downloading kernel source..."
-        wget -q --show-progress "$KERNEL_URL"
+        wget -q --show-progress -P "$CACHE_DIR" "$KERNEL_URL"
     fi
     echo "Extracting kernel source..."
-    tar xf "$KERNEL_TARBALL"
+    tar xf "$KERNEL_TARBALL" -C "$CACHE_DIR"
 fi
 
 # Apply our minimal config and resolve dependencies
