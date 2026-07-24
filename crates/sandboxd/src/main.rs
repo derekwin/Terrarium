@@ -83,6 +83,9 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
     let memory_mb = cmd["limits"]["memory_mb"].as_u64();
     let cpu_shares = cmd["limits"]["cpu_shares"].as_u64();
 
+    // Parse per-sandbox environment variables (secrets injection)
+    let env_vars = cmd["env"].as_object();
+
     // Detect which tools are needed from the command args
     let needs_python = args.iter().any(|a| {
         matches!(
@@ -97,6 +100,8 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
         )
     });
 
+    // Build environment variable exports for secrets injection
+    let env_exports = build_env_exports(env_vars);
     // Build cgroup v2 setup prefix for resource limits
     let cg_setup = build_cgroup_setup(memory_mb, cpu_shares);
 
@@ -108,8 +113,9 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
                     "sh".to_string(),
                     "-c".to_string(),
                     format!(
-                        "{}source {} 2>/dev/null; exec unshare --mount --uts --ipc -- {}",
+                        "{}{}source {} 2>/dev/null; exec unshare --mount --uts --ipc -- {}",
                         cg_setup,
+                        env_exports,
                         env.activate_script,
                         args.join(" ")
                     ),
@@ -141,12 +147,16 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
         "--uts".into(),
         "--ipc".into(),
     ];
-    // Add cgroup setup wrapper if limits are set
-    if memory_mb.is_some() || cpu_shares.is_some() {
+    if memory_mb.is_some() || cpu_shares.is_some() || env_vars.is_some() {
         ns_args = vec![
             "sh".into(),
             "-c".into(),
-            format!("{}{}", cg_setup, args.join(" ")),
+            format!(
+                "{}{}exec unshare --mount --uts --ipc -- {}",
+                cg_setup,
+                env_exports,
+                args.join(" ")
+            ),
         ];
     } else {
         ns_args.push("--".into());
@@ -162,6 +172,24 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
             })),
         ),
         Err(e) => respond(stream, "error", &format!("Sandbox error: {}", e), None),
+    }
+}
+
+/// Build shell `export KEY=VALUE;` commands from env object.
+fn build_env_exports(env: Option<&serde_json::Map<String, serde_json::Value>>) -> String {
+    match env {
+        Some(vars) => {
+            let mut exports = String::new();
+            for (k, v) in vars {
+                if let Some(val) = v.as_str() {
+                    // Escape single quotes in values
+                    let escaped = val.replace('\'', "'\\''");
+                    exports.push_str(&format!("export {}='{}'; ", k, escaped));
+                }
+            }
+            exports
+        }
+        None => String::new(),
     }
 }
 
