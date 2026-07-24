@@ -1,0 +1,244 @@
+//! VM specification used by the controller to define and launch VMs.
+
+use serde::{Deserialize, Serialize};
+
+/// Full specification for creating and booting a VM.
+///
+/// This is the controller's canonical VM definition. It maps to
+/// ch-client's VmConfig but adds controller-level metadata (name, labels).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmSpec {
+    /// Human-readable name for this VM. Must be unique within a manager.
+    pub name: String,
+
+    /// Path to the kernel image (bzImage / vmlinux.bin).
+    pub kernel: String,
+
+    /// Kernel command line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmdline: Option<String>,
+
+    /// Number of vCPUs to boot with.
+    #[serde(default = "default_boot_vcpus")]
+    pub boot_vcpus: u8,
+
+    /// Maximum vCPUs this VM can scale to.
+    #[serde(default = "default_max_vcpus")]
+    pub max_vcpus: u8,
+
+    /// Boot memory in megabytes.
+    #[serde(default = "default_memory_mb")]
+    pub memory_mb: u64,
+
+    /// Hotplug memory ceiling in gigabytes (enables virtio-mem).
+    /// If None, memory resize is disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hotplug_memory_gb: Option<u64>,
+
+    /// Path to the Cloud Hypervisor binary.
+    #[serde(default = "default_ch_binary")]
+    pub ch_binary: String,
+
+    /// API socket path for this VM's CH instance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_socket: Option<String>,
+
+    /// Path to initramfs image (cpio). If set, CH boots with --initramfs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initramfs: Option<String>,
+
+    /// Disk images to attach (each generates a --disk flag).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disks: Vec<String>,
+
+    /// Base disk image path for qcow2 overlay (shared, read-only layer).
+    /// When set, a per-VM qcow2 overlay is created with this as backing file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_disk: Option<String>,
+
+    /// Tool layers to stack between base and user overlay (ordered base→outer).
+    /// Each layer is a pre-built qcow2 with specific tools (python, nodejs, etc).
+    /// The user overlay's backing file is the last tool layer (or base if none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_layers: Vec<String>,
+
+    /// Virtual disk size for the qcow2 overlay in GB (default: 20).
+    /// The overlay file grows dynamically via COW; this sets the ceiling.
+    #[serde(default = "default_disk_size_gb")]
+    pub disk_size_gb: u64,
+
+    /// Optional labels for categorization / filtering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<(String, String)>,
+}
+
+fn default_boot_vcpus() -> u8 {
+    2
+}
+fn default_max_vcpus() -> u8 {
+    16
+}
+fn default_memory_mb() -> u64 {
+    512
+}
+fn default_ch_binary() -> String {
+    "cloud-hypervisor".to_string()
+}
+fn default_disk_size_gb() -> u64 {
+    20
+}
+
+impl VmSpec {
+    /// Create a minimal spec with just a name and kernel path.
+    pub fn new(name: impl Into<String>, kernel: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kernel: kernel.into(),
+            cmdline: Some("console=ttyS0 quiet init=/init".into()),
+            boot_vcpus: default_boot_vcpus(),
+            max_vcpus: default_max_vcpus(),
+            memory_mb: default_memory_mb(),
+            hotplug_memory_gb: None,
+            ch_binary: default_ch_binary(),
+            api_socket: None,
+            initramfs: None,
+            disks: vec![],
+            base_disk: None,
+            tool_layers: vec![],
+            disk_size_gb: default_disk_size_gb(),
+            labels: vec![],
+        }
+    }
+
+    /// Set the kernel command line.
+    pub fn cmdline(mut self, cmdline: impl Into<String>) -> Self {
+        self.cmdline = Some(cmdline.into());
+        self
+    }
+
+    /// Set vCPU range.
+    pub fn cpus(mut self, boot: u8, max: u8) -> Self {
+        self.boot_vcpus = boot;
+        self.max_vcpus = max;
+        self
+    }
+
+    /// Set boot memory in MB.
+    pub fn memory_mb(mut self, mb: u64) -> Self {
+        self.memory_mb = mb;
+        self
+    }
+
+    /// Enable virtio-mem with a hotplug ceiling in GB.
+    pub fn hotplug_memory_gb(mut self, gb: u64) -> Self {
+        self.hotplug_memory_gb = Some(gb);
+        self
+    }
+
+    /// Set the CH binary path.
+    pub fn ch_binary(mut self, path: impl Into<String>) -> Self {
+        self.ch_binary = path.into();
+        self
+    }
+
+    /// Set a custom API socket path. If not set, a default is generated from the name.
+    #[allow(dead_code)]
+    pub fn api_socket(mut self, path: impl Into<String>) -> Self {
+        self.api_socket = Some(path.into());
+        self
+    }
+
+    /// Set the initramfs path (cpio archive).
+    pub fn initramfs(mut self, path: impl Into<String>) -> Self {
+        self.initramfs = Some(path.into());
+        self
+    }
+
+    /// Attach a disk image.
+    pub fn disk(mut self, path: impl Into<String>) -> Self {
+        self.disks.push(path.into());
+        self
+    }
+
+    /// Set base disk for qcow2 overlay. Each VM gets a per-instance qcow2
+    /// with this base as the backing file (COW semantics).
+    pub fn base_disk(mut self, path: impl Into<String>) -> Self {
+        self.base_disk = Some(path.into());
+        self
+    }
+
+    /// Add a tool layer (stacked base→outer between base disk and user overlay).
+    /// Tool layers are read-only qcow2 images with pre-installed runtimes.
+    pub fn tool_layer(mut self, path: impl Into<String>) -> Self {
+        self.tool_layers.push(path.into());
+        self
+    }
+
+    /// Set the virtual disk size for the qcow2 overlay in GB.
+    /// The overlay file grows dynamically via COW up to this ceiling.
+    #[allow(dead_code)]
+    pub fn disk_size_gb(mut self, gb: u64) -> Self {
+        self.disk_size_gb = gb;
+        self
+    }
+
+    /// Add a label.
+    #[allow(dead_code)]
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.labels.push((key.into(), value.into()));
+        self
+    }
+
+    /// Return the API socket path, using a default if not explicitly set.
+    pub fn api_socket_path(&self) -> String {
+        self.api_socket
+            .clone()
+            .unwrap_or_else(|| format!("/tmp/terra-{}.sock", self.name))
+    }
+
+    /// Build the CH command-line arguments for this spec.
+    pub fn to_ch_args(&self) -> Vec<String> {
+        let socket = self.api_socket_path();
+        let mut args = vec![
+            "--api-socket".to_string(),
+            socket,
+            "--kernel".to_string(),
+            self.kernel.clone(),
+            "--cpus".to_string(),
+            format!("boot={},max={}", self.boot_vcpus, self.max_vcpus),
+        ];
+
+        if let Some(ref cmdline) = self.cmdline {
+            args.push("--cmdline".to_string());
+            args.push(cmdline.clone());
+        }
+
+        if let Some(ref initramfs) = self.initramfs {
+            args.push("--initramfs".to_string());
+            args.push(initramfs.clone());
+        }
+
+        for disk in &self.disks {
+            args.push("--disk".to_string());
+            args.push(format!("path={}", disk));
+        }
+
+        if let Some(hotplug_gb) = self.hotplug_memory_gb {
+            args.push("--memory".to_string());
+            args.push(format!(
+                "size={}M,hotplug_method=virtio-mem,hotplug_size={}G",
+                self.memory_mb, hotplug_gb
+            ));
+        } else {
+            args.push("--memory".to_string());
+            args.push(format!("size={}M", self.memory_mb));
+        }
+
+        args.push("--serial".to_string());
+        args.push("tty".to_string());
+        args.push("--console".to_string());
+        args.push("off".to_string());
+
+        args
+    }
+}
