@@ -79,6 +79,10 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
 
     let work_dir = cmd["work_dir"].as_str().unwrap_or("/tmp");
 
+    // Parse resource limits
+    let memory_mb = cmd["limits"]["memory_mb"].as_u64();
+    let cpu_shares = cmd["limits"]["cpu_shares"].as_u64();
+
     // Detect which tools are needed from the command args
     let needs_python = args.iter().any(|a| {
         matches!(
@@ -93,6 +97,9 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
         )
     });
 
+    // Build cgroup v2 setup prefix for resource limits
+    let cg_setup = build_cgroup_setup(memory_mb, cpu_shares);
+
     // Lazy setup for detected tools
     if needs_python || needs_node {
         match setup::setup_tools(needs_python, needs_node) {
@@ -101,7 +108,8 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
                     "sh".to_string(),
                     "-c".to_string(),
                     format!(
-                        "source {} 2>/dev/null; exec unshare --mount --uts --ipc -- {}",
+                        "{}source {} 2>/dev/null; exec unshare --mount --uts --ipc -- {}",
+                        cg_setup,
                         env.activate_script,
                         args.join(" ")
                     ),
@@ -126,16 +134,25 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
         }
     }
 
-    // Plain execution with namespace isolation
+    // Plain execution with namespace isolation + cgroup limits
     let mut ns_args: Vec<String> = vec![
         "unshare".into(),
         "--mount".into(),
         "--uts".into(),
         "--ipc".into(),
-        "--".into(),
     ];
-    ns_args.extend(args);
-    match sandbox::exec_isolated("unshare", &ns_args, work_dir) {
+    // Add cgroup setup wrapper if limits are set
+    if memory_mb.is_some() || cpu_shares.is_some() {
+        ns_args = vec![
+            "sh".into(),
+            "-c".into(),
+            format!("{}{}", cg_setup, args.join(" ")),
+        ];
+    } else {
+        ns_args.push("--".into());
+        ns_args.extend(args);
+    }
+    match sandbox::exec_isolated(&ns_args[0], &ns_args, work_dir) {
         Ok(o) => respond(
             stream,
             "ok",
@@ -146,6 +163,28 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
         ),
         Err(e) => respond(stream, "error", &format!("Sandbox error: {}", e), None),
     }
+}
+
+/// Build shell commands to set up cgroup v2 resource limits.
+/// Returns empty string if no limits are set.
+fn build_cgroup_setup(memory_mb: Option<u64>, cpu_shares: Option<u64>) -> String {
+    if memory_mb.is_none() && cpu_shares.is_none() {
+        return String::new();
+    }
+    let mut setup = String::from("CG=$$; mkdir -p /sys/fs/cgroup/terra-$CG 2>/dev/null; echo $CG > /sys/fs/cgroup/terra-$CG/cgroup.procs 2>/dev/null; ");
+    if let Some(mb) = memory_mb {
+        setup.push_str(&format!(
+            "echo {}M > /sys/fs/cgroup/terra-$CG/memory.max 2>/dev/null; ",
+            mb
+        ));
+    }
+    if let Some(shares) = cpu_shares {
+        setup.push_str(&format!(
+            "echo {} > /sys/fs/cgroup/terra-$CG/cpu.weight 2>/dev/null; ",
+            shares
+        ));
+    }
+    setup
 }
 
 fn respond(stream: &mut UnixStream, status: &str, message: &str, data: Option<&serde_json::Value>) {
