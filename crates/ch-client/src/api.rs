@@ -79,13 +79,24 @@ pub struct VmInfo {
 /// VM information from vm.info endpoint.
 #[derive(Debug, Clone, Deserialize)]
 pub struct VmDetails {
+    /// VM configuration.
+    #[serde(default)]
+    pub config: Option<VmInfoConfig>,
+    /// Current state.
+    #[serde(default)]
+    pub state: String,
+    /// Actual memory size reported by the VMM.
+    #[serde(default)]
+    pub memory_actual_size: Option<u64>,
+}
+
+/// The config section of a vm.info response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VmInfoConfig {
     /// Current vCPU configuration.
     #[serde(default)]
     pub cpus: Option<CpusConfig>,
     /// Current memory configuration.
     #[serde(default)]
     pub memory: Option<MemoryConfig>,
-    /// Current state.
-    #[serde(default)]
-    pub state: String,
 }

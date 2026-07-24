@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -41,7 +41,6 @@ impl ChClient {
              Host: localhost\r\n\
              Content-Type: application/json\r\n\
              Content-Length: {}\r\n\
-             Connection: close\r\n\
              \r\n\
              {}",
             method,
@@ -53,12 +52,37 @@ impl ChClient {
         stream.write_all(req.as_bytes())?;
         stream.flush()?;
 
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf)?;
-        let response = String::from_utf8_lossy(&buf).into_owned();
+        // Read response without relying on connection close (CH uses keep-alive).
+        let mut reader = BufReader::new(&mut stream);
 
-        // Parse status code and body from HTTP response
-        let (status, body) = Self::parse_http_response(&response)?;
+        // Read status line
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line)?;
+        let status = Self::parse_status(&status_line)?;
+
+        // Read headers, tracking Content-Length
+        let mut content_length: usize = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line)?;
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+            if let Some(val) = line
+                .to_lowercase()
+                .strip_prefix("content-length:")
+                .map(|s| s.trim().to_string())
+            {
+                content_length = val.parse().unwrap_or(0);
+            }
+        }
+
+        // Read body
+        let mut resp_body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut resp_body)?;
+        }
+        let body = String::from_utf8_lossy(&resp_body).into_owned();
 
         if status >= 400 {
             return Err(ClientError::Api(format!(
@@ -70,38 +94,18 @@ impl ChClient {
         Ok((status, body))
     }
 
-    /// Parse an HTTP/1.1 response, returning (status_code, body).
-    fn parse_http_response(response: &str) -> Result<(u16, String)> {
-        // Split headers from body
-        let parts: Vec<&str> = response.splitn(2, "\r\n\r\n").collect();
+    /// Parse HTTP status code from a status line like "HTTP/1.1 200 OK\r\n".
+    fn parse_status(status_line: &str) -> Result<u16> {
+        let parts: Vec<&str> = status_line.split_whitespace().collect();
         if parts.len() < 2 {
-            return Err(ClientError::HttpParse(
-                "Response missing body separator".into(),
-            ));
-        }
-
-        let headers = parts[0];
-        let body = parts[1].to_string();
-
-        // Parse status line: "HTTP/1.1 200 OK"
-        let first_line = headers
-            .lines()
-            .next()
-            .ok_or_else(|| ClientError::HttpParse("Empty response".into()))?;
-
-        let status_parts: Vec<&str> = first_line.split_whitespace().collect();
-        if status_parts.len() < 2 {
             return Err(ClientError::HttpParse(format!(
                 "Invalid status line: {}",
-                first_line
+                status_line.trim()
             )));
         }
-
-        let status: u16 = status_parts[1].parse().map_err(|_| {
-            ClientError::HttpParse(format!("Invalid status code: {}", status_parts[1]))
-        })?;
-
-        Ok((status, body))
+        parts[1]
+            .parse()
+            .map_err(|_| ClientError::HttpParse(format!("Invalid status code: {}", parts[1])))
     }
 
     // -----------------------------------------------------------------------
