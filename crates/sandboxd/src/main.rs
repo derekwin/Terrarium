@@ -101,7 +101,7 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
                     "sh".to_string(),
                     "-c".to_string(),
                     format!(
-                        "source {} 2>/dev/null; exec {}",
+                        "source {} 2>/dev/null; exec unshare --mount --uts --ipc -- {}",
                         env.activate_script,
                         args.join(" ")
                     ),
@@ -126,8 +126,16 @@ fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
         }
     }
 
-    // Plain execution — no tool setup needed
-    match sandbox::exec_isolated(&args[0], &args, work_dir) {
+    // Plain execution with namespace isolation
+    let mut ns_args: Vec<String> = vec![
+        "unshare".into(),
+        "--mount".into(),
+        "--uts".into(),
+        "--ipc".into(),
+        "--".into(),
+    ];
+    ns_args.extend(args);
+    match sandbox::exec_isolated("unshare", &ns_args, work_dir) {
         Ok(o) => respond(
             stream,
             "ok",
