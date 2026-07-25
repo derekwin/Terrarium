@@ -1,8 +1,10 @@
 [package]
-name = "cli"
+name = "terra-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-tracing = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
