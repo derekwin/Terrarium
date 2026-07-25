@@ -8,7 +8,9 @@
 //! qcow2 backing chain: user → tool → base
 
 mod qcow2;
+mod raw;
 mod spec;
 
 pub use qcow2::OverlayManager;
-pub use spec::OverlaySpec;
+pub use raw::RawDiskManager;
+pub use spec::{OverlayFormat, OverlaySpec};

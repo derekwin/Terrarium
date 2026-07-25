@@ -2,6 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Supported disk formats for overlay stacks.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum OverlayFormat {
+    #[default]
+    Qcow2,
+    Raw,
+}
+
 /// Specification for building a qcow2 overlay stack.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlaySpec {
@@ -15,6 +23,9 @@ pub struct OverlaySpec {
     /// Virtual disk size ceiling in GB.
     #[serde(default = "default_disk_size_gb")]
     pub disk_size_gb: u64,
+    /// Disk format for this overlay stack.
+    #[serde(default)]
+    pub format: OverlayFormat,
     /// State directory for storing overlays.
     #[serde(default = "default_state_dir")]
     pub state_dir: String,
@@ -36,6 +47,7 @@ impl OverlaySpec {
             tool_layers: vec![],
             name: name.into(),
             disk_size_gb: default_disk_size_gb(),
+            format: OverlayFormat::default(),
             state_dir: default_state_dir(),
         }
     }
