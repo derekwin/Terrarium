@@ -49,6 +49,8 @@ impl VmManager {
                 .map_err(|e| AdapterError::internal(format!("overlay: {}", e)))?;
             spec.disks.push(overlay_path.clone());
             self.overlays.insert(name.clone(), overlay_path);
+            // Clear base_disk so the adapter doesn't create a second overlay.
+            spec.base_disk = None;
         }
 
         let handle = match self.adapter.create(&spec).await {

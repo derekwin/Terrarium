@@ -141,7 +141,6 @@ fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult
 
     tracing::info!(
         name = %handle.name,
-        ?args,
         env_keys = ?handle.env.keys().collect::<Vec<_>>(),
         "sandlock run"
     );
@@ -156,8 +155,8 @@ fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult
         .map_err(|e| AdapterError::internal(format!("sandlock spawn: {}", e)))?;
 
     // Take pipes before moving child into the wait thread.
-    let mut stdout_pipe = child.stdout.take().unwrap();
-    let mut stderr_pipe = child.stderr.take().unwrap();
+    let stdout_pipe = child.stdout.take().unwrap();
+    let stderr_pipe = child.stderr.take().unwrap();
 
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -173,10 +172,19 @@ fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult
         }
     };
 
+    /// Max output per pipe for sandbox commands.
+    const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
-    stdout_pipe.read_to_end(&mut stdout_buf).ok();
-    stderr_pipe.read_to_end(&mut stderr_buf).ok();
+    stdout_pipe
+        .take(MAX_OUTPUT_BYTES as u64)
+        .read_to_end(&mut stdout_buf)
+        .ok();
+    stderr_pipe
+        .take(MAX_OUTPUT_BYTES as u64)
+        .read_to_end(&mut stderr_buf)
+        .ok();
 
     Ok(ExecResult {
         stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),

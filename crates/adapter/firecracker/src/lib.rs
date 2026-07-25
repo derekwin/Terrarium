@@ -74,7 +74,7 @@ impl FcVmHandle {
             .args(["--api-sock", &socket])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("spawn firecracker: {}", e))?;
 

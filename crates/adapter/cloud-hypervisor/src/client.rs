@@ -97,8 +97,8 @@ impl ChClient {
     // -----------------------------------------------------------------------
 
     pub async fn vm_create(&self, config: &VmConfig) -> Result<()> {
-        let body = serde_json::json!({"payload": config});
-        self.request("PUT", "/api/v1/vm.create", Some(&body.to_string()))
+        let body = serde_json::to_string(config)?;
+        self.request("PUT", "/api/v1/vm.create", Some(&body))
             .await?;
         Ok(())
     }
