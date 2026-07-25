@@ -49,6 +49,10 @@ pub struct Command {
     #[serde(default)]
     pub disk_size_gb: Option<u64>,
 
+    // pool
+    #[serde(default)]
+    pub pool_size: Option<u64>,
+
     // resize
     #[serde(default)]
     pub memory_bytes: Option<u64>,
@@ -305,4 +309,58 @@ fn cmd_restore(mgr: &mut VmManager, cmd: Command) -> Response {
         )),
         Err(e) => Response::err(e.to_string()),
     }
+}
+// Pool commands
+
+pub fn pool_execute(pools: &mut crate::pool::WarmPool, cmd: Command) -> Response {
+    match cmd.command.as_str() {
+        "pool_create" => cmd_pool_create(pools, cmd),
+        "pool_claim" => cmd_pool_claim(pools, cmd),
+        "pool_list" => cmd_pool_list(pools),
+        _ => Response::err(format!("Unknown pool command: {}", cmd.command)),
+    }
+}
+
+fn cmd_pool_create(pools: &mut crate::pool::WarmPool, cmd: Command) -> Response {
+    let name = match cmd.name {
+        Some(n) => n,
+        None => return Response::err("Missing pool name"),
+    };
+    let size = cmd.pool_size.unwrap_or(5) as usize;
+    // Build a minimal VmSpec from command
+    let kernel = match cmd.kernel {
+        Some(k) => k,
+        None => return Response::err("Missing kernel for pool template"),
+    };
+    let mut spec = crate::spec::VmSpec::new(&name, kernel);
+    if let Some(b) = cmd.base_disk {
+        spec = spec.base_disk(b);
+    }
+    for tool in &cmd.tool_layers {
+        spec = spec.tool_layer(tool);
+    }
+    match pools.create_pool(&name, &spec, size) {
+        Ok(()) => Response::ok_msg(&format!("Pool {} created with {} overlays", name, size)),
+        Err(e) => Response::err(e),
+    }
+}
+
+fn cmd_pool_claim(pools: &mut crate::pool::WarmPool, cmd: Command) -> Response {
+    let name = match cmd.name {
+        Some(n) => n,
+        None => return Response::err("Missing pool name"),
+    };
+    match pools.claim(&name) {
+        Ok(path) => Response::ok(serde_json::json!({"overlay": path})),
+        Err(e) => Response::err(e),
+    }
+}
+
+fn cmd_pool_list(pools: &crate::pool::WarmPool) -> Response {
+    let list: Vec<serde_json::Value> = pools
+        .list()
+        .iter()
+        .map(|(name, count)| serde_json::json!({"name": name, "available": count}))
+        .collect();
+    Response::ok(serde_json::json!({"pools": list}))
 }
