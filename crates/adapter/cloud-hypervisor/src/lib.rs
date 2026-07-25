@@ -51,6 +51,7 @@ impl VmAdapter for ChAdapter {
     }
 
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, String> {
+        spec.validate()?;
         ChVmHandle::spawn(spec, &self.ch_binary)
             .await
             .map(|h| Box::new(h) as Box<dyn VmHandle>)

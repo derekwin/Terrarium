@@ -185,6 +185,52 @@ fn default_disk_size_gb() -> u64 {
     20
 }
 
+impl VmSpec {
+    /// Validate the spec before passing it to an adapter.
+    /// Returns Ok(()) or an error message describing the first violation.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.boot_vcpus == 0 {
+            return Err("boot_vcpus must be at least 1".into());
+        }
+        if let Some(max) = self.max_vcpus {
+            if max == 0 {
+                return Err("max_vcpus must be at least 1 (or None for fixed)".into());
+            }
+            if self.boot_vcpus > max {
+                return Err(format!(
+                    "boot_vcpus ({}) exceeds max_vcpus ({})",
+                    self.boot_vcpus, max
+                ));
+            }
+        }
+        if self.memory_mb == 0 {
+            return Err("memory_mb must be at least 1".into());
+        }
+        if let Some(max) = self.max_memory_mb {
+            if max == 0 {
+                return Err("max_memory_mb must be at least 1 (or None for fixed)".into());
+            }
+            if self.memory_mb > max {
+                return Err(format!(
+                    "memory_mb ({}) exceeds max_memory_mb ({})",
+                    self.memory_mb, max
+                ));
+            }
+            // hotplug_size = max_memory_mb / 1024 GB; must be at least 1G
+            if max < 1024 {
+                return Err(format!(
+                    "max_memory_mb ({}) too small for virtio-mem hotplug (minimum 1024 MB)",
+                    max
+                ));
+            }
+        }
+        if self.kernel.is_empty() {
+            return Err("kernel path must not be empty".into());
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VmAdapter — backed by a VMM (CH, Firecracker, K8s Pod, etc.)
 // ---------------------------------------------------------------------------

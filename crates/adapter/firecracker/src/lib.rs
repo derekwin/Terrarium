@@ -41,6 +41,7 @@ impl VmAdapter for FirecrackerAdapter {
     }
 
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, String> {
+        spec.validate()?;
         FcVmHandle::spawn(spec).map(|h| Box::new(h) as Box<dyn VmHandle>)
     }
 

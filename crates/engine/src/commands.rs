@@ -131,6 +131,9 @@ async fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
         Ok(s) => s,
         Err(e) => return Response::err(e),
     };
+    if let Err(e) = spec.validate() {
+        return Response::err(e);
+    }
     let name = spec.name.to_string();
     match mgr.spawn(spec).await {
         Ok(()) => Response::ok(serde_json::json!({"name": name, "status": "created"})),
