@@ -32,7 +32,7 @@ impl VmAdapter for FirecrackerAdapter {
             cpu_resize: false,
             memory_resize: false,
             disk_resize: false,
-            disk_add: true,
+            disk_add: false,
             snapshot: true,
             pause_resume: true,
             network_qos: false,
@@ -162,36 +162,33 @@ impl VmHandle for FcVmHandle {
         Err("Firecracker does not support online disk resize".into())
     }
 
-    async fn add_disk(&self, path: &str, id: &str) -> Result<(), String> {
-        let client = FcClient::new(self.fc_socket());
-        client.put(
-            &format!("/drives/{}", id),
-            &serde_json::json!({
-                "drive_id": id, "path_on_host": path, "is_read_only": false,
-            }),
-        )
+    async fn add_disk(&self, _path: &str, _id: &str) -> Result<(), String> {
+        Err("Firecracker does not support hot-adding disks".into())
     }
 
     async fn pause(&self) -> Result<(), String> {
         let client = FcClient::new(self.fc_socket());
-        client.put("/vm/pause", &serde_json::json!({}))
+        client.patch("/vm", &serde_json::json!({"state": "Paused"}))
     }
 
     async fn resume(&self) -> Result<(), String> {
         let client = FcClient::new(self.fc_socket());
-        client.put("/vm/resume", &serde_json::json!({}))
+        client.patch("/vm", &serde_json::json!({"state": "Resumed"}))
     }
 
     async fn snapshot(&self) -> Result<Snapshot, String> {
-        let path = format!("/tmp/fc-snap-{}.bin", self.name);
+        let vm_path = format!("/tmp/fc-snap-{}.bin", self.name);
+        let mem_path = format!("/tmp/fc-snap-{}.mem", self.name);
         let client = FcClient::new(self.fc_socket());
         client.put(
             "/snapshot/create",
             &serde_json::json!({
-                "snapshot_path": path, "snapshot_type": "Full",
+                "snapshot_path": vm_path,
+                "mem_file_path": mem_path,
+                "snapshot_type": "Full",
             }),
         )?;
-        Ok(Snapshot { path })
+        Ok(Snapshot { path: vm_path })
     }
 
     async fn set_network_qos(&self, _qos: &NetworkQos) -> Result<(), String> {
@@ -228,18 +225,27 @@ impl Drop for FcVmHandle {
 
 struct FcClient {
     socket: String,
+    timeout: Duration,
 }
 
 impl FcClient {
     fn new(socket: &str) -> Self {
         Self {
             socket: socket.into(),
+            timeout: Duration::from_secs(5),
         }
     }
 
     fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
         let mut stream =
             UnixStream::connect(&self.socket).map_err(|e| format!("connect: {}", e))?;
+        stream
+            .set_read_timeout(Some(self.timeout))
+            .map_err(|e| format!("set timeout: {}", e))?;
+        stream
+            .set_write_timeout(Some(self.timeout))
+            .map_err(|e| format!("set timeout: {}", e))?;
+
         let body_str = body.unwrap_or("");
         let req = format!(
             "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -258,9 +264,8 @@ impl FcClient {
         let status: u16 = status_line
             .split_whitespace()
             .nth(1)
-            .unwrap_or("0")
-            .parse()
-            .unwrap_or(500);
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| format!("invalid status line: {}", status_line.trim()))?;
 
         // Read Content-Length header
         let mut content_length = 0usize;
@@ -296,6 +301,11 @@ impl FcClient {
 
     fn put(&self, path: &str, body: &serde_json::Value) -> Result<(), String> {
         self.request("PUT", path, Some(&body.to_string()))?;
+        Ok(())
+    }
+
+    fn patch(&self, path: &str, body: &serde_json::Value) -> Result<(), String> {
+        self.request("PATCH", path, Some(&body.to_string()))?;
         Ok(())
     }
 
