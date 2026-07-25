@@ -100,22 +100,14 @@ impl FcVmHandle {
                 "vcpu_count": spec.boot_vcpus, "mem_size_mib": spec.memory_mb,
             }),
         )?;
-        client.put(
-            "/boot-source",
-            &serde_json::json!({
-                "kernel_image_path": spec.kernel,
-                "boot_args": spec.cmdline.as_deref().unwrap_or("console=ttyS0"),
-            }),
-        )?;
+        let mut boot_source = serde_json::json!({
+            "kernel_image_path": spec.kernel,
+            "boot_args": spec.cmdline.as_deref().unwrap_or("console=ttyS0"),
+        });
         if let Some(ref initramfs) = spec.initramfs {
-            client.put(
-                "/boot-source",
-                &serde_json::json!({
-                    "kernel_image_path": spec.kernel,
-                    "initrd_path": initramfs,
-                }),
-            )?;
+            boot_source["initrd_path"] = serde_json::json!(initramfs);
         }
+        client.put("/boot-source", &boot_source)?;
         // Attach root disk (convert qcow2→raw if needed)
         if let Some(ref root) = spec.base_disk {
             let state_dir = std::env::var("TERRA_STATE_DIR")
@@ -158,7 +150,6 @@ impl FcVmHandle {
 impl VmHandle for FcVmHandle {
     async fn info(&self) -> Result<VmInfo, AdapterError> {
         let client = FcClient::new(self.fc_socket());
-        // Retry on transient errors during startup
         for attempt in 0..10 {
             match client.get("/") {
                 Ok(resp) => {

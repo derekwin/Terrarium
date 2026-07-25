@@ -32,7 +32,8 @@ class TerraClient:
                         break
                     response += chunk
                 except socket.timeout:
-                    break
+                    sock.close()
+                    raise TimeoutError("engine daemon did not respond within timeout") from None
 
             return json.loads(response.decode())
         finally:

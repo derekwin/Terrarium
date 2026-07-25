@@ -112,9 +112,11 @@ fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult
         args.push(format!("{}M", mb));
     }
     if let Some(_shares) = handle.limits.cpu_shares {
-        // Sandlock uses process count limits, not CPU shares
+        // Map CPU shares (1024 = default) to process count limit.
+        // Higher shares → more processes allowed.
+        let max_procs = ((_shares as f64 / 1024.0) * 100.0).max(10.0) as u32;
         args.push("-P".into());
-        args.push("50".into());
+        args.push(max_procs.to_string());
     }
 
     // Environment variables.

@@ -44,11 +44,9 @@ fn handle(mut stream: UnixStream) {
     let cmd: serde_json::Value = match serde_json::from_str(line.trim()) {
         Ok(c) => c,
         Err(e) => {
-            let _ = writeln!(
-                stream,
-                r#"{{"status":"error","message":"invalid json: {}"}}"#,
-                e
-            );
+            let resp =
+                serde_json::json!({"status": "error", "message": format!("invalid json: {}", e)});
+            let _ = writeln!(stream, "{}", resp);
             return;
         }
     };
@@ -57,14 +55,12 @@ fn handle(mut stream: UnixStream) {
     match command {
         "exec" => exec_cmd(&mut stream, &cmd),
         "ping" => {
-            let _ = writeln!(stream, r#"{{"status":"ok","message":"pong"}}"#);
+            let resp = serde_json::json!({"status": "ok", "message": "pong"});
+            let _ = writeln!(stream, "{}", resp);
         }
         _ => {
-            let _ = writeln!(
-                stream,
-                r#"{{"status":"error","message":"unknown command: {}"}}"#,
-                command
-            );
+            let resp = serde_json::json!({"status": "error", "message": format!("unknown command: {}", command)});
+            let _ = writeln!(stream, "{}", resp);
         }
     }
 }
@@ -76,12 +72,14 @@ fn exec_cmd(stream: &mut UnixStream, cmd: &serde_json::Value) {
             .filter_map(|v| v.as_str().map(String::from))
             .collect(),
         None => {
-            let _ = writeln!(stream, r#"{{"status":"error","message":"missing args"}}"#);
+            let resp = serde_json::json!({"status": "error", "message": "missing args"});
+            let _ = writeln!(stream, "{}", resp);
             return;
         }
     };
     if args.is_empty() {
-        let _ = writeln!(stream, r#"{{"status":"error","message":"empty args"}}"#);
+        let resp = serde_json::json!({"status": "error", "message": "empty args"});
+        let _ = writeln!(stream, "{}", resp);
         return;
     }
 
@@ -101,7 +99,8 @@ fn exec_cmd(stream: &mut UnixStream, cmd: &serde_json::Value) {
             let _ = writeln!(stream, "{}", resp);
         }
         Err(e) => {
-            let _ = writeln!(stream, r#"{{"status":"error","message":"{}"}}"#, e);
+            let resp = serde_json::json!({"status": "error", "message": e});
+            let _ = writeln!(stream, "{}", resp);
         }
     }
 }

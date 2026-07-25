@@ -199,7 +199,6 @@ dependencies = [
  "serde",
  "serde_json",
  "terrarium-protocol",
- "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -546,7 +545,6 @@ name = "terra-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "serde",
  "serde_json",
  "terrarium-protocol",
 ]
@@ -555,10 +553,8 @@ dependencies = [
 name = "terra-mcp"
 version = "0.1.0"
 dependencies = [
- "serde",
  "serde_json",
  "terrarium-protocol",
- "tracing",
  "tracing-subscriber",
 ]
 

@@ -50,6 +50,8 @@ fn handle_request(req: &serde_json::Value) -> serde_json::Value {
     let method = req["method"].as_str().unwrap_or("");
 
     match method {
+        // JSON-RPC notifications have no "id" field — do not respond.
+        "" if id == serde_json::Value::Null => serde_json::Value::Null,
         "initialize" => jsonrpc_ok(
             id,
             &serde_json::json!({

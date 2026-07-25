@@ -14,7 +14,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Verify Cargo.lock is up-to-date and respected
+      - uses: Swatinem/rust-cache@v2
+
+      # Verify Cargo.lock is up-to-date
       - run: cargo build --all --locked
 
       # Formatting
@@ -26,6 +28,16 @@ jobs:
       # Tests
       - run: cargo test --all
 
-      # Security audit (advisory DB)
+      # Security audit
       - run: cargo install cargo-audit --locked
       - run: cargo audit
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -e sdk/python/
+      - run: python -c "import terra; print('SDK OK')"

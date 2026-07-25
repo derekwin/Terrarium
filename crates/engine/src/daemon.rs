@@ -35,6 +35,15 @@ pub async fn run(socket_path: &str) -> std::io::Result<()> {
     let adapter: Arc<dyn adapter_traits::VmAdapter> = Arc::new(ChAdapter::new(ch_binary));
     let manager = Arc::new(Mutex::new(VmManager::new(adapter)));
 
+    // Handle SIGTERM/SIGINT for graceful shutdown.
+    let mgr_clone = Arc::clone(&manager);
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("Received shutdown signal, stopping all VMs");
+        mgr_clone.lock().await.shutdown_all().await;
+        std::process::exit(0);
+    });
+
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {

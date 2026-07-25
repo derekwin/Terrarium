@@ -213,6 +213,7 @@ impl ChClient {
         Ok(())
     }
 
+    /// Restore a VM from a snapshot. Uses longer timeout (10 min).
     pub async fn vm_restore(&self, snapshot_path: &str) -> Result<()> {
         let body = serde_json::json!({
             "source_url": format!("file://{}", snapshot_path),

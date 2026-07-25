@@ -155,10 +155,12 @@ fn print_response(raw: String) {
                     "ERROR: {}",
                     resp.error.as_deref().unwrap_or("unknown error")
                 );
+                std::process::exit(1);
             }
         }
         Err(_) => {
             eprintln!("ERROR: invalid response: {}", raw);
+            std::process::exit(1);
         }
     }
 }

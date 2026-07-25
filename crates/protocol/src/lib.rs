@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// A command sent from a client to the engine daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Command {
     pub command: String,
 
