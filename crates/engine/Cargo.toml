@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-adapter-ch = { path = "../adapter/ch" }
+adapter-cloud-hypervisor = { path = "../adapter/cloud-hypervisor" }
 adapter-traits = { path = "../adapter/traits" }
 overlay = { path = "../overlay" }
 num_cpus = "1"

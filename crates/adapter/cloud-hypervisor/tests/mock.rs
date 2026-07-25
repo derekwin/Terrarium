@@ -8,8 +8,8 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::thread;
 
-use adapter_ch::api::*;
-use adapter_ch::ChClient;
+use adapter_cloud_hypervisor::api::*;
+use adapter_cloud_hypervisor::ChClient;
 
 /// Response templates for the mock server.
 mod responses {

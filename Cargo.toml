@@ -8,7 +8,7 @@ members = [
     "crates/cli",
     "crates/mcp",
     "crates/adapter/traits",
-    "crates/adapter/ch",
+    "crates/adapter/cloud-hypervisor",
     "crates/adapter/openshell",
     "crates/network",
     "crates/overlay",

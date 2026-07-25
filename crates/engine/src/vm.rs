@@ -5,8 +5,8 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use adapter_ch::api::VmDetails;
-use adapter_ch::ChClient;
+use adapter_cloud_hypervisor::api::VmDetails;
+use adapter_cloud_hypervisor::ChClient;
 
 use crate::spec::VmSpec;
 
@@ -32,7 +32,7 @@ pub enum VmError {
     ClientError {
         name: String,
         #[source]
-        source: adapter_ch::ClientError,
+        source: adapter_cloud_hypervisor::ClientError,
     },
 
     #[error("VM '{name}' process exited with status {status}\n--- stderr ---\n{stderr}\n---")]
