@@ -5,16 +5,70 @@
 //! Sandlock, etc.) implements the corresponding trait.
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
 
 // ---------------------------------------------------------------------------
 // Common types
 // ---------------------------------------------------------------------------
 
+/// A validated VM or sandbox name. Only allows `[a-zA-Z0-9_-]+`.
+/// This prevents path traversal when names are used in file paths.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct VmName(String);
+
+impl VmName {
+    pub fn new(name: impl Into<String>) -> Result<Self, String> {
+        let name = name.into();
+        if name.is_empty() {
+            return Err("name must not be empty".into());
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!(
+                "invalid name '{}': only [a-zA-Z0-9_-] allowed",
+                name
+            ));
+        }
+        Ok(Self(name))
+    }
+}
+
+impl fmt::Display for VmName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for VmName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for VmName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for VmName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        VmName::new(s).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Specification for creating a VM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmSpec {
-    pub name: String,
+    pub name: VmName,
     /// Path to kernel image (bzImage / vmlinux.bin).
     pub kernel: String,
     /// Kernel command line.
@@ -96,7 +150,7 @@ pub struct Snapshot {
 /// Specification for creating a sandbox inside a VM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxSpec {
-    pub name: String,
+    pub name: VmName,
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]

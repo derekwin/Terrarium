@@ -5,7 +5,9 @@
 //!
 //! Requirements: `firecracker` binary in PATH.
 
-use adapter_traits::{NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmSpec};
+use adapter_traits::{
+    NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmName, VmSpec,
+};
 use async_trait::async_trait;
 use overlay::{OverlaySpec, RawDiskManager};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -50,11 +52,9 @@ impl VmAdapter for FirecrackerAdapter {
 // ── VmHandle ──────────────────────────────────────────────────────────
 
 struct FcVmHandle {
-    name: String,
+    name: VmName,
     child: Child,
     socket: String,
-    #[allow(dead_code)]
-    spec: VmSpec,
 }
 
 impl FcVmHandle {
@@ -110,7 +110,7 @@ impl FcVmHandle {
         }
         // Attach root disk (convert qcow2→raw if needed)
         if let Some(ref root) = spec.base_disk {
-            let ospec = OverlaySpec::new(&name, root)
+            let ospec = OverlaySpec::new(name.to_string(), root)
                 .disk_size_gb(spec.disk_size_gb)
                 .state_dir("/tmp/terra-disks/vms");
             let disk_path =
@@ -134,7 +134,6 @@ impl FcVmHandle {
             name,
             child,
             socket,
-            spec: spec.clone(),
         })
     }
 

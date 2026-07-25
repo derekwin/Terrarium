@@ -4,13 +4,14 @@ use std::collections::HashMap;
 
 use crate::spec::VmSpec;
 use crate::vm::{VmError, VmHandle};
+use adapter_traits::VmName;
 
 /// Central VM registry for the controller.
 ///
 /// Owns all running VM handles, providing spawn, lookup, shutdown,
 /// and resize operations keyed by VM name.
 pub struct VmManager {
-    vms: HashMap<String, VmHandle>,
+    vms: HashMap<VmName, VmHandle>,
 }
 
 impl VmManager {
@@ -27,7 +28,9 @@ impl VmManager {
     pub async fn spawn(&mut self, spec: VmSpec) -> std::result::Result<&VmHandle, VmError> {
         let name = spec.name.clone();
         if self.vms.contains_key(&name) {
-            return Err(VmError::AlreadyExists { name });
+            return Err(VmError::AlreadyExists {
+                name: name.to_string(),
+            });
         }
 
         let handle = VmHandle::spawn(spec).await?;
@@ -44,7 +47,7 @@ impl VmManager {
 
     /// List all VM names.
     pub fn list_names(&self) -> Vec<&str> {
-        self.vms.keys().map(|s| s.as_str()).collect()
+        self.vms.keys().map(|s| s.as_ref()).collect()
     }
 
     /// Gracefully shut down a VM by name and remove it from the registry.
@@ -75,9 +78,9 @@ impl VmManager {
     /// Will be wired to signal handling (SIGTERM/SIGINT).
     #[allow(dead_code)]
     pub async fn shutdown_all(&mut self) {
-        let names: Vec<String> = self.vms.keys().cloned().collect();
+        let names: Vec<VmName> = self.vms.keys().cloned().collect();
         for name in names {
-            if let Err(e) = self.shutdown(&name).await {
+            if let Err(e) = self.shutdown(name.as_ref()).await {
                 tracing::warn!(%name, error = %e, "Error shutting down VM");
             }
         }
@@ -85,9 +88,9 @@ impl VmManager {
 
     /// Reap any VMs whose processes have exited unexpectedly.
     /// Returns the names of VMs that were removed.
-    pub fn reap_dead(&mut self) -> Vec<String> {
+    pub fn reap_dead(&mut self) -> Vec<VmName> {
         let mut dead = Vec::new();
-        let names: Vec<String> = self.vms.keys().cloned().collect();
+        let names: Vec<VmName> = self.vms.keys().cloned().collect();
         for name in names {
             let remove = {
                 if let Some(handle) = self.vms.get_mut(&name) {
@@ -98,7 +101,6 @@ impl VmManager {
             };
             if remove {
                 tracing::warn!(%name, "Reaping dead VM");
-                // Remove and let it drop (Drop will attempt cleanup)
                 self.vms.remove(&name);
                 dead.push(name);
             }

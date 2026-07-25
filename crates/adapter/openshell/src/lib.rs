@@ -7,7 +7,7 @@
 //! Requirements: OpenShell CLI and gateway running.
 
 use adapter_traits::{
-    ExecCommand, ExecResult, SandboxAdapter, SandboxHandle, SandboxSpec, VmHandle,
+    ExecCommand, ExecResult, SandboxAdapter, SandboxHandle, SandboxSpec, VmHandle, VmName,
 };
 use async_trait::async_trait;
 use std::process::{Command, Stdio};
@@ -37,7 +37,7 @@ impl SandboxAdapter for OpenshellAdapter {
 }
 
 struct OpenshellHandle {
-    name: String,
+    name: VmName,
     #[allow(dead_code)]
     tools: Vec<String>,
     env: std::collections::HashMap<String, String>,
@@ -46,7 +46,7 @@ struct OpenshellHandle {
 #[async_trait]
 impl SandboxHandle for OpenshellHandle {
     async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, String> {
-        openshell_run(cmd, &self.name, &self.env)
+        openshell_run(cmd, self.name.as_ref(), &self.env)
     }
 
     async fn setup(&self, _tools: &[String]) -> Result<(), String> {

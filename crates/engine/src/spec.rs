@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use adapter_traits::VmName;
+
 /// Full specification for creating and booting a VM.
 ///
 /// This is the controller's canonical VM definition. It maps to
@@ -9,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmSpec {
     /// Human-readable name for this VM. Must be unique within a manager.
-    pub name: String,
+    pub name: VmName,
 
     /// Path to the kernel image (bzImage / vmlinux.bin).
     pub kernel: String,
@@ -80,8 +82,9 @@ fn default_disk_size_gb() -> u64 {
 impl VmSpec {
     /// Create a minimal spec with just a name and kernel path.
     pub fn new(name: impl Into<String>, kernel: impl Into<String>) -> Self {
+        let name = VmName::new(name).expect("VmSpec::new called with invalid name");
         Self {
-            name: name.into(),
+            name,
             kernel: kernel.into(),
             cmdline: Some("console=ttyS0 quiet init=/init".into()),
             boot_vcpus: default_boot_vcpus(),

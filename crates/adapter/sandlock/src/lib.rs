@@ -7,7 +7,7 @@
 //! Requirements: `sandlock` binary in PATH.
 
 use adapter_traits::{
-    ExecCommand, ExecResult, SandboxAdapter, SandboxHandle, SandboxSpec, VmHandle,
+    ExecCommand, ExecResult, SandboxAdapter, SandboxHandle, SandboxSpec, VmHandle, VmName,
 };
 use async_trait::async_trait;
 use std::process::{Command, Stdio};
@@ -38,7 +38,7 @@ impl SandboxAdapter for SandlockAdapter {
 }
 
 struct SandlockHandle {
-    name: String,
+    name: VmName,
     tools: Vec<String>,
     limits: adapter_traits::ResourceLimits,
     env: std::collections::HashMap<String, String>,

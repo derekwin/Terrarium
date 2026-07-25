@@ -5,6 +5,7 @@ use tokio::time::{sleep, Duration, Instant};
 
 use adapter_cloud_hypervisor::api::VmDetails;
 use adapter_cloud_hypervisor::ChClient;
+use adapter_traits::VmName;
 
 use crate::spec::VmSpec;
 
@@ -45,7 +46,7 @@ pub type Result<T> = std::result::Result<T, VmError>;
 
 /// A handle to a running VM: owns the CH child process and its API client.
 pub struct VmHandle {
-    name: String,
+    name: VmName,
     child: Child,
     client: ChClient,
     spec: VmSpec,
@@ -66,7 +67,8 @@ impl std::fmt::Debug for VmHandle {
 /// Create a qcow2 overlay disk via the overlay crate.
 fn create_qcow2_overlay(spec: &VmSpec) -> std::result::Result<(String, bool), VmError> {
     let base = spec.base_disk.as_ref().unwrap();
-    let ospec = overlay::OverlaySpec::new(&spec.name, base).disk_size_gb(spec.disk_size_gb);
+    let ospec =
+        overlay::OverlaySpec::new(spec.name.to_string(), base).disk_size_gb(spec.disk_size_gb);
     let already_exists = overlay::OverlayManager::exists(&ospec);
     let path = overlay::OverlayManager::create_or_reuse(&ospec).map_err(VmError::SetupFailed)?;
     Ok((path, already_exists))
@@ -128,7 +130,7 @@ impl VmHandle {
                 Ok(Some(status)) => {
                     let stderr = String::new();
                     return Err(VmError::ProcessExited {
-                        name,
+                        name: name.to_string(),
                         status: status.code().unwrap_or(-1),
                         stderr,
                     });
@@ -148,7 +150,7 @@ impl VmHandle {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(VmError::SocketTimeout {
-                    name,
+                    name: name.to_string(),
                     timeout_ms: socket_timeout.as_millis() as u64,
                 });
             }
@@ -174,7 +176,7 @@ impl VmHandle {
                         Ok(Some(status)) => {
                             let stderr = String::new();
                             return Err(VmError::ProcessExited {
-                                name,
+                                name: name.to_string(),
                                 status: status.code().unwrap_or(-1),
                                 stderr,
                             });
@@ -188,7 +190,7 @@ impl VmHandle {
 
                     if poll_start.elapsed() > poll_timeout {
                         return Err(VmError::SocketTimeout {
-                            name,
+                            name: name.to_string(),
                             timeout_ms: poll_timeout.as_millis() as u64,
                         });
                     }
@@ -209,7 +211,7 @@ impl VmHandle {
 
     /// Return the VM name.
     pub fn name(&self) -> &str {
-        &self.name
+        self.name.as_ref()
     }
 
     /// Return the CH child process ID.
@@ -230,7 +232,7 @@ impl VmHandle {
                 Err(e) => {
                     if attempt == 9 {
                         return Err(VmError::ClientError {
-                            name: self.name.clone(),
+                            name: self.name.to_string(),
                             source: e,
                         });
                     }
@@ -248,7 +250,7 @@ impl VmHandle {
             .vm_resize(vcpus, None)
             .await
             .map_err(|source| VmError::ClientError {
-                name: self.name.clone(),
+                name: self.name.to_string(),
                 source,
             })
     }
@@ -260,7 +262,7 @@ impl VmHandle {
             .vm_resize(None, ram_bytes)
             .await
             .map_err(|source| VmError::ClientError {
-                name: self.name.clone(),
+                name: self.name.to_string(),
                 source,
             })
     }
@@ -273,7 +275,7 @@ impl VmHandle {
             .vm_shutdown()
             .await
             .map_err(|source| VmError::ClientError {
-                name: self.name.clone(),
+                name: self.name.to_string(),
                 source,
             });
 

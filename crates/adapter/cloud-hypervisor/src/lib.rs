@@ -7,7 +7,9 @@ pub mod api;
 pub mod client;
 mod error;
 
-use adapter_traits::{NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmSpec};
+use adapter_traits::{
+    NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmName, VmSpec,
+};
 use async_trait::async_trait;
 use overlay::{OverlayManager, OverlaySpec};
 use std::process::{Command, Stdio};
@@ -65,11 +67,9 @@ impl VmAdapter for ChAdapter {
 // ---------------------------------------------------------------------------
 
 struct ChVmHandle {
-    name: String,
+    name: VmName,
     child: std::process::Child,
     client: ChClient,
-    #[allow(dead_code)]
-    spec: VmSpec,
 }
 
 impl ChVmHandle {
@@ -81,7 +81,8 @@ impl ChVmHandle {
         let mut args = ch_args(spec, &socket);
 
         if let Some(ref base) = spec.base_disk {
-            let overlay_spec = OverlaySpec::new(&name, base).disk_size_gb(spec.disk_size_gb);
+            let overlay_spec =
+                OverlaySpec::new(name.to_string(), base).disk_size_gb(spec.disk_size_gb);
             let overlay = OverlayManager::create_or_reuse(&overlay_spec)?;
             args.push("--disk".to_string());
             args.push(format!("path={}", overlay));
@@ -116,7 +117,6 @@ impl ChVmHandle {
             name,
             child,
             client,
-            spec: spec.clone(),
         })
     }
 }
