@@ -91,7 +91,7 @@ impl ChVmHandle {
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("spawn CH: {}", e))?;
 

@@ -1,6 +1,5 @@
 //! VmHandle — manages a single Cloud Hypervisor VM process and its API client.
 
-use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -65,17 +64,7 @@ impl std::fmt::Debug for VmHandle {
     }
 }
 
-/// Read stderr from a child process. Returns empty string on failure.
-fn read_child_stderr(child: &mut Child) -> String {
-    child
-        .stderr
-        .as_mut()
-        .and_then(|s| {
-            let mut buf = String::new();
-            s.read_to_string(&mut buf).ok().map(|_| buf)
-        })
-        .unwrap_or_default()
-}
+
 
 /// Create a qcow2 overlay disk via the overlay crate.
 fn create_qcow2_overlay(spec: &VmSpec) -> std::result::Result<(String, bool), VmError> {
@@ -125,7 +114,7 @@ impl VmHandle {
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(VmError::SpawnFailed)?;
 
@@ -136,7 +125,7 @@ impl VmHandle {
             // Check if process died while we were waiting
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let stderr = read_child_stderr(&mut child);
+                    let stderr = String::new();
                     return Err(VmError::ProcessExited {
                         name,
                         status: status.code().unwrap_or(-1),
@@ -182,7 +171,7 @@ impl VmHandle {
                     // Check if CH died (e.g. KVM permission denied)
                     match child.try_wait() {
                         Ok(Some(status)) => {
-                            let stderr = read_child_stderr(&mut child);
+                            let stderr = String::new();
                             return Err(VmError::ProcessExited {
                                 name,
                                 status: status.code().unwrap_or(-1),
@@ -325,16 +314,17 @@ impl VmHandle {
     }
 
     /// Check if the VM process is still running.
-    pub fn is_alive(&self) -> bool {
-        // Check /proc/<pid> as a non-invasive way to verify process existence.
-        std::path::Path::new(&format!("/proc/{}", self.child.id())).exists()
+    /// Uses `try_wait()` which correctly identifies zombies as dead.
+    pub fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 }
 
 impl Drop for VmHandle {
     fn drop(&mut self) {
-        if !self.is_alive() {
-            return;
+        match self.child.try_wait() {
+            Ok(None) => {} // still running, continue with shutdown
+            _ => return,   // already exited or error
         }
         tracing::warn!(
             name = %self.name,
@@ -344,8 +334,9 @@ impl Drop for VmHandle {
         // Wait up to 5 seconds for graceful shutdown, then force-kill.
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(5) {
-            if !self.is_alive() {
-                return;
+            match self.child.try_wait() {
+                Ok(None) => {}
+                _ => return,
             }
             thread::sleep(Duration::from_millis(100));
         }

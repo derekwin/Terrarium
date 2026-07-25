@@ -2,6 +2,7 @@
 //! dispatches them to the VmManager, and returns JSON responses.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +16,7 @@ pub fn run(socket_path: &str) -> std::io::Result<()> {
     let _ = std::fs::remove_file(socket_path);
 
     let listener = UnixListener::bind(socket_path)?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!(socket = %socket_path, "Daemon listening");
 
     let manager = Arc::new(Mutex::new(VmManager::new()));
