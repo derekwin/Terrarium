@@ -3,7 +3,7 @@
 //! Wraps ch-client and the VM spawning logic (formerly in controller/vm.rs)
 //! into the standard VmAdapter trait.
 
-use adapter_traits::{Snapshot, VmAdapter, VmHandle, VmInfo, VmSpec};
+use adapter_traits::{Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmSpec};
 use async_trait::async_trait;
 use ch_client::ChClient;
 use std::process::{Child, Command, Stdio};
@@ -21,6 +21,17 @@ impl ChAdapter {
 
 #[async_trait]
 impl VmAdapter for ChAdapter {
+    fn capabilities(&self) -> VmCapabilities {
+        VmCapabilities {
+            cpu_resize: true,
+            memory_resize: true,
+            disk_resize: true,
+            disk_add: true,
+            snapshot: true,
+            pause_resume: true,
+        }
+    }
+
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, String> {
         ChVmHandle::spawn(spec).map(|h| Box::new(h) as Box<dyn VmHandle>)
     }
@@ -123,6 +134,26 @@ impl VmHandle for ChVmHandle {
             .map_err(|e| format!("vm.resize-disk: {}", e))
     }
 
+    async fn add_disk(&self, path: &str, disk_id: &str) -> Result<(), String> {
+        self.client
+            .vm_add_disk(path)
+            .map_err(|e| format!("vm.add-disk: {}", e))?;
+        let _ = disk_id;
+        Ok(())
+    }
+
+    async fn pause(&self) -> Result<(), String> {
+        self.client
+            .vm_pause()
+            .map_err(|e| format!("vm.pause: {}", e))
+    }
+
+    async fn resume(&self) -> Result<(), String> {
+        self.client
+            .vm_resume()
+            .map_err(|e| format!("vm.resume: {}", e))
+    }
+
     async fn snapshot(&self) -> Result<Snapshot, String> {
         let path = format!("/tmp/terra-snap-{}.bin", self.name);
         self.client
@@ -158,7 +189,11 @@ fn ch_args(spec: &VmSpec, socket: &str) -> Vec<String> {
         "--kernel".into(),
         spec.kernel.clone(),
         "--cpus".into(),
-        format!("boot={},max={}", spec.boot_vcpus, spec.max_vcpus),
+        format!(
+            "boot={},max={}",
+            spec.boot_vcpus,
+            spec.max_vcpus.unwrap_or(spec.boot_vcpus)
+        ),
     ];
     if let Some(ref c) = spec.cmdline {
         args.push("--cmdline".into());
@@ -168,11 +203,12 @@ fn ch_args(spec: &VmSpec, socket: &str) -> Vec<String> {
         args.push("--initramfs".into());
         args.push(i.clone());
     }
-    if let Some(hotplug) = spec.hotplug_memory_gb {
+    if let Some(max_mem) = spec.max_memory_mb {
         args.push("--memory".into());
         args.push(format!(
             "size={}M,hotplug_method=virtio-mem,hotplug_size={}G",
-            spec.memory_mb, hotplug
+            spec.memory_mb,
+            max_mem / 1024
         ));
     } else {
         args.push("--memory".into());

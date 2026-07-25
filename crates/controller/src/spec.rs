@@ -22,18 +22,17 @@ pub struct VmSpec {
     #[serde(default = "default_boot_vcpus")]
     pub boot_vcpus: u8,
 
-    /// Maximum vCPUs this VM can scale to.
-    #[serde(default = "default_max_vcpus")]
-    pub max_vcpus: u8,
+    /// Maximum vCPUs this VM can scale to. None = fixed, no hotplug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_vcpus: Option<u8>,
 
     /// Boot memory in megabytes.
     #[serde(default = "default_memory_mb")]
     pub memory_mb: u64,
 
-    /// Hotplug memory ceiling in gigabytes (enables virtio-mem).
-    /// If None, memory resize is disabled.
+    /// Maximum memory in MB (enables hotplug). None = fixed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hotplug_memory_gb: Option<u64>,
+    pub max_memory_mb: Option<u64>,
 
     /// Path to the Cloud Hypervisor binary.
     #[serde(default = "default_ch_binary")]
@@ -75,9 +74,6 @@ pub struct VmSpec {
 fn default_boot_vcpus() -> u8 {
     2
 }
-fn default_max_vcpus() -> u8 {
-    16
-}
 fn default_memory_mb() -> u64 {
     512
 }
@@ -96,9 +92,9 @@ impl VmSpec {
             kernel: kernel.into(),
             cmdline: Some("console=ttyS0 quiet init=/init".into()),
             boot_vcpus: default_boot_vcpus(),
-            max_vcpus: default_max_vcpus(),
+            max_vcpus: Some(16),
             memory_mb: default_memory_mb(),
-            hotplug_memory_gb: None,
+            max_memory_mb: None,
             ch_binary: default_ch_binary(),
             api_socket: None,
             initramfs: None,
@@ -116,22 +112,30 @@ impl VmSpec {
         self
     }
 
-    /// Set vCPU range.
-    pub fn cpus(mut self, boot: u8, max: u8) -> Self {
+    /// Set vCPU range. boot is required, max can be None (no hotplug).
+    pub fn cpus(mut self, boot: u8, max: Option<u8>) -> Self {
         self.boot_vcpus = boot;
         self.max_vcpus = max;
         self
     }
 
-    /// Set boot memory in MB.
+    /// Set boot memory + optional hotplug ceiling in MB.
+    pub fn memory_range(mut self, boot_mb: u64, max_mb: Option<u64>) -> Self {
+        self.memory_mb = boot_mb;
+        self.max_memory_mb = max_mb;
+        self
+    }
+
+    /// Set boot memory in MB (no hotplug).
     pub fn memory_mb(mut self, mb: u64) -> Self {
         self.memory_mb = mb;
         self
     }
 
-    /// Enable virtio-mem with a hotplug ceiling in GB.
+    /// Enable memory hotplug with a ceiling in GB (convenience wrapper).
+    #[allow(dead_code)]
     pub fn hotplug_memory_gb(mut self, gb: u64) -> Self {
-        self.hotplug_memory_gb = Some(gb);
+        self.max_memory_mb = Some(gb * 1024);
         self
     }
 
@@ -205,7 +209,11 @@ impl VmSpec {
             "--kernel".to_string(),
             self.kernel.clone(),
             "--cpus".to_string(),
-            format!("boot={},max={}", self.boot_vcpus, self.max_vcpus),
+            format!(
+                "boot={},max={}",
+                self.boot_vcpus,
+                self.max_vcpus.unwrap_or(self.boot_vcpus)
+            ),
         ];
 
         if let Some(ref cmdline) = self.cmdline {
@@ -223,11 +231,12 @@ impl VmSpec {
             args.push(format!("path={}", disk));
         }
 
-        if let Some(hotplug_gb) = self.hotplug_memory_gb {
+        if let Some(max_mb) = self.max_memory_mb {
             args.push("--memory".to_string());
             args.push(format!(
                 "size={}M,hotplug_method=virtio-mem,hotplug_size={}G",
-                self.memory_mb, hotplug_gb
+                self.memory_mb,
+                max_mb / 1024
             ));
         } else {
             args.push("--memory".to_string());

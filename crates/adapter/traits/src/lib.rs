@@ -22,13 +22,14 @@ pub struct VmSpec {
     pub cmdline: Option<String>,
     /// Number of vCPUs to boot with.
     pub boot_vcpus: u8,
-    /// Maximum vCPUs.
-    pub max_vcpus: u8,
+    /// Maximum vCPUs (None = fixed, no hotplug).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_vcpus: Option<u8>,
     /// Boot memory in MB.
     pub memory_mb: u64,
-    /// Hotplug memory ceiling in GB (enables virtio-mem / equivalent).
+    /// Maximum memory in MB (None = fixed, no hotplug).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hotplug_memory_gb: Option<u64>,
+    pub max_memory_mb: Option<u64>,
     /// Path to initramfs (cpio archive).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initramfs: Option<String>,
@@ -44,51 +45,26 @@ pub struct VmSpec {
     /// Virtual disk size for overlay in GB.
     #[serde(default = "default_disk_size_gb")]
     pub disk_size_gb: u64,
+    /// Backend-specific configuration (JSON blob, adapter-defined).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_config: Option<serde_json::Value>,
 }
 
-fn default_disk_size_gb() -> u64 {
-    20
-}
-
-/// Specification for creating a sandbox inside a VM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxSpec {
-    pub name: String,
-    /// Tools to pre-setup (python, nodejs, etc.).
-    #[serde(default)]
-    pub tools: Vec<String>,
-    /// Resource limits.
-    #[serde(default)]
-    pub limits: ResourceLimits,
-    /// Per-sandbox environment variables (secrets injection).
-    #[serde(default)]
-    pub env: std::collections::HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ResourceLimits {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub memory_mb: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cpu_shares: Option<u64>,
-}
-
-/// Command to execute inside a sandbox.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecCommand {
-    pub args: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub work_dir: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub env: Option<std::collections::HashMap<String, String>>,
-}
-
-/// Result of a command execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecResult {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
+/// What this VM backend can and cannot do.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VmCapabilities {
+    /// CPU hot-add / hot-remove supported.
+    pub cpu_resize: bool,
+    /// Memory hotplug supported.
+    pub memory_resize: bool,
+    /// Disk resize (online expand) supported.
+    pub disk_resize: bool,
+    /// Disk hot-add supported.
+    pub disk_add: bool,
+    /// VM snapshot / restore supported.
+    pub snapshot: bool,
+    /// VM pause / resume supported.
+    pub pause_resume: bool,
 }
 
 /// VM info returned by the adapter.
@@ -105,12 +81,53 @@ pub struct Snapshot {
     pub path: String,
 }
 
+/// Specification for creating a sandbox inside a VM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxSpec {
+    pub name: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub limits: ResourceLimits,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    pub memory_mb: Option<u64>,
+    pub cpu_shares: Option<u64>,
+}
+
+/// Command to execute inside a sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecCommand {
+    pub args: Vec<String>,
+    pub work_dir: Option<String>,
+    pub env: Option<std::collections::HashMap<String, String>>,
+}
+
+/// Result of a command execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+fn default_disk_size_gb() -> u64 {
+    20
+}
+
 // ---------------------------------------------------------------------------
 // VmAdapter — backed by a VMM (CH, Firecracker, K8s Pod, etc.)
 // ---------------------------------------------------------------------------
 
 #[async_trait]
 pub trait VmAdapter: Send + Sync {
+    /// What this backend can and cannot do.
+    fn capabilities(&self) -> VmCapabilities;
+
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, String>;
     async fn restore(
         &self,
@@ -122,9 +139,26 @@ pub trait VmAdapter: Send + Sync {
 #[async_trait]
 pub trait VmHandle: Send + Sync {
     async fn info(&self) -> Result<VmInfo, String>;
+
+    /// Resize vCPUs and/or memory. Backends that don't support this
+    /// return an error; the engine checks capabilities() first.
     async fn resize(&self, cpu: Option<u32>, memory: Option<u64>) -> Result<(), String>;
+
+    /// Resize an existing disk (online expand). Not supported by all backends.
     async fn resize_disk(&self, disk_id: &str, size: u64) -> Result<(), String>;
+
+    /// Hot-add a new disk. Not supported by all backends.
+    async fn add_disk(&self, path: &str, disk_id: &str) -> Result<(), String>;
+
+    /// Take a VM snapshot. Not supported by all backends.
     async fn snapshot(&self) -> Result<Snapshot, String>;
+
+    /// Pause the VM. Not supported by all backends.
+    async fn pause(&self) -> Result<(), String>;
+
+    /// Resume a paused VM.
+    async fn resume(&self) -> Result<(), String>;
+
     async fn shutdown(&self) -> Result<(), String>;
     fn pid(&self) -> u32;
 }

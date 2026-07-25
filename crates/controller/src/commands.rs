@@ -35,6 +35,8 @@ pub struct Command {
     #[serde(default)]
     pub hotplug_memory_gb: Option<u64>,
     #[serde(default)]
+    pub max_memory_mb: Option<u64>,
+    #[serde(default)]
     pub ch_binary: Option<String>,
 
     // snapshot / restore
@@ -115,7 +117,7 @@ fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
         spec = spec.cmdline(c);
     }
     if let Some(c) = cmd.cpus {
-        let max = cmd.max_cpus.unwrap_or(16);
+        let max = cmd.max_cpus;
         spec = spec.cpus(c, max);
     }
     if let Some(m) = cmd.memory_mb {
@@ -123,6 +125,10 @@ fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
     }
     if let Some(h) = cmd.hotplug_memory_gb {
         spec = spec.hotplug_memory_gb(h);
+    }
+    if let Some(m) = cmd.max_memory_mb {
+        let boot_mb = spec.memory_mb;
+        spec = spec.memory_range(boot_mb, Some(m));
     }
     if let Some(b) = cmd.ch_binary {
         spec = spec.ch_binary(b);

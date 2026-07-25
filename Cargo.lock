@@ -3,6 +3,50 @@
 version = 4
 
 [[package]]
+name = "adapter-ch"
+version = "0.1.0"
+dependencies = [
+ "adapter-traits",
+ "async-trait",
+ "ch-client",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "adapter-sandboxd"
+version = "0.1.0"
+dependencies = [
+ "adapter-traits",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "adapter-traits"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "async-trait"
+version = "0.1.91"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
