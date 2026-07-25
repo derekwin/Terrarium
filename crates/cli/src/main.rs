@@ -33,9 +33,9 @@ enum Commands {
         #[arg(long, default_value = "512")]
         memory: u64,
         #[arg(long)]
-        base_disk: Option<String>,
+        rootfs_disk: Option<String>,
         #[arg(long)]
-        tool: Vec<String>,
+        toolfs_disk: Vec<String>,
         #[arg(long, default_value = "20")]
         disk_size: u64,
     },
@@ -63,6 +63,20 @@ enum Commands {
         #[arg(long)]
         memory_mb: Option<u64>,
     },
+    /// Snapshot user overlay (data only, not VM state).
+    SnapshotCreate {
+        name: String,
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// List snapshots for a VM.
+    SnapshotList { name: String },
+    /// Restore user overlay from a snapshot.
+    SnapshotRestore {
+        name: String,
+        #[arg(long)]
+        tag: String,
+    },
 }
 
 fn main() {
@@ -75,8 +89,8 @@ fn main() {
             cpus,
             max_cpus,
             memory,
-            base_disk,
-            tool,
+            rootfs_disk,
+            toolfs_disk,
             disk_size,
         } => {
             let mut cmd = serde_json::json!({
@@ -89,11 +103,11 @@ fn main() {
             if let Some(m) = max_cpus {
                 cmd["max_cpus"] = serde_json::json!(m);
             }
-            if let Some(b) = base_disk {
+            if let Some(b) = rootfs_disk {
                 cmd["base_disk"] = serde_json::json!(b);
             }
-            if !tool.is_empty() {
-                cmd["tool_layers"] = serde_json::json!(tool);
+            if !toolfs_disk.is_empty() {
+                cmd["tool_layers"] = serde_json::json!(toolfs_disk);
             }
             print_response(send(&cli.socket, &cmd));
         }
@@ -134,6 +148,25 @@ fn main() {
                 cmd["limits"] = serde_json::json!({"memory_mb": mb});
             }
             print_response(send(&cli.socket, &cmd));
+        }
+        Commands::SnapshotCreate { name, tag } => {
+            let mut cmd = serde_json::json!({"command":"snapshot_create","name":name});
+            if let Some(t) = tag {
+                cmd["tag"] = serde_json::json!(t);
+            }
+            print_response(send(&cli.socket, &cmd));
+        }
+        Commands::SnapshotList { name } => {
+            print_response(send(
+                &cli.socket,
+                &serde_json::json!({"command":"snapshot_list","name":name}),
+            ));
+        }
+        Commands::SnapshotRestore { name, tag } => {
+            print_response(send(
+                &cli.socket,
+                &serde_json::json!({"command":"snapshot_restore","name":name,"tag":tag}),
+            ));
         }
     }
 }
