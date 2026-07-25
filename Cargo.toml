@@ -2,15 +2,13 @@
 resolver = "2"
 members = [
     "crates/engine",
-    "crates/sandboxd",
+    "crates/guest-agent",
     "crates/observe",
     "crates/checkpoint",
     "crates/cli",
     "crates/mcp",
     "crates/adapter/traits",
     "crates/adapter/ch",
-    "crates/adapter/sandboxd",
-    "crates/adapter/sandlock",
     "crates/adapter/openshell",
     "crates/network",
     "crates/overlay",

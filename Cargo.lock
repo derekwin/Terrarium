@@ -29,28 +29,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "adapter-sandboxd"
-version = "0.1.0"
-dependencies = [
- "adapter-traits",
- "async-trait",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "adapter-sandlock"
-version = "0.1.0"
-dependencies = [
- "adapter-traits",
- "async-trait",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "adapter-traits"
 version = "0.1.0"
 dependencies = [
@@ -134,6 +112,16 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi",
+]
+
+[[package]]
+name = "guest-agent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -252,16 +240,6 @@ dependencies = [
  "libc",
  "linux-raw-sys",
  "windows-sys",
-]
-
-[[package]]
-name = "sandboxd"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,8 +1,8 @@
-//! sandboxd — host→guest command relay via vsock.
+//! guest-agent — host→guest command relay.
 //!
-//! Listens on vsock port for command requests from the host adapter.
+//! Listens on Unix socket for command requests from host-side adapters.
 //! Executes them locally and returns stdout/stderr/exit_code.
-//! All sandbox isolation is provided by Sandlock / OpenShell, not sandboxd.
+//! Not a sandbox — just a command forwarder.
 
 mod sandbox;
 
