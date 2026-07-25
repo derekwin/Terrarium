@@ -1,4 +1,4 @@
-//! guest-agent — host→guest command relay.
+//! guest-proxy — host→guest command relay.
 //!
 //! Listens on Unix socket for command requests from host-side adapters.
 //! Executes them locally and returns stdout/stderr/exit_code.

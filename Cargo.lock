@@ -311,7 +311,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "guest-agent"
+name = "guest-proxy"
 version = "0.1.0"
 dependencies = [
  "serde",

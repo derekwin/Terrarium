@@ -1,5 +1,5 @@
 [package]
-name = "guest-agent"
+name = "guest-proxy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

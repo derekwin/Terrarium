@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/engine",
-    "crates/guest-agent",
+    "crates/guest-proxy",
     "crates/cli",
     "crates/mcp",
     "crates/adapter/traits",
