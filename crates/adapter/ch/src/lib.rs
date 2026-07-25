@@ -1,14 +1,24 @@
-//! Cloud Hypervisor adapter — implements VmAdapter for CH.
+//! Cloud Hypervisor adapter — self-contained VmAdapter implementation.
 //!
-//! Wraps ch-client and the VM spawning logic (formerly in controller/vm.rs)
-//! into the standard VmAdapter trait.
+//! Contains the CH HTTP API client (Unix socket) and VmAdapter trait impl.
+//! No external CH SDK required — users install the official CH release binary.
+
+pub mod api;
+pub mod client;
+mod error;
 
 use adapter_traits::{Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmSpec};
 use async_trait::async_trait;
-use ch_client::ChClient;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+pub use client::ChClient;
+pub use error::ClientError;
+
+// ---------------------------------------------------------------------------
+// Adapter
+// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 pub struct ChAdapter;
@@ -45,10 +55,13 @@ impl VmAdapter for ChAdapter {
     }
 }
 
-/// A running CH VM.
+// ---------------------------------------------------------------------------
+// VmHandle
+// ---------------------------------------------------------------------------
+
 struct ChVmHandle {
     name: String,
-    child: Child,
+    child: std::process::Child,
     client: ChClient,
     #[allow(dead_code)]
     spec: VmSpec,
@@ -62,7 +75,6 @@ impl ChVmHandle {
 
         let mut args = ch_args(spec, &socket);
 
-        // Create qcow2 overlay if base_disk is set
         if let Some(ref base) = spec.base_disk {
             let overlay = create_overlay(&name, base, spec.disk_size_gb, &spec.tool_layers)?;
             args.push("--disk".to_string());
@@ -79,7 +91,6 @@ impl ChVmHandle {
             .spawn()
             .map_err(|e| format!("spawn CH: {}", e))?;
 
-        // Wait for socket
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             if std::path::Path::new(&socket).exists() {
@@ -134,12 +145,10 @@ impl VmHandle for ChVmHandle {
             .map_err(|e| format!("vm.resize-disk: {}", e))
     }
 
-    async fn add_disk(&self, path: &str, disk_id: &str) -> Result<(), String> {
+    async fn add_disk(&self, path: &str, _disk_id: &str) -> Result<(), String> {
         self.client
             .vm_add_disk(path)
-            .map_err(|e| format!("vm.add-disk: {}", e))?;
-        let _ = disk_id;
-        Ok(())
+            .map_err(|e| format!("vm.add-disk: {}", e))
     }
 
     async fn pause(&self) -> Result<(), String> {
@@ -181,6 +190,10 @@ impl Drop for ChVmHandle {
         let _ = std::fs::remove_file(&socket);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn ch_args(spec: &VmSpec, socket: &str) -> Vec<String> {
     let mut args = vec![

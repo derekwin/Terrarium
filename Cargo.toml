@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/ch-client",
     "crates/controller",
     "crates/sandboxd",
     "crates/observe",

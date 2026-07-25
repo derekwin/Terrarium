@@ -12,7 +12,7 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
 
-use ch_client::ChClient;
+use adapter_ch::ChClient;
 
 const CH_BINARY: &str = "cloud-hypervisor";
 const API_SOCKET: &str = "/tmp/ch-test-api.sock";

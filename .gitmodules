@@ -1,3 +1,0 @@
-[submodule "hypervisor/cloud-hypervisor"]
-	path = hypervisor/cloud-hypervisor
-	url = https://github.com/cloud-hypervisor/cloud-hypervisor.git

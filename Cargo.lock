@@ -8,9 +8,9 @@ version = "0.1.0"
 dependencies = [
  "adapter-traits",
  "async-trait",
- "ch-client",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tracing",
 ]
@@ -59,17 +59,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "ch-client"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
 name = "checkpoint"
 version = "0.1.0"
 dependencies = [
@@ -87,7 +76,7 @@ dependencies = [
 name = "controller"
 version = "0.1.0"
 dependencies = [
- "ch-client",
+ "adapter-ch",
  "serde",
  "serde_json",
  "thiserror",

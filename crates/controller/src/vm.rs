@@ -5,8 +5,8 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ch_client::api::VmDetails;
-use ch_client::ChClient;
+use adapter_ch::api::VmDetails;
+use adapter_ch::ChClient;
 
 use crate::spec::VmSpec;
 
@@ -32,7 +32,7 @@ pub enum VmError {
     ClientError {
         name: String,
         #[source]
-        source: ch_client::ClientError,
+        source: adapter_ch::ClientError,
     },
 
     #[error("VM '{name}' process exited with status {status}\n--- stderr ---\n{stderr}\n---")]

@@ -8,8 +8,8 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::thread;
 
-use ch_client::api::*;
-use ch_client::ChClient;
+use adapter_ch::api::*;
+use adapter_ch::ChClient;
 
 /// Response templates for the mock server.
 mod responses {
