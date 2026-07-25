@@ -33,7 +33,10 @@ fn default_disk_size_gb() -> u64 {
 }
 
 fn default_state_dir() -> String {
-    "/tmp/terra-disks/vms".to_string()
+    std::env::var("TERRA_STATE_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/tmp/terra-disks/vms".to_string())
 }
 
 impl OverlaySpec {

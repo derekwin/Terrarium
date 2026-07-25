@@ -112,9 +112,13 @@ impl FcVmHandle {
         }
         // Attach root disk (convert qcow2→raw if needed)
         if let Some(ref root) = spec.base_disk {
+            let state_dir = std::env::var("TERRA_STATE_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "/tmp/terra-disks/vms".to_string());
             let ospec = OverlaySpec::new(name.to_string(), root)
                 .disk_size_gb(spec.disk_size_gb)
-                .state_dir("/tmp/terra-disks/vms");
+                .state_dir(&state_dir);
             let disk_path =
                 RawDiskManager::create_or_reuse(&ospec).map_err(|e| format!("raw disk: {}", e))?;
             client.put(
