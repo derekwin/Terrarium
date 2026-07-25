@@ -53,9 +53,11 @@ pub struct Command {
     #[serde(default)]
     pub pool_size: Option<u64>,
 
-    // snapshot
+    // file operations
     #[serde(default)]
-    pub tag: Option<String>,
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub file_content: Option<String>,
 
     // resize
     #[serde(default)]
@@ -104,9 +106,9 @@ pub fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "shutdown" => cmd_shutdown(mgr, cmd),
         "kill" => cmd_kill(mgr, cmd),
         "destroy" => cmd_destroy(mgr, cmd),
-        "snapshot_create" => cmd_snapshot_create(cmd),
-        "snapshot_list" => cmd_snapshot_list(cmd),
-        "snapshot_restore" => cmd_snapshot_restore(cmd),
+        "file_read" => cmd_file_read(cmd),
+        "file_write" => cmd_file_write(cmd),
+        "file_list" => cmd_file_list(cmd),
         "snapshot" => cmd_snapshot(mgr, cmd),
         "restore" => cmd_restore(mgr, cmd),
         _ => Response::err(format!("Unknown command: {}", cmd.command)),
@@ -377,65 +379,43 @@ fn cmd_pool_list(pools: &crate::pool::WarmPool) -> Response {
     Response::ok(serde_json::json!({"pools": list}))
 }
 
-fn cmd_snapshot_create(cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing name"),
+fn cmd_file_read(cmd: Command) -> Response {
+    let path = match cmd.file_path {
+        Some(p) => p,
+        None => return Response::err("Missing file_path"),
     };
-    let tag = cmd.tag.clone().unwrap_or_else(|| chrono_now());
-    let overlay = format!("/tmp/terra-disks/vms/{}/overlay.qcow2", name);
-    let snap_dir = format!("/tmp/terra-disks/vms/{}/snapshots", name);
-    let snap_path = format!("{}/{}.qcow2", snap_dir, tag);
-    std::fs::create_dir_all(&snap_dir).ok();
-    match std::fs::copy(&overlay, &snap_path) {
-        Ok(_) => Response::ok(serde_json::json!({"snapshot": snap_path, "tag": tag})),
-        Err(e) => Response::err(format!("snapshot: {}", e)),
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Response::ok(serde_json::json!({"path": path, "content": content})),
+        Err(e) => Response::err(format!("read: {}", e)),
     }
 }
 
-fn cmd_snapshot_list(cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing name"),
+fn cmd_file_write(cmd: Command) -> Response {
+    let path = match cmd.file_path {
+        Some(p) => p,
+        None => return Response::err("Missing file_path"),
     };
-    let snap_dir = format!("/tmp/terra-disks/vms/{}/snapshots", name);
-    let mut snaps = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&snap_dir) {
+    let content = match cmd.file_content {
+        Some(c) => c,
+        None => return Response::err("Missing file_content"),
+    };
+    match std::fs::write(&path, content) {
+        Ok(()) => Response::ok_msg("written"),
+        Err(e) => Response::err(format!("write: {}", e)),
+    }
+}
+
+fn cmd_file_list(cmd: Command) -> Response {
+    let path = cmd.file_path.unwrap_or_else(|| ".".to_string());
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&path) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".qcow2") {
-                    snaps.push(serde_json::json!({
-                        "tag": name.trim_end_matches(".qcow2"),
-                        "size": entry.metadata().ok().map(|m| m.len()).unwrap_or(0),
-                    }));
-                }
-            }
+            files.push(serde_json::json!({
+                "name": entry.file_name().to_string_lossy(),
+                "is_dir": entry.file_type().ok().map(|t| t.is_dir()).unwrap_or(false),
+                "size": entry.metadata().ok().map(|m| m.len()).unwrap_or(0),
+            }));
         }
     }
-    Response::ok(serde_json::json!({"snapshots": snaps}))
-}
-
-fn cmd_snapshot_restore(cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing name"),
-    };
-    let tag = match cmd.tag {
-        Some(t) => t,
-        None => return Response::err("Missing tag"),
-    };
-    let overlay = format!("/tmp/terra-disks/vms/{}/overlay.qcow2", name);
-    let snap_path = format!("/tmp/terra-disks/vms/{}/snapshots/{}.qcow2", name, tag);
-    match std::fs::copy(&snap_path, &overlay) {
-        Ok(_) => Response::ok_msg(&format!("Restored snapshot '{}'", tag)),
-        Err(e) => Response::err(format!("restore: {}", e)),
-    }
-}
-
-fn chrono_now() -> String {
-    use std::time::SystemTime;
-    let dur = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("snap-{}", dur.as_secs())
+    Response::ok(serde_json::json!({"path": path, "entries": files}))
 }

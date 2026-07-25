@@ -19,7 +19,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Create a new VM.
     Create {
         name: String,
         #[arg(long)]
@@ -39,11 +38,10 @@ enum Commands {
         #[arg(long, default_value = "20")]
         disk_size: u64,
     },
-    /// List running VMs.
     List,
-    /// Show VM details.
-    Info { name: String },
-    /// Resize VM CPU or memory.
+    Info {
+        name: String,
+    },
     Resize {
         name: String,
         #[arg(long)]
@@ -51,31 +49,32 @@ enum Commands {
         #[arg(long)]
         memory_bytes: Option<u64>,
     },
-    /// Gracefully shut down a VM.
-    Shutdown { name: String },
-    /// Force-kill a VM.
-    Kill { name: String },
-    /// Destroy a VM and its overlay disk.
-    Destroy { name: String },
-    /// Execute a command in a sandbox.
+    Shutdown {
+        name: String,
+    },
+    Kill {
+        name: String,
+    },
+    Destroy {
+        name: String,
+    },
     Exec {
         args: Vec<String>,
         #[arg(long)]
         memory_mb: Option<u64>,
     },
-    /// Snapshot user overlay (data only, not VM state).
-    SnapshotCreate {
-        name: String,
-        #[arg(long)]
-        tag: Option<String>,
+    /// Read a file from inside the sandbox.
+    FileRead {
+        path: String,
     },
-    /// List snapshots for a VM.
-    SnapshotList { name: String },
-    /// Restore user overlay from a snapshot.
-    SnapshotRestore {
-        name: String,
-        #[arg(long)]
-        tag: String,
+    /// Write content to a file inside the sandbox.
+    FileWrite {
+        path: String,
+        content: String,
+    },
+    /// List files inside the sandbox.
+    FileList {
+        path: Option<String>,
     },
 }
 
@@ -149,23 +148,23 @@ fn main() {
             }
             print_response(send(&cli.socket, &cmd));
         }
-        Commands::SnapshotCreate { name, tag } => {
-            let mut cmd = serde_json::json!({"command":"snapshot_create","name":name});
-            if let Some(t) = tag {
-                cmd["tag"] = serde_json::json!(t);
-            }
-            print_response(send(&cli.socket, &cmd));
-        }
-        Commands::SnapshotList { name } => {
+        Commands::FileRead { path } => {
             print_response(send(
                 &cli.socket,
-                &serde_json::json!({"command":"snapshot_list","name":name}),
+                &serde_json::json!({"command":"file_read","file_path":path}),
             ));
         }
-        Commands::SnapshotRestore { name, tag } => {
+        Commands::FileWrite { path, content } => {
             print_response(send(
                 &cli.socket,
-                &serde_json::json!({"command":"snapshot_restore","name":name,"tag":tag}),
+                &serde_json::json!({"command":"file_write","file_path":path,"file_content":content}),
+            ));
+        }
+        Commands::FileList { path } => {
+            let path = path.unwrap_or_else(|| ".".to_string());
+            print_response(send(
+                &cli.socket,
+                &serde_json::json!({"command":"file_list","file_path":path}),
             ));
         }
     }
@@ -182,7 +181,6 @@ fn send(socket: &str, cmd: &serde_json::Value) -> serde_json::Value {
     let json = serde_json::to_string(cmd).unwrap();
     writeln!(stream, "{}", json).unwrap();
     stream.flush().unwrap();
-
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
