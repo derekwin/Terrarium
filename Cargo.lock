@@ -29,6 +29,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "adapter-sandlock"
+version = "0.1.0"
+dependencies = [
+ "adapter-traits",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "adapter-traits"
 version = "0.1.0"
 dependencies = [
