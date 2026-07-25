@@ -80,10 +80,6 @@ impl ChVmHandle {
 
         if let Some(ref base) = spec.base_disk {
             let overlay_spec = OverlaySpec::new(&name, base).disk_size_gb(spec.disk_size_gb);
-            let overlay_spec = spec
-                .tool_layers
-                .iter()
-                .fold(overlay_spec, |os, t| os.tool_layer(t));
             let overlay = OverlayManager::create_or_reuse(&overlay_spec)?;
             args.push("--disk".to_string());
             args.push(format!("path={}", overlay));

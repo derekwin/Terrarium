@@ -55,14 +55,7 @@ pub struct VmSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_disk: Option<String>,
 
-    /// Tool layers to stack between base and user overlay (ordered base→outer).
-    /// Each layer is a pre-built qcow2 with specific tools (python, nodejs, etc).
-    /// The user overlay's backing file is the last tool layer (or base if none).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_layers: Vec<String>,
-
-    /// Virtual disk size for the qcow2 overlay in GB (default: 20).
-    /// The overlay file grows dynamically via COW; this sets the ceiling.
+    /// Virtual disk size for overlay in GB.
     #[serde(default = "default_disk_size_gb")]
     pub disk_size_gb: u64,
 
@@ -100,7 +93,6 @@ impl VmSpec {
             initramfs: None,
             disks: vec![],
             base_disk: None,
-            tool_layers: vec![],
             disk_size_gb: default_disk_size_gb(),
             labels: vec![],
         }
@@ -168,13 +160,6 @@ impl VmSpec {
     /// with this base as the backing file (COW semantics).
     pub fn base_disk(mut self, path: impl Into<String>) -> Self {
         self.base_disk = Some(path.into());
-        self
-    }
-
-    /// Add a tool layer (stacked base→outer between base disk and user overlay).
-    /// Tool layers are read-only qcow2 images with pre-installed runtimes.
-    pub fn tool_layer(mut self, path: impl Into<String>) -> Self {
-        self.tool_layers.push(path.into());
         self
     }
 

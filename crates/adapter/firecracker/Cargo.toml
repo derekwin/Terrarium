@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 adapter-traits = { path = "../traits" }
+overlay = { path = "../../overlay" }
 async-trait = "0.1"
 serde = { workspace = true }
 serde_json = { workspace = true }

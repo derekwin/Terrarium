@@ -105,8 +105,7 @@ cargo run -p engine --release -- daemon
 # Create VM with overlay
 terra vm create agent-1 \
   --kernel target/guest/vmlinux.bin \
-  --rootfs-disk /data/base.qcow2 \
-  --toolfs-disk /data/tool-python.qcow2
+  --rootfs-disk /data/full.qcow2
 
 # Run agent in sandbox
 terra sandbox exec python3 -c "print(2 ** 10)"

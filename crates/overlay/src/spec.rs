@@ -13,12 +13,9 @@ pub enum OverlayFormat {
 /// Specification for building a qcow2 overlay stack.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlaySpec {
-    /// Shared base image (read-only).
+    /// Shared rootfs image (read-only).
     pub base: String,
-    /// Tool layers stacked base→outer (read-only, pre-built).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_layers: Vec<String>,
-    /// Per-user upper directory name (used to derive path).
+    /// Per-user upper overlay name (used to derive path).
     pub name: String,
     /// Virtual disk size ceiling in GB.
     #[serde(default = "default_disk_size_gb")]
@@ -44,18 +41,11 @@ impl OverlaySpec {
     pub fn new(name: impl Into<String>, base: impl Into<String>) -> Self {
         Self {
             base: base.into(),
-            tool_layers: vec![],
             name: name.into(),
             disk_size_gb: default_disk_size_gb(),
             format: OverlayFormat::default(),
             state_dir: default_state_dir(),
         }
-    }
-
-    /// Add a tool layer (stacked between base and user overlay).
-    pub fn tool_layer(mut self, path: impl Into<String>) -> Self {
-        self.tool_layers.push(path.into());
-        self
     }
 
     /// Set the virtual disk size in GB.
@@ -75,29 +65,17 @@ impl OverlaySpec {
         format!("{}/{}/overlay.qcow2", self.state_dir, self.name)
     }
 
-    /// The effective backing file: last tool layer, or base if no tools.
+    /// The backing file for the user overlay — always the rootfs.
     pub fn backing_file(&self) -> &str {
-        self.tool_layers
-            .last()
-            .map(|s| s.as_str())
-            .unwrap_or(&self.base)
+        &self.base
     }
 
-    /// Description of the layer stack for logging.
+    /// Description for logging.
     pub fn layer_desc(&self) -> String {
-        if self.tool_layers.is_empty() {
-            "base".into()
-        } else {
-            self.tool_layers
-                .iter()
-                .map(|t| {
-                    std::path::Path::new(t)
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                })
-                .collect::<Vec<_>>()
-                .join("+")
-        }
+        std::path::Path::new(&self.base)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
     }
 }

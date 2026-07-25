@@ -12,6 +12,7 @@ mod manager;
 mod metering;
 mod placement;
 mod pool;
+mod registry;
 mod scheduler;
 mod spec;
 mod tools;

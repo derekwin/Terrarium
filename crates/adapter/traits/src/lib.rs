@@ -39,9 +39,6 @@ pub struct VmSpec {
     /// Base disk for qcow2 overlay (shared, read-only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_disk: Option<String>,
-    /// Tool layers stacked between base and user overlay.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_layers: Vec<String>,
     /// Virtual disk size for overlay in GB.
     #[serde(default = "default_disk_size_gb")]
     pub disk_size_gb: u64,

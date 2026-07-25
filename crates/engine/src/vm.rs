@@ -80,10 +80,7 @@ fn read_child_stderr(child: &mut Child) -> String {
 /// Create a qcow2 overlay disk via the overlay crate.
 fn create_qcow2_overlay(spec: &VmSpec) -> std::result::Result<(String, bool), VmError> {
     let base = spec.base_disk.as_ref().unwrap();
-    let mut ospec = overlay::OverlaySpec::new(&spec.name, base).disk_size_gb(spec.disk_size_gb);
-    for tool in &spec.tool_layers {
-        ospec = ospec.tool_layer(tool);
-    }
+    let ospec = overlay::OverlaySpec::new(&spec.name, base).disk_size_gb(spec.disk_size_gb);
     let already_exists = overlay::OverlayManager::exists(&ospec);
     let path = overlay::OverlayManager::create_or_reuse(&ospec).map_err(VmError::SetupFailed)?;
     Ok((path, already_exists))

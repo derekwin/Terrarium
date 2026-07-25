@@ -82,11 +82,6 @@ fn tools_list() -> Vec<serde_json::Value> {
                     "string",
                     "Root filesystem qcow2 path (optional)",
                 ),
-                (
-                    "toolfs_disk",
-                    "string",
-                    "Tool layer qcow2 path (repeatable, optional)",
-                ),
             ],
         ),
         tool("terra_vm_list", "List all running VMs.", vec![]),
@@ -149,9 +144,6 @@ fn call_tool(name: &str, args: &serde_json::Value) -> String {
             }
             if let Some(v) = args.get("rootfs_disk") {
                 c["base_disk"] = v.clone();
-            }
-            if let Some(v) = args.get("toolfs_disk") {
-                c["tool_layers"] = serde_json::json!([v.as_str().unwrap_or("")]);
             }
             send_to_engine(&c)
         }

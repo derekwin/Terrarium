@@ -23,6 +23,7 @@ version = "0.1.0"
 dependencies = [
  "adapter-traits",
  "async-trait",
+ "overlay",
  "serde",
  "serde_json",
  "thiserror",

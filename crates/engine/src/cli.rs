@@ -106,22 +106,6 @@ pub fn build_command(args: &[String]) -> serde_json::Value {
     if let Some(v) = flag("--base-disk") {
         cmd["base_disk"] = serde_json::json!(v);
     }
-    // Collect --tool flags (repeatable, ordered base→outer)
-    {
-        let mut tools: Vec<serde_json::Value> = Vec::new();
-        let mut i = 0;
-        while i < args.len() {
-            if args[i] == "--tool" && i + 1 < args.len() {
-                tools.push(serde_json::json!(args[i + 1]));
-                i += 2;
-            } else {
-                i += 1;
-            }
-        }
-        if !tools.is_empty() {
-            cmd["tool_layers"] = serde_json::json!(tools);
-        }
-    }
     if let Some(v) = flag("--disk-size") {
         if let Ok(n) = v.parse::<u64>() {
             cmd["disk_size_gb"] = serde_json::json!(n);

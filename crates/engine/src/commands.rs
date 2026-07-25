@@ -45,8 +45,6 @@ pub struct Command {
     #[serde(default)]
     pub base_disk: Option<String>,
     #[serde(default)]
-    pub tool_layers: Vec<String>,
-    #[serde(default)]
     pub disk_size_gb: Option<u64>,
 
     // pool
@@ -156,9 +154,6 @@ fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
     }
     if let Some(ref b) = cmd.base_disk {
         spec = spec.base_disk(b.clone());
-    }
-    for tool in &cmd.tool_layers {
-        spec = spec.tool_layer(tool);
     }
     if let Some(gb) = cmd.disk_size_gb {
         spec = spec.disk_size_gb(gb);
@@ -344,9 +339,6 @@ fn cmd_pool_create(pools: &mut crate::pool::WarmPool, cmd: Command) -> Response 
     let mut spec = crate::spec::VmSpec::new(&name, kernel);
     if let Some(b) = cmd.base_disk {
         spec = spec.base_disk(b);
-    }
-    for tool in &cmd.tool_layers {
-        spec = spec.tool_layer(tool);
     }
     let snapshot_path = cmd
         .snapshot_path

@@ -7,6 +7,7 @@
 
 use adapter_traits::{NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmSpec};
 use async_trait::async_trait;
+use overlay::{OverlaySpec, RawDiskManager};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
@@ -107,15 +108,17 @@ impl FcVmHandle {
                 }),
             )?;
         }
-        // Attach root disk
+        // Attach root disk (convert qcow2→raw if needed)
         if let Some(ref root) = spec.base_disk {
-            let _overlay = format!("/tmp/fc-{}-overlay.qcow2", name);
-            // For Firecracker, we pass the overlay directly; overlay crate
-            // can be used to create it before spawning.
+            let ospec = OverlaySpec::new(&name, root)
+                .disk_size_gb(spec.disk_size_gb)
+                .state_dir("/tmp/terra-disks/vms");
+            let disk_path =
+                RawDiskManager::create_or_reuse(&ospec).map_err(|e| format!("raw disk: {}", e))?;
             client.put(
                 "/drives/rootfs",
                 &serde_json::json!({
-                    "drive_id": "rootfs", "path_on_host": root,
+                    "drive_id": "rootfs", "path_on_host": disk_path,
                     "is_root_device": true, "is_read_only": false,
                 }),
             )?;

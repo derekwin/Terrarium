@@ -33,8 +33,6 @@ enum Commands {
         memory: u64,
         #[arg(long)]
         rootfs_disk: Option<String>,
-        #[arg(long)]
-        toolfs_disk: Vec<String>,
         #[arg(long, default_value = "20")]
         disk_size: u64,
     },
@@ -89,7 +87,6 @@ fn main() {
             max_cpus,
             memory,
             rootfs_disk,
-            toolfs_disk,
             disk_size,
         } => {
             let mut cmd = serde_json::json!({
@@ -104,9 +101,6 @@ fn main() {
             }
             if let Some(b) = rootfs_disk {
                 cmd["base_disk"] = serde_json::json!(b);
-            }
-            if !toolfs_disk.is_empty() {
-                cmd["tool_layers"] = serde_json::json!(toolfs_disk);
             }
             print_response(send(&cli.socket, &cmd));
         }
