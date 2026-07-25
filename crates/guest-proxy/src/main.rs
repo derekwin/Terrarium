@@ -7,8 +7,10 @@
 mod sandbox;
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::thread;
+use std::time::Duration;
 
 const SOCKET_PATH: &str = "/tmp/sandboxd.sock";
 
@@ -16,13 +18,18 @@ fn main() {
     // For M2: Unix socket (guest-local). M3: vsock (host→guest).
     let _ = std::fs::remove_file(SOCKET_PATH);
     let listener = UnixListener::bind(SOCKET_PATH).expect("bind sandboxd socket");
+    std::fs::set_permissions(SOCKET_PATH, std::fs::Permissions::from_mode(0o600))
+        .expect("chmod sandboxd socket");
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 thread::spawn(|| handle(stream));
             }
-            Err(e) => eprintln!("accept: {}", e),
+            Err(e) => {
+                eprintln!("accept: {}", e);
+                thread::sleep(Duration::from_millis(100));
+            }
         }
     }
 }

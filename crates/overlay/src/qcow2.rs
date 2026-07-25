@@ -27,6 +27,10 @@ impl OverlayManager {
             return Ok(overlay);
         }
 
+        // Create to a temp file first, then atomically rename.
+        // Prevents TOCTOU race where concurrent creates would overwrite
+        // an in-use overlay via qemu-img's unconditional overwrite.
+        let tmp = format!("{}.tmp", overlay);
         let backing = spec.backing_file();
         let output = Command::new("qemu-img")
             .args([
@@ -37,18 +41,21 @@ impl OverlayManager {
                 backing,
                 "-F",
                 "qcow2",
-                &overlay,
+                &tmp,
                 &format!("{}G", spec.disk_size_gb),
             ])
             .output()
             .map_err(|e| format!("qemu-img not found: {}", e))?;
 
         if !output.status.success() {
+            let _ = std::fs::remove_file(&tmp);
             return Err(format!(
                 "qemu-img create overlay failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
+
+        std::fs::rename(&tmp, &overlay).map_err(|e| format!("rename temp overlay: {}", e))?;
 
         tracing::info!(
             %overlay,
