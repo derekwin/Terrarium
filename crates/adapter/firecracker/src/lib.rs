@@ -33,6 +33,7 @@ impl VmAdapter for FirecrackerAdapter {
             snapshot: true,
             pause_resume: true,
             network_qos: false,
+            qcow2: false,
         }
     }
 

@@ -41,6 +41,7 @@ impl VmAdapter for ChAdapter {
             snapshot: true,
             pause_resume: true,
             network_qos: true,
+            qcow2: true,
         }
     }
 

@@ -53,21 +53,22 @@ pub struct VmSpec {
 /// What this VM backend can and cannot do.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VmCapabilities {
-    /// CPU hot-add / hot-remove supported.
     pub cpu_resize: bool,
-    /// Memory hotplug supported.
     pub memory_resize: bool,
-    /// Disk resize (online expand) supported.
     pub disk_resize: bool,
-    /// Disk hot-add supported.
     pub disk_add: bool,
-    /// VM snapshot / restore supported.
     pub snapshot: bool,
-    /// VM pause / resume supported.
     pub pause_resume: bool,
-    /// Per-VM network QoS (rate limiting) supported.
     #[serde(default)]
     pub network_qos: bool,
+    /// Whether this VMM supports qcow2 backing chains (COW at block level).
+    /// If false, the overlay crate falls back to raw disk conversion.
+    #[serde(default = "default_true")]
+    pub qcow2: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Network QoS configuration for a VM.
