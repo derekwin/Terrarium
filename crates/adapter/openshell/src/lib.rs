@@ -11,7 +11,11 @@ use adapter_traits::{
     VmName,
 };
 use async_trait::async_trait;
+use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 #[derive(Default)]
 pub struct OpenshellAdapter;
@@ -95,17 +99,41 @@ fn openshell_run(
         "openshell run"
     );
 
-    let output = process
+    // Spawn with timeout (60s).
+    let mut child = process
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| AdapterError::internal(format!("openshell: {}", e)))?;
+        .spawn()
+        .map_err(|e| AdapterError::internal(format!("openshell spawn: {}", e)))?;
+
+    // Take pipes before moving child into the wait thread.
+    let mut stdout_pipe = child.stdout.take().unwrap();
+    let mut stderr_pipe = child.stderr.take().unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(child.wait());
+    });
+
+    let exit_status = match rx.recv_timeout(Duration::from_secs(60)) {
+        Ok(Ok(s)) => s,
+        _ => {
+            return Err(AdapterError::timeout(
+                "openshell command timed out after 60s",
+            ))
+        }
+    };
+
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    stdout_pipe.read_to_end(&mut stdout_buf).ok();
+    stderr_pipe.read_to_end(&mut stderr_buf).ok();
 
     Ok(ExecResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+        exit_code: exit_status.code().unwrap_or(-1),
     })
 }
