@@ -1,13 +1,16 @@
-//! terra-controller — host daemon and sole control plane entry point.
+//! terra-engine — host daemon and sole control plane entry point.
 //!
-//! Two modes:
-//!   `controller daemon [--socket PATH]`  — start daemon, listen on Unix socket
-//!   `controller <cmd> [args]`            — CLI client, sends command to daemon
+//! Manages VM lifecycle, sandbox placement, resource scheduling,
+//! warm pool management, and billing metering.
 
 mod cli;
 mod commands;
 mod daemon;
 mod manager;
+mod metering;
+mod placement;
+mod pool;
+mod scheduler;
 mod spec;
 mod vm;
 
