@@ -3,6 +3,7 @@
 //! Manages VM lifecycle, sandbox placement, resource scheduling,
 //! warm pool management, and billing metering.
 
+mod cgroup;
 mod cli;
 mod commands;
 mod daemon;
