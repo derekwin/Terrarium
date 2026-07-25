@@ -8,6 +8,7 @@ license.workspace = true
 adapter-ch = { path = "../adapter/ch" }
 adapter-traits = { path = "../adapter/traits" }
 overlay = { path = "../overlay" }
+num_cpus = "1"
 futures = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
