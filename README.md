@@ -1,104 +1,164 @@
-# Terrarium
+# Terrarium Engine
 
-Terrarium is a lightweight sandbox platform for AI Agent workloads: **microVMs as the isolation boundary, process sandboxes as the execution unit** — providing a secure, elastic, observable, and fault-tolerant agent execution environment.
+**Production-grade agent sandboxing — deploy secure, isolated execution environments with high single-node density.**
 
-Containers share a kernel with the agent process, limiting how well they constrain untrusted code. Traditional VMs are heavy and statically provisioned. Terrarium combines the best of both: hardware-level isolation with per-agent sandboxing inside the VM, all under a dynamic resource model that scales CPU, memory, and disk on demand.
+Terrarium Engine is a scheduling and control layer that decouples agent sandboxing from specific VM and sandbox technologies. Think of it as the control plane that turns any Linux host into a multi-tenant agent runtime — with hardware-level VM isolation, pluggable sandbox backends, and sub-second warm pool provisioning.
 
-**Tech stack**: VMM base is a [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor) fork (thin fork — "configure, don't patch"). The self-developed control plane and sandbox layer form the core IP.
+## Why Terrarium
 
-## Core Goals
+Running AI agents in production means running untrusted code at scale. Containers share a kernel. MicroVMs are slow to provision. Terrarium sits in the sweet spot:
 
-- **Dynamic resources**: CPU, memory, and disk scale online via Cloud Hypervisor's resize API. The model is "pre-create at boot, adjust at runtime" — vCPUs declared up to a cap, virtio-mem attached at boot and resized via config change. No guest kernel patches required.
-- **Two-layer isolation**:
-  - **VM layer**: KVM hardware virtualization as the security boundary
-  - **Sandbox layer**: namespaces + OverlayFS + cgroup v2 + Landlock + seccomp-bpf, one execution unit per agent
-- **Observability**: in-guest eBPF (CO-RE) collects syscalls, file, network, and resource usage per sandbox, reported to the host over vsock
-- **Snapshot fault tolerance**: three levels — FS CoW snapshots, per-process CRIU at agent step boundaries, and full VM snapshot/restore via Cloud Hypervisor
-- **Phase-aware scheduling**: sched_ext scheduler on the host reclaims vCPU time during LLM inference wait periods
-- **Warm pools**: pre-booted VMs ready for instant sandbox claims
+| | Container | VM-only | Terrarium |
+|---|---|---|---|
+| Isolation | Weak (shared kernel) | Strong (KVM) | **Strong (KVM + sandbox)** |
+| Density | High | Low | **High** |
+| Provisioning | Fast | Slow (~1s) | **Fast (~100ms warm pool)** |
+| File persistence | Ephemeral | Disk image | **Portable qcow2 overlay** |
+| Resource control | cgroup | VM config | **cgroup v2 + network QoS** |
+| Sandbox backends | N/A | N/A | **Pluggable (Sandlock, OpenShell)** |
 
 ## Architecture
 
 ```
-┌─ Host ──────────────────────────────────────────────────────────┐
-│  terra-controller daemon (sole control plane entry)             │
-│  Input: PSI / DAMON / eBPF metering → Output: CH resize API     │
-│  sched_ext scheduler (phase-aware CPU reclamation)               │
-│                                                                  │
-│  cloud-hypervisor: one process per VM (spawned & managed by      │
-│  controller via unix domain socket API)                          │
-│  ┌─ VM (KVM isolation) ───────────────────────────────────────┐ │
-│  │  sandboxd: sandbox lifecycle management                    │ │
-│  │  ┌───────────┐ ┌───────────┐ ┌───────────┐                │ │
-│  │  │  Agent    │ │  Agent    │ │  Agent    │ ...            │ │
-│  │  │  sandbox  │ │  sandbox  │ │  sandbox  │                │ │
-│  │  └───────────┘ └───────────┘ └───────────┘                │ │
-│  │  observe (eBPF)          │  checkpoint daemon             │ │
-│  └────────────────────┬──────────────────────────────────────┘ │
-│                vsock control / telemetry channel                │
-└─────────────────────────────────────────────────────────────────┘
+┌─ Host ──────────────────────────────────────────────────────┐
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │                Terrarium Engine                       │   │
+│  │     scheduler · warm pool · cgroup · placement        │   │
+│  │     daemon · CLI · Python SDK · file API              │   │
+│  └──────────────────────┬───────────────────────────────┘   │
+│                         │                                    │
+│          ┌──────────────┴──────────────┐                     │
+│          ▼                             ▼                     │
+│  ┌───────────────┐            ┌────────────────┐            │
+│  │  CH Adapter   │            │ SandboxAdapter  │            │
+│  │  (VmAdapter)  │            │ Sandlock/OpenShell│          │
+│  └───────┬───────┘            └───────┬────────┘            │
+│          │                            │                      │
+│          ▼                            ▼                      │
+│  ┌─────────────────────────────────────────────┐            │
+│  │          Cloud Hypervisor VM × N            │            │
+│  │  ┌───────────────────────────────────────┐  │            │
+│  │  │  guest-agent ← host→guest relay       │  │            │
+│  │  │  sandlock CLI / openshell CLI         │  │            │
+│  │  │  Agent process ◄── Sandbox isolation  │  │            │
+│  │  └───────────────────────────────────────┘  │            │
+│  │  每 VM: 独立 qcow2 overlay · cgroup · QoS   │            │
+│  └─────────────────────────────────────────────┘            │
+│                                                              │
+│  单机 100+ VM · 预热池 ~100ms 启动 · 资源动态扩缩            │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-| Layer | Isolation | Resources | Monitoring | Fault Tolerance | Form Factor |
-|---|---|---|---|---|---|
-| **VM** | KVM hardware virtualization | virtio-mem / vCPU / balloon / blk resize | PSI, DAMON | CH VM snapshot / restore | One CH process per VM, managed by controller |
-| **Sandbox** | namespaces + Landlock + seccomp | cgroup v2 quotas & throttling | per-sandbox eBPF | FS CoW + CRIU (step boundary) | Resident daemon inside guest |
+**Two adapter layers, trait-based:**
 
-## Usage (M2+)
+| Trait | What it does | Implementations |
+|---|---|---|
+| `VmAdapter` | Spawn, resize, snapshot VMs | Cloud Hypervisor (Firecracker, K8s Pod planned) |
+| `SandboxAdapter` | Create, exec, destroy sandboxes | Sandlock, OpenShell |
 
-The sandbox, not the VM, is Terrarium's first-class citizen:
+## Key Capabilities
+
+### High-Density Scheduling
+
+- Single node: 100+ VMs with network QoS per TAP
+- Admission control: pre-check resource availability
+- Idle reclamation: scale down unused VMs automatically
+- Warm pool: pre-booted VMs ready in ~100ms via snapshot restore
+
+### Three-Layer Filesystem
+
+```
+  user-data.qcow2    (读写，per-user，可迁移)     ← 用户数据层
+  tools.qcow2         (只读，共享，可组合)          ← 工具层
+  rootfs.qcow2        (只读，共享)                  ← 系统层
+```
+qcow2 backing chain：写操作落到用户层，读操作逐层回退。可 `scp` 用户层到任意机器，继续工作。
+
+### Pluggable Sandbox Backends
+
+| Backend | Isolation | Unique |
+|---|---|---|
+| **Sandlock** | Landlock + seccomp-bpf + seccomp notif | No root needed, COW FS, HTTP ACL, ~5ms startup |
+| **OpenShell** (NVIDIA) | Container + Landlock + OPA proxy | Inference routing, credential injection, GPU |
+| **guest-agent** | Thin relay | Host↔guest command forwarding |
+
+### Resource Control
+
+- cgroup v2: per-sandbox memory.max + cpu.weight (kernel-enforced, near-zero overhead)
+- Network QoS: per-VM egress/ingress rate limiting via Linux tc
+- Dynamic resize: CPU, memory online adjustment without reboot
+
+## Quick Start
+
+```bash
+# Install CH (official release binary)
+wget https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/cloud-hypervisor-static
+chmod +x cloud-hypervisor-static
+
+# Build guest image
+cd images && bash build.sh
+
+# Start engine daemon
+cargo run -p engine --release -- daemon
+
+# Create VM with overlay
+terra vm create agent-1 \
+  --kernel target/guest/vmlinux.bin \
+  --rootfs-disk /data/base.qcow2 \
+  --toolfs-disk /data/tool-python.qcow2
+
+# Run agent in sandbox
+terra sandbox exec python3 -c "print(2 ** 10)"
+```
+
+### Python SDK
 
 ```python
 import terra
 
-with terra.sandbox.create(name='dev', image='python:3.12') as sb:
-    proc = sb.exec('python', '-c', 'print(2 ** 10)')
-    proc.wait()
-    print(proc.stdout.read())          # 1024
+# Create VM
+vm = terra.vm.create("agent-1", kernel="target/guest/vmlinux.bin")
 
-    snap = sb.snapshot()
+# Execute in sandbox
+sb = terra.sandbox.create("agent-1", tools=["python"])
+result = sb.exec("python3", "-c", "print(2 ** 10)")
+print(result.stdout)  # 1024
 
-sb2 = terra.sandbox.create(name='dev2', snapshot=snap)
+# Read agent output
+content = sb.read_file("/home/agent/output.txt")
 ```
 
-- **Python SDK**: `create / exec / terminate / snapshot / pause / resume / resize / ls` with async `.aio` variants
-- **CLI**: `terra sandbox create / exec / ls / terminate / snapshot / pool`
-- **MCP Server**: sandbox capabilities exposed as MCP tools
-- **Warm pools**: `create_pool(image=..., replicas=...)` for instant claims
-- **Online adjustment**: `pause() / resume()` per VM, `resize(cpus=..., memory_gb=...)` live
-
-## Repository Structure
+## Repository
 
 ```
-terrarium/
-├── AGENTS.md / README.md / README_zh.md
-├── LICENSE (Apache-2.0) / NOTICE / THIRD-PARTY
-├── hypervisor/             # Cloud Hypervisor fork (git submodule or vendored branch)
-│   └── PATCHES.md          # local patch registry
-├── crates/
-│   ├── ch-client/          # CH API socket client (create/start/resize/add-disk/snapshot)
-│   ├── controller/         # terra-controller daemon (control plane)
-│   ├── sandboxd/           # in-guest sandbox runtime (M2)
-│   ├── observe/            # in-guest eBPF observability daemon (M2)
-│   ├── checkpoint/         # snapshot coordination (M3)
-│   ├── cli/                # terra CLI (M2)
-│   └── mcp/                # MCP Server (M2)
-├── sdk/python/             # Python SDK (M2)
-├── images/                 # guest kernel config & rootfs build scripts
-├── docs/decisions/         # Architecture Decision Records
-└── .github/workflows/      # CI
+crates/
+├── engine/          Scheduler, pool, cgroup, daemon
+├── adapter/
+│   ├── traits/      VmAdapter + SandboxAdapter
+│   ├── ch/          Cloud Hypervisor (self-contained)
+│   ├── sandlock/    Sandlock adapter
+│   └── openshell/   OpenShell adapter
+├── overlay/         Three-layer qcow2 filesystem
+├── network/         Per-VM tc-based QoS
+├── guest-agent/     Host↔guest relay
+├── cli/             terra CLI
+└── mcp/             MCP Server (planned)
+
+sdk/python/          Python SDK
+
+thirdparty/          Third-party deps + patch registry
+images/              Guest kernel + rootfs build
 ```
 
 ## Roadmap
 
-- **M0 — CH Base & Dynamic Resource Validation**: fork integration, guest image build, baseline startup, CPU/memory/disk resize testing, ch-client skeleton
-- **M1 — Controller Skeleton & Manual Resource Loop**: full ch-client API, VM lifecycle management, manual resize trigger validation
-- **M2 — Sandbox Layer & Developer Interfaces**: sandboxd full isolation stack, eBPF telemetry, Python SDK / CLI / MCP Server
-- **M3 — Snapshot Fault Tolerance**: FS CoW snapshots → CH VM snapshot/restore → per-process CRIU
-- **M4 — Automation & Density**: PSI/DAMON closed-loop decisions, sched_ext scheduling, warm pools, density benchmarks
+- **M0** ✅ CH base, guest images, baseline measurements
+- **M1** ✅ Engine daemon, CLI, VM lifecycle, qcow2 overlay
+- **M2** 🔄 Adapter layer, Sandlock/OpenShell, warm pool, scheduler, Python SDK
+- **M3** 🔲 Multi-node placement, PSI/DAMON closed-loop, sched_ext scheduling
+- **M4** 🔲 eBPF observability, snapshot fault tolerance, density benchmarks
 
-## Acknowledgments
+## License
 
-Terrarium is built on [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor) (Apache License 2.0). We maintain a thin fork with minimal, well-documented patches. See `hypervisor/PATCHES.md` and `THIRD-PARTY` for details.
-
-This project is released under the Apache License 2.0.
+Apache 2.0. Built on Cloud Hypervisor and Linux kernel features. See `THIRD-PARTY` for acknowledgments.

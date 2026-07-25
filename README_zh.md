@@ -1,104 +1,164 @@
-# Terrarium
+# Terrarium Engine
 
-Terrarium 是面向 AI Agent 工作负载的轻量沙箱平台：**以 microVM 为隔离边界，以进程沙箱为执行单元**，提供安全、弹性、可观测、可容错的 Agent 执行环境。
+**生产级 Agent 沙箱引擎 — 高单机密度、安全隔离、即插即用。**
 
-容器的隔离边界与 Agent 进程同在用户态，对不受信代码的约束有限；传统虚拟机开销大、资源配置静态。Terrarium 结合两者之长：硬件级隔离 + VM 内按 Agent 粒度的沙箱化，配合动态资源模型，按需缩放 CPU、内存和磁盘。
+Terrarium Engine 是一个与具体 VM/沙箱技术解耦的调度控制层。它把任意 Linux 宿主机变成多租户 Agent 运行时——硬件级 VM 隔离、可插拔沙箱后端、秒级预热池供给。
 
-**技术路线**：VMM 基座采用 [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor) fork（薄 fork——"能配置就不补丁"），自研控制面与沙箱层构成项目核心 IP。
+## 为什么选择 Terrarium
 
-## 核心功能目标
+生产环境中运行 AI Agent = 大规模运行不受信代码。容器共享内核，传统 VM 启动慢。Terrarium 取两者之长：
 
-- **动态资源**：CPU、内存、磁盘在线伸缩，走 Cloud Hypervisor 的 resize API。采用「启动预创建 + 运行调整」模型——vCPU 启动时声明上限、运行中逻辑上下线；virtio-mem 启动时挂载、运行中 config change 调整。不需要 Guest 内核补丁。
-- **双层隔离**：
-  - **VM 层**：KVM 硬件虚拟化，作为安全边界
-  - **沙箱层**：namespace + OverlayFS + cgroup v2 + Landlock + seccomp-bpf，每个 Agent 一个执行单元
-- **可观测**：Guest 内 eBPF（CO-RE）按沙箱粒度采集 syscall、文件、网络、资源计量，经 vsock 上报宿主机
-- **快照容错**：三级快照——文件系统 CoW 快照、进程级 CRIU（Agent step 边界）、整 VM 快照/恢复（走 Cloud Hypervisor）
-- **相位感知调度**：宿主机 sched_ext 调度器在 LLM 推理等待期回收 vCPU 时间片
-- **预热池**：预启动 VM 就绪，创建沙箱即认领
+| | 容器 | 纯 VM | Terrarium |
+|---|---|---|---|
+| 隔离性 | 弱（共享内核） | 强（KVM） | **强（KVM + 沙箱双层）** |
+| 密度 | 高 | 低 | **高** |
+| 启动速度 | 快 | 慢（~1s） | **快（预热池 ~100ms）** |
+| 文件持久化 | 临时 | 磁盘镜像 | **便携 qcow2 overlay** |
+| 资源控制 | cgroup | VM 配置 | **cgroup v2 + 网络 QoS** |
+| 沙箱后端 | — | — | **可插拔（Sandlock、OpenShell）** |
 
 ## 架构
 
 ```
-┌─ 宿主机 ────────────────────────────────────────────────────────┐
-│  terra-controller daemon（控制面唯一入口）                        │
-│  输入：PSI / DAMON / eBPF 计量  →  输出：调 CH resize API        │
-│  sched_ext 调度器（LLM 等待期回收 CPU）                           │
-│                                                                  │
-│  cloud-hypervisor：每 VM 一个进程（controller 通过 unix domain    │
-│  socket API 派生与管理）                                         │
-│  ┌─ VM（KVM 隔离）────────────────────────────────────────────┐ │
-│  │  sandboxd：沙箱生命周期管理                                  │ │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐                    │ │
-│  │  │  Agent   │ │  Agent   │ │  Agent   │ ...                │ │
-│  │  │  沙箱    │ │  沙箱    │ │  沙箱    │                    │ │
-│  │  └──────────┘ └──────────┘ └──────────┘                    │ │
-│  │  observe（eBPF 观测）    │  checkpoint daemon               │ │
-│  └────────────────────┬──────────────────────────────────────┘ │
-│                vsock 控制/观测通道                               │
-└─────────────────────────────────────────────────────────────────┘
+┌─ 宿主机 ────────────────────────────────────────────────────┐
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │                Terrarium Engine                       │   │
+│  │     调度器 · 预热池 · cgroup · 放置决策               │   │
+│  │     daemon · CLI · Python SDK · 文件 API              │   │
+│  └──────────────────────┬───────────────────────────────┘   │
+│                         │                                    │
+│          ┌──────────────┴──────────────┐                     │
+│          ▼                             ▼                     │
+│  ┌───────────────┐            ┌────────────────┐            │
+│  │  CH 适配器    │            │  沙箱适配器     │            │
+│  │  (VmAdapter)  │            │  Sandlock/OpenShell│         │
+│  └───────┬───────┘            └───────┬────────┘            │
+│          │                            │                      │
+│          ▼                            ▼                      │
+│  ┌─────────────────────────────────────────────┐            │
+│  │          Cloud Hypervisor VM × N            │            │
+│  │  ┌───────────────────────────────────────┐  │            │
+│  │  │  guest-agent ← 宿主机↔Guest 命令转发  │  │            │
+│  │  │  sandlock CLI / openshell CLI         │  │            │
+│  │  │  Agent 进程 ◄── 沙箱隔离执行           │  │            │
+│  │  └───────────────────────────────────────┘  │            │
+│  │  每 VM: 独立 qcow2 overlay · cgroup · QoS   │            │
+│  └─────────────────────────────────────────────┘            │
+│                                                              │
+│  单机 100+ VM · 预热池 ~100ms 启动 · 资源动态扩缩            │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-| 层 | 隔离 | 资源 | 监控 | 容错 | 形态 |
-|---|---|---|---|---|---|
-| **VM** | KVM 硬件虚拟化 | virtio-mem / vCPU / balloon / blk 动态调整 | PSI、DAMON | CH VM 快照/恢复 | 每 VM 一个 CH 进程，controller 管理 |
-| **沙箱** | namespace + Landlock + seccomp | cgroup v2 配额与限速 | eBPF 按沙箱粒度 | FS CoW + CRIU（step 边界） | Guest 内常驻 daemon |
+**两层 Adapter，trait 解耦：**
 
-## 使用接口（M2 起）
+| Trait | 职责 | 实现 |
+|---|---|---|
+| `VmAdapter` | 派生、resize、快照 VM | Cloud Hypervisor（Firecracker、K8s Pod 规划中） |
+| `SandboxAdapter` | 创建、执行、销毁沙箱 | Sandlock、OpenShell |
 
-Terrarium 对外的第一公民是沙箱而非 VM：
+## 核心能力
+
+### 高密度调度
+
+- 单机 100+ VM，每个 TAP 独立网络 QoS
+- 准入控制：创建前预检资源可用性
+- 空闲回收：自动缩容闲置 VM
+- 预热池：CH 快照恢复 → VM 就绪 ~100ms
+
+### 三层文件系统
+
+```
+  user-data.qcow2    （读写，per-user，可迁移）     ← 用户数据层
+  tools.qcow2         （只读，共享，可组合）          ← 工具层
+  rootfs.qcow2        （只读，共享）                  ← 系统层
+```
+qcow2 backing chain：写操作落到用户层，读操作逐层回退。`scp` 用户层到任意机器，继续工作。
+
+### 可插拔沙箱后端
+
+| 后端 | 隔离方式 | 特色 |
+|---|---|---|
+| **Sandlock** | Landlock + seccomp-bpf + seccomp 通知 | 无需 root，COW 文件系统，HTTP ACL，~5ms 启动 |
+| **OpenShell**（NVIDIA） | 容器 + Landlock + OPA 代理 | 推理路由，凭证注入，GPU |
+| **guest-agent** | 命令转发 | Host↔Guest 通信桥 |
+
+### 资源控制
+
+- cgroup v2：per-sandbox 内存限制 + CPU 权重（内核强制执行，接近零开销）
+- 网络 QoS：per-VM 出/入带宽限制（Linux tc）
+- 动态扩缩：CPU、内存运行时在线调整
+
+## 快速开始
+
+```bash
+# 安装 CH（官方 release binary）
+wget https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/cloud-hypervisor-static
+chmod +x cloud-hypervisor-static
+
+# 构建 Guest 镜像
+cd images && bash build.sh
+
+# 启动引擎 daemon
+cargo run -p engine --release -- daemon
+
+# 创建 VM
+terra vm create agent-1 \
+  --kernel target/guest/vmlinux.bin \
+  --rootfs-disk /data/base.qcow2 \
+  --toolfs-disk /data/tool-python.qcow2
+
+# 在沙箱中运行 Agent
+terra sandbox exec python3 -c "print(2 ** 10)"
+```
+
+### Python SDK
 
 ```python
 import terra
 
-with terra.sandbox.create(name='dev', image='python:3.12') as sb:
-    proc = sb.exec('python', '-c', 'print(2 ** 10)')
-    proc.wait()
-    print(proc.stdout.read())          # 1024
+# 创建 VM
+vm = terra.vm.create("agent-1", kernel="target/guest/vmlinux.bin")
 
-    snap = sb.snapshot()
+# 在沙箱中执行
+sb = terra.sandbox.create("agent-1", tools=["python"])
+result = sb.exec("python3", "-c", "print(2 ** 10)")
+print(result.stdout)  # 1024
 
-sb2 = terra.sandbox.create(name='dev2', snapshot=snap)
+# 读取 Agent 输出
+content = sb.read_file("/home/agent/output.txt")
 ```
-
-- **Python SDK**：`create / exec / terminate / snapshot / pause / resume / resize / ls`，均有 `.aio` 异步版本
-- **CLI**：`terra sandbox create / exec / ls / terminate / snapshot / pool`
-- **MCP Server**：沙箱能力以 MCP tools 暴露
-- **预热池**：`create_pool(image=..., replicas=...)` 创建即认领
-- **在线调整**：`pause() / resume()` 整 VM 挂起与恢复；`resize(cpus=..., memory_gb=...)` 运行中伸缩
 
 ## 仓库结构
 
 ```
-terrarium/
-├── AGENTS.md / README.md / README_zh.md
-├── LICENSE (Apache-2.0) / NOTICE / THIRD-PARTY
-├── hypervisor/             # Cloud Hypervisor fork（git submodule 或 vendored 分支）
-│   └── PATCHES.md          # 本地补丁登记
-├── crates/
-│   ├── ch-client/          # CH API socket 客户端（create/start/resize/add-disk/snapshot）
-│   ├── controller/         # terra-controller daemon（控制面）
-│   ├── sandboxd/           # Guest 内沙箱运行时（M2）
-│   ├── observe/            # Guest 内 eBPF 观测 daemon（M2）
-│   ├── checkpoint/         # 快照协调（M3）
-│   ├── cli/                # terra CLI（M2）
-│   └── mcp/                # MCP Server（M2）
-├── sdk/python/             # Python SDK（M2）
-├── images/                 # Guest 内核配置与 rootfs 构建脚本
-├── docs/decisions/         # 架构决策记录（ADR）
-└── .github/workflows/      # CI
+crates/
+├── engine/          调度器、预热池、cgroup、daemon
+├── adapter/
+│   ├── traits/      VmAdapter + SandboxAdapter
+│   ├── ch/          Cloud Hypervisor（自包含）
+│   ├── sandlock/    Sandlock 适配器
+│   └── openshell/   OpenShell 适配器
+├── overlay/         三层 qcow2 文件系统
+├── network/         per-VM tc 流量控制
+├── guest-agent/     Host↔Guest 命令转发
+├── cli/             terra CLI
+└── mcp/             MCP Server（规划中）
+
+sdk/python/          Python SDK
+
+thirdparty/          第三方依赖 + 补丁登记
+images/              Guest 内核 + rootfs 构建
 ```
 
 ## 路线图
 
-- **M0 — CH 基座与动态资源实测**：fork 引入、Guest 镜像构建、启动基线、CPU/内存/磁盘 resize 三件套实测、ch-client 骨架
-- **M1 — Controller 骨架 + 手动资源闭环**：ch-client 完整封装、VM 生命周期管理、手动触发 resize 验证闭环
-- **M2 — 沙箱层与开发接口**：sandboxd 全隔离栈、eBPF 观测通道、Python SDK / CLI / MCP Server
-- **M3 — 快照容错**：FS CoW 快照 → CH VM 快照/恢复 → 进程级 CRIU
-- **M4 — 自动化与密度**：PSI/DAMON 接入闭环决策、sched_ext 调度、预热池、单机密度压测
+- **M0** ✅ CH 基座、Guest 镜像、基线实测
+- **M1** ✅ 引擎 daemon、CLI、VM 生命周期、qcow2 overlay
+- **M2** 🔄 Adapter 层、Sandlock/OpenShell、预热池、调度器、Python SDK
+- **M3** 🔲 多机放置、PSI/DAMON 闭环、sched_ext 调度
+- **M4** 🔲 eBPF 观测、快照容错、密度压测
 
-## 致谢
+## 许可证
 
-Terrarium 构建于 [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor)（Apache License 2.0）之上。我们维护一个薄 fork，保持最少、充分文档化的本地补丁。详见 `hypervisor/PATCHES.md` 与 `THIRD-PARTY`。
-
-本项目以 Apache License 2.0 发布。
+Apache 2.0。构建于 Cloud Hypervisor 及 Linux 内核特性之上。详见 `THIRD-PARTY`。
