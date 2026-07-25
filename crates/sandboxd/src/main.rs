@@ -1,8 +1,8 @@
-//! sandboxd — in-guest sandbox runtime daemon.
+//! sandboxd — host→guest command relay via vsock.
 //!
-//! Creates isolated execution environments using Linux namespaces.
-//! Phase 1: namespace isolation (mount, UTS, IPC, network).
-//! Phase 2+: OverlayFS, cgroup v2, Landlock, seccomp.
+//! Listens on vsock port for command requests from the host adapter.
+//! Executes them locally and returns stdout/stderr/exit_code.
+//! All sandbox isolation is provided by Sandlock / OpenShell, not sandboxd.
 
 mod sandbox;
 
@@ -13,28 +13,23 @@ use std::thread;
 const SOCKET_PATH: &str = "/tmp/sandboxd.sock";
 
 fn main() {
-    tracing_subscriber::fmt::init();
-
+    // For M2: Unix socket (guest-local). M3: vsock (host→guest).
     let _ = std::fs::remove_file(SOCKET_PATH);
     let listener = UnixListener::bind(SOCKET_PATH).expect("bind sandboxd socket");
-    tracing::info!(socket = SOCKET_PATH, "sandboxd listening");
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                thread::spawn(|| handle_client(stream));
+                thread::spawn(|| handle(stream));
             }
-            Err(e) => {
-                tracing::error!(error = %e, "Accept error");
-            }
+            Err(e) => eprintln!("accept: {}", e),
         }
     }
 }
 
-fn handle_client(mut stream: UnixStream) {
+fn handle(mut stream: UnixStream) {
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
-
     if reader.read_line(&mut line).is_err() {
         return;
     }
@@ -42,60 +37,64 @@ fn handle_client(mut stream: UnixStream) {
     let cmd: serde_json::Value = match serde_json::from_str(line.trim()) {
         Ok(c) => c,
         Err(e) => {
-            respond(&mut stream, "error", &format!("Invalid JSON: {}", e), None);
+            let _ = writeln!(
+                stream,
+                r#"{{"status":"error","message":"invalid json: {}"}}"#,
+                e
+            );
             return;
         }
     };
 
     let command = cmd["command"].as_str().unwrap_or("");
     match command {
-        "exec" => cmd_exec(&mut stream, &cmd),
-        "ping" => respond(&mut stream, "ok", "pong", None),
-        _ => respond(
-            &mut stream,
-            "error",
-            &format!("Unknown command: {}", command),
-            None,
-        ),
+        "exec" => exec_cmd(&mut stream, &cmd),
+        "ping" => {
+            let _ = writeln!(stream, r#"{{"status":"ok","message":"pong"}}"#);
+        }
+        _ => {
+            let _ = writeln!(
+                stream,
+                r#"{{"status":"error","message":"unknown command: {}"}}"#,
+                command
+            );
+        }
     }
 }
 
-fn cmd_exec(stream: &mut UnixStream, cmd: &serde_json::Value) {
+fn exec_cmd(stream: &mut UnixStream, cmd: &serde_json::Value) {
     let args: Vec<String> = match cmd["args"].as_array() {
         Some(a) => a
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect(),
         None => {
-            respond(stream, "error", "Missing 'args' array", None);
+            let _ = writeln!(stream, r#"{{"status":"error","message":"missing args"}}"#);
             return;
         }
     };
     if args.is_empty() {
-        respond(stream, "error", "Empty args", None);
+        let _ = writeln!(stream, r#"{{"status":"error","message":"empty args"}}"#);
         return;
     }
 
     let work_dir = cmd["work_dir"].as_str().unwrap_or("/tmp");
 
     match sandbox::exec_isolated(&args[0], &args, work_dir) {
-        Ok(o) => respond(
-            stream,
-            "ok",
-            "command executed",
-            Some(&serde_json::json!({
-                "stdout": o.stdout, "stderr": o.stderr, "exit_code": o.exit_code
-            })),
-        ),
-        Err(e) => respond(stream, "error", &format!("Sandbox error: {}", e), None),
+        Ok(o) => {
+            let resp = serde_json::json!({
+                "status": "ok",
+                "message": "command executed",
+                "data": {
+                    "stdout": o.stdout,
+                    "stderr": o.stderr,
+                    "exit_code": o.exit_code,
+                }
+            });
+            let _ = writeln!(stream, "{}", resp);
+        }
+        Err(e) => {
+            let _ = writeln!(stream, r#"{{"status":"error","message":"{}"}}"#, e);
+        }
     }
-}
-
-fn respond(stream: &mut UnixStream, status: &str, message: &str, data: Option<&serde_json::Value>) {
-    let mut resp = serde_json::json!({"status": status, "message": message});
-    if let Some(d) = data {
-        resp["data"] = d.clone();
-    }
-    let json = serde_json::to_string(&resp).unwrap_or_default();
-    let _ = writeln!(stream, "{}", json);
 }
