@@ -4,12 +4,16 @@
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
+use adapter_cloud_hypervisor::ChAdapter;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
 use crate::commands::{execute, Command};
 use crate::manager::VmManager;
+
+/// Default CH binary path. Can be overridden via TERRA_CH_BINARY env var.
+const DEFAULT_CH_BINARY: &str = "cloud-hypervisor";
 
 /// Run the controller in daemon mode, listening on the given socket path.
 pub async fn run(socket_path: &str) -> std::io::Result<()> {
@@ -19,7 +23,12 @@ pub async fn run(socket_path: &str) -> std::io::Result<()> {
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!(socket = %socket_path, "Daemon listening");
 
-    let manager = Arc::new(Mutex::new(VmManager::new()));
+    let ch_binary = std::env::var("TERRA_CH_BINARY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_CH_BINARY.to_string());
+    let adapter: Arc<dyn adapter_traits::VmAdapter> = Arc::new(ChAdapter::new(ch_binary));
+    let manager = Arc::new(Mutex::new(VmManager::new(adapter)));
 
     loop {
         match listener.accept().await {

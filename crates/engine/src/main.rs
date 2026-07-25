@@ -7,8 +7,6 @@ mod cli;
 mod commands;
 mod daemon;
 mod manager;
-mod spec;
-mod vm;
 
 use std::env;
 

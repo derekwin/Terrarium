@@ -23,12 +23,15 @@ pub use error::ClientError;
 // Adapter
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-pub struct ChAdapter;
+pub struct ChAdapter {
+    ch_binary: String,
+}
 
 impl ChAdapter {
-    pub fn new() -> Self {
-        Self
+    pub fn new(ch_binary: impl Into<String>) -> Self {
+        Self {
+            ch_binary: ch_binary.into(),
+        }
     }
 }
 
@@ -48,7 +51,7 @@ impl VmAdapter for ChAdapter {
     }
 
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, String> {
-        ChVmHandle::spawn(spec)
+        ChVmHandle::spawn(spec, &self.ch_binary)
             .await
             .map(|h| Box::new(h) as Box<dyn VmHandle>)
     }
@@ -73,7 +76,7 @@ struct ChVmHandle {
 }
 
 impl ChVmHandle {
-    async fn spawn(spec: &VmSpec) -> Result<Self, String> {
+    async fn spawn(spec: &VmSpec, ch_binary: &str) -> Result<Self, String> {
         let name = spec.name.clone();
         let socket = format!("/tmp/terra-{}.sock", name);
         let _ = std::fs::remove_file(&socket);
@@ -90,7 +93,7 @@ impl ChVmHandle {
 
         tracing::info!(name = %name, socket = %socket, "Spawning CH VM");
 
-        let mut child = Command::new("/tmp/cloud-hypervisor-static")
+        let mut child = Command::new(ch_binary)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -198,6 +201,10 @@ impl VmHandle for ChVmHandle {
 
     fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 }
 

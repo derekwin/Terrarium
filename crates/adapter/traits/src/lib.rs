@@ -230,6 +230,9 @@ pub trait VmHandle: Send + Sync {
 
     async fn shutdown(&self) -> Result<(), String>;
     fn pid(&self) -> u32;
+    /// Check if the VM/sandbox process is still running.
+    /// Uses `try_wait()` on the underlying child process.
+    fn is_alive(&mut self) -> bool;
 }
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::manager::VmManager;
-use crate::spec::VmSpec;
+use adapter_traits::{VmName, VmSpec};
 
 /// A command received from the client.
 #[derive(Debug, Deserialize)]
@@ -36,8 +36,6 @@ pub struct Command {
     pub hotplug_memory_gb: Option<u64>,
     #[serde(default)]
     pub max_memory_mb: Option<u64>,
-    #[serde(default)]
-    pub ch_binary: Option<String>,
 
     // snapshot / restore
     #[serde(default)]
@@ -92,7 +90,7 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "info" => cmd_info(mgr, cmd).await,
         "resize" => cmd_resize(mgr, cmd).await,
         "shutdown" => cmd_shutdown(mgr, cmd).await,
-        "kill" => cmd_kill(mgr, cmd),
+        "kill" => cmd_kill(mgr, cmd).await,
         "destroy" => cmd_destroy(mgr, cmd).await,
         "snapshot" => cmd_snapshot(mgr, cmd).await,
         "restore" => cmd_restore(mgr, cmd),
@@ -100,62 +98,43 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
     }
 }
 
+fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
+    let name = cmd.name.as_ref().ok_or("Missing 'name' field")?;
+    let kernel = cmd.kernel.as_ref().ok_or("Missing 'kernel' field")?;
+
+    let vm_name = VmName::new(name.clone())?;
+    let boot_vcpus = cmd.cpus.unwrap_or(2);
+    let max_vcpus = cmd.max_cpus;
+    let memory_mb = cmd.memory_mb.unwrap_or(512);
+    let max_memory_mb = cmd
+        .max_memory_mb
+        .or_else(|| cmd.hotplug_memory_gb.map(|gb| gb * 1024));
+
+    Ok(VmSpec {
+        name: vm_name,
+        kernel: kernel.clone(),
+        cmdline: cmd.cmdline.clone(),
+        boot_vcpus,
+        max_vcpus,
+        memory_mb,
+        max_memory_mb,
+        initramfs: cmd.initramfs.clone(),
+        disks: cmd.disks.clone(),
+        base_disk: cmd.base_disk.clone(),
+        disk_size_gb: cmd.disk_size_gb.unwrap_or(20),
+        backend_config: None,
+    })
+}
+
 async fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing 'name' field"),
+    let spec = match build_spec(&cmd) {
+        Ok(s) => s,
+        Err(e) => return Response::err(e),
     };
-    let kernel = match cmd.kernel {
-        Some(k) => k,
-        None => return Response::err("Missing 'kernel' field"),
-    };
-
-    let mut spec = VmSpec::new(&name, kernel);
-    if let Some(c) = cmd.cmdline {
-        spec = spec.cmdline(c);
-    }
-    if let Some(c) = cmd.cpus {
-        let max = cmd.max_cpus;
-        spec = spec.cpus(c, max);
-    }
-    if let Some(m) = cmd.memory_mb {
-        spec = spec.memory_mb(m);
-    }
-    if let Some(h) = cmd.hotplug_memory_gb {
-        spec = spec.hotplug_memory_gb(h);
-    }
-    if let Some(m) = cmd.max_memory_mb {
-        let boot_mb = spec.memory_mb;
-        spec = spec.memory_range(boot_mb, Some(m));
-    }
-    if let Some(b) = cmd.ch_binary {
-        spec = spec.ch_binary(b);
-    } else if std::path::Path::new("/tmp/cloud-hypervisor-static").exists() {
-        spec = spec.ch_binary("/tmp/cloud-hypervisor-static");
-    }
-    if let Some(i) = cmd.initramfs {
-        spec = spec.initramfs(i);
-    }
-    for disk in &cmd.disks {
-        spec = spec.disk(disk);
-    }
-    if let Some(ref b) = cmd.base_disk {
-        spec = spec.base_disk(b.clone());
-    }
-    if let Some(gb) = cmd.disk_size_gb {
-        spec = spec.disk_size_gb(gb);
-    }
-
+    let name = spec.name.to_string();
     match mgr.spawn(spec).await {
-        Ok(handle) => {
-            let info = handle.info().await.ok();
-            Response::ok(serde_json::json!({
-                "name": handle.name(),
-                "pid": handle.pid(),
-                "state": info.as_ref().map_or("unknown", |i| i.state.as_str()),
-            }))
-        }
-        Err(e) => Response::err(e.to_string()),
+        Ok(()) => Response::ok(serde_json::json!({"name": name, "status": "created"})),
+        Err(e) => Response::err(e),
     }
 }
 
@@ -163,13 +142,14 @@ async fn cmd_list(mgr: &VmManager) -> Response {
     let names = mgr.list_names();
     let mut vms = Vec::new();
     for name in &names {
-        let vm = mgr.get(name).unwrap();
-        let info = vm.info().await.ok();
-        vms.push(serde_json::json!({
-            "name": name,
-            "pid": vm.pid(),
-            "state": info.as_ref().map_or("unknown", |i| i.state.as_str()),
-        }));
+        if let Some(vm) = mgr.get(name) {
+            let info = vm.info().await.ok();
+            vms.push(serde_json::json!({
+                "name": name,
+                "pid": vm.pid(),
+                "state": info.as_ref().map_or("unknown", |i| i.state.as_str()),
+            }));
+        }
     }
     Response::ok(serde_json::json!({"vms": vms, "count": vms.len()}))
 }
@@ -180,41 +160,35 @@ async fn cmd_info(mgr: &VmManager, cmd: Command) -> Response {
         None => return Response::err("Missing 'name' field"),
     };
     let vm = match mgr.get(&name) {
-        Ok(v) => v,
-        Err(e) => return Response::err(e.to_string()),
+        Some(v) => v,
+        None => return Response::err(format!("VM '{}' not found", name)),
     };
     let details = match vm.info().await {
         Ok(d) => d,
-        Err(e) => return Response::err(e.to_string()),
+        Err(e) => return Response::err(e),
     };
     Response::ok(serde_json::json!({
         "name": name,
         "pid": vm.pid(),
         "state": details.state,
-        "cpus": details.config.as_ref().and_then(|c| c.cpus.as_ref()).map(|c| serde_json::json!({"boot": c.boot, "max": c.max})),
-        "memory": details.memory_actual_size.or_else(|| details.config.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.size)),
+        "cpus": details.cpus,
+        "memory_mb": details.memory_mb,
     }))
 }
 
-async fn cmd_resize(mgr: &mut VmManager, cmd: Command) -> Response {
+async fn cmd_resize(mgr: &VmManager, cmd: Command) -> Response {
     let name = match cmd.name {
         Some(n) => n,
         None => return Response::err("Missing 'name' field"),
     };
     let vm = match mgr.get(&name) {
-        Ok(v) => v,
-        Err(e) => return Response::err(e.to_string()),
+        Some(v) => v,
+        None => return Response::err(format!("VM '{}' not found", name)),
     };
 
-    if let Some(c) = cmd.cpus {
-        if let Err(e) = vm.resize_vcpus(Some(c)).await {
-            return Response::err(e.to_string());
-        }
-    }
-    if let Some(m) = cmd.memory_bytes {
-        if let Err(e) = vm.resize_memory(Some(m)).await {
-            return Response::err(e.to_string());
-        }
+    let cpus: Option<u32> = cmd.cpus.map(|c| c as u32);
+    if let Err(e) = vm.resize(cpus, cmd.memory_bytes).await {
+        return Response::err(e);
     }
     Response::ok_msg("resize completed")
 }
@@ -226,18 +200,18 @@ async fn cmd_shutdown(mgr: &mut VmManager, cmd: Command) -> Response {
     };
     match mgr.shutdown(&name).await {
         Ok(()) => Response::ok_msg(&format!("VM '{}' shut down", name)),
-        Err(e) => Response::err(e.to_string()),
+        Err(e) => Response::err(e),
     }
 }
 
-fn cmd_kill(mgr: &mut VmManager, cmd: Command) -> Response {
+async fn cmd_kill(mgr: &mut VmManager, cmd: Command) -> Response {
     let name = match cmd.name {
         Some(n) => n,
         None => return Response::err("Missing 'name' field"),
     };
-    match mgr.kill(&name) {
+    match mgr.kill(&name).await {
         Ok(()) => Response::ok_msg(&format!("VM '{}' killed", name)),
-        Err(e) => Response::err(e.to_string()),
+        Err(e) => Response::err(e),
     }
 }
 
@@ -248,7 +222,7 @@ async fn cmd_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
     };
     match mgr.destroy(&name).await {
         Ok(()) => Response::ok_msg(&format!("VM '{}' destroyed (disk removed)", name)),
-        Err(e) => Response::err(e.to_string()),
+        Err(e) => Response::err(e),
     }
 }
 
@@ -258,20 +232,19 @@ async fn cmd_snapshot(mgr: &VmManager, cmd: Command) -> Response {
         None => return Response::err("Missing 'name' field"),
     };
     let vm = match mgr.get(&name) {
-        Ok(v) => v,
-        Err(e) => return Response::err(e.to_string()),
+        Some(v) => v,
+        None => return Response::err(format!("VM '{}' not found", name)),
     };
-    let path = cmd
+    let _path = cmd
         .snapshot_path
         .unwrap_or_else(|| format!("/tmp/terra-snap-{}.bin", name));
 
-    match crate::vm::snapshot_vm(vm.client(), &path).await {
-        Ok(()) => Response::ok(serde_json::json!({"snapshot_path": path})),
-        Err(e) => Response::err(e.to_string()),
+    match vm.snapshot().await {
+        Ok(snap) => Response::ok(serde_json::json!({"snapshot_path": snap.path})),
+        Err(e) => Response::err(e),
     }
 }
 
-fn cmd_restore(_mgr: &mut VmManager, cmd: Command) -> Response {
-    let _path = cmd.snapshot_path;
+fn cmd_restore(_mgr: &mut VmManager, _cmd: Command) -> Response {
     Response::err("restore not implemented")
 }

@@ -8,7 +8,6 @@ license.workspace = true
 adapter-cloud-hypervisor = { path = "../adapter/cloud-hypervisor" }
 adapter-traits = { path = "../adapter/traits" }
 overlay = { path = "../overlay" }
-num_cpus = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
