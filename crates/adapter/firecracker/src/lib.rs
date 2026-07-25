@@ -79,6 +79,7 @@ impl FcVmHandle {
             }
             if Instant::now() > deadline {
                 let _ = child.kill();
+                let _ = child.wait();
                 return Err("socket timeout".into());
             }
             thread::sleep(Duration::from_millis(100));

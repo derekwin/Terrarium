@@ -11,14 +11,24 @@ const SERVER_NAME: &str = "terrarium-mcp";
 const SERVER_VERSION: &str = "0.1.0";
 
 fn main() {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
     let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let mut line = String::new();
 
-    while reader.read_line(&mut line).is_ok() {
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("read error: {}", e);
+                break;
+            }
+        }
         if line.trim().is_empty() {
-            line.clear();
             continue;
         }
         let request: serde_json::Value = match serde_json::from_str(&line) {
@@ -31,7 +41,6 @@ fn main() {
         let response = handle_request(&request);
         println!("{}", serde_json::to_string(&response).unwrap_or_default());
         std::io::stdout().flush().ok();
-        line.clear();
     }
 }
 

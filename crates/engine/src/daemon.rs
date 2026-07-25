@@ -3,6 +3,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use adapter_cloud_hypervisor::ChAdapter;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -11,6 +12,9 @@ use tokio::sync::Mutex;
 
 use crate::commands::{execute, Command};
 use crate::manager::VmManager;
+
+/// Maximum size of a single JSON command line (64 KB).
+const MAX_COMMAND_LINE: usize = 64 * 1024;
 
 /// Default CH binary path. Can be overridden via TERRA_CH_BINARY env var.
 const DEFAULT_CH_BINARY: &str = "cloud-hypervisor";
@@ -40,6 +44,7 @@ pub async fn run(socket_path: &str) -> std::io::Result<()> {
             }
             Err(e) => {
                 tracing::error!(error = %e, "Accept error");
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -52,7 +57,14 @@ async fn handle_client(stream: UnixStream, manager: &Arc<Mutex<VmManager>>) {
 
     match reader.read_line(&mut line).await {
         Ok(0) => return,
-        Ok(_) => {}
+        Ok(_) => {
+            if line.len() > MAX_COMMAND_LINE {
+                let _ = writer_half
+                    .write_all(b"{\"status\":\"error\",\"error\":\"request too large\"}\n")
+                    .await;
+                return;
+            }
+        }
         Err(e) => {
             tracing::error!(error = %e, "Read error");
             return;

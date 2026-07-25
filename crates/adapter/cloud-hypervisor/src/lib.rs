@@ -108,6 +108,7 @@ impl ChVmHandle {
             }
             if Instant::now() > deadline {
                 let _ = child.kill();
+                let _ = child.wait();
                 return Err(format!("socket timeout for {}", name));
             }
             sleep(Duration::from_millis(100)).await;
