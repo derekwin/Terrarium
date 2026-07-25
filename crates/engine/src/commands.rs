@@ -47,16 +47,6 @@ pub struct Command {
     #[serde(default)]
     pub disk_size_gb: Option<u64>,
 
-    // pool
-    #[serde(default)]
-    pub pool_size: Option<u64>,
-
-    // file operations
-    #[serde(default)]
-    pub file_path: Option<String>,
-    #[serde(default)]
-    pub file_content: Option<String>,
-
     // resize
     #[serde(default)]
     pub memory_bytes: Option<u64>,
@@ -104,9 +94,6 @@ pub fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "shutdown" => cmd_shutdown(mgr, cmd),
         "kill" => cmd_kill(mgr, cmd),
         "destroy" => cmd_destroy(mgr, cmd),
-        "file_read" => cmd_file_read(cmd),
-        "file_write" => cmd_file_write(cmd),
-        "file_list" => cmd_file_list(cmd),
         "snapshot" => cmd_snapshot(mgr, cmd),
         "restore" => cmd_restore(mgr, cmd),
         _ => Response::err(format!("Unknown command: {}", cmd.command)),
@@ -286,128 +273,7 @@ fn cmd_snapshot(mgr: &VmManager, cmd: Command) -> Response {
     }
 }
 
-fn cmd_restore(mgr: &mut VmManager, cmd: Command) -> Response {
-    let path = match cmd.snapshot_path {
-        Some(p) => p,
-        None => return Response::err("Missing 'snapshot_path' field"),
-    };
-    let name = cmd.name.unwrap_or_else(|| "restored".to_string());
-    let kernel = cmd
-        .kernel
-        .unwrap_or_else(|| "target/guest/vmlinux.bin".to_string());
-
-    let mut spec = VmSpec::new(&name, kernel);
-    eprintln!("DEBUG: base_disk in cmd = {:?}", cmd.base_disk);
-    if let Some(ref b) = cmd.base_disk {
-        spec = spec.base_disk(b.clone());
-    }
-    eprintln!("DEBUG: spec.base_disk = {:?}", spec.base_disk);
-    if let Some(gb) = cmd.disk_size_gb {
-        spec = spec.disk_size_gb(gb);
-    }
-
-    match mgr.spawn(spec) {
-        Ok(_handle) => Response::ok_msg(&format!(
-            "VM '{}' spawned (restore from {} requires warm-pool manager)",
-            name, path
-        )),
-        Err(e) => Response::err(e.to_string()),
-    }
-}
-// Pool commands
-
-pub fn pool_execute(pools: &mut crate::pool::WarmPool, cmd: Command) -> Response {
-    match cmd.command.as_str() {
-        "pool_create" => cmd_pool_create(pools, cmd),
-        "pool_claim" => cmd_pool_claim(pools, cmd),
-        "pool_list" => cmd_pool_list(pools),
-        _ => Response::err(format!("Unknown pool command: {}", cmd.command)),
-    }
-}
-
-fn cmd_pool_create(pools: &mut crate::pool::WarmPool, cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing pool name"),
-    };
-    let size = cmd.pool_size.unwrap_or(5) as usize;
-    // Build a minimal VmSpec from command
-    let kernel = match cmd.kernel {
-        Some(k) => k,
-        None => return Response::err("Missing kernel for pool template"),
-    };
-    let mut spec = crate::spec::VmSpec::new(&name, kernel);
-    if let Some(b) = cmd.base_disk {
-        spec = spec.base_disk(b);
-    }
-    let snapshot_path = cmd
-        .snapshot_path
-        .unwrap_or_else(|| format!("/tmp/terra-pool-{}.snap", name));
-    match pools.create_pool(&name, &spec, size, &snapshot_path) {
-        Ok(()) => Response::ok_msg(&format!("Pool {} created with {} overlays", name, size)),
-        Err(e) => Response::err(e),
-    }
-}
-
-fn cmd_pool_claim(pools: &mut crate::pool::WarmPool, cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing pool name"),
-    };
-    match pools.claim(&name) {
-        Ok(path) => Response::ok(serde_json::json!({"overlay": path})),
-        Err(e) => Response::err(e),
-    }
-}
-
-fn cmd_pool_list(pools: &crate::pool::WarmPool) -> Response {
-    let list: Vec<serde_json::Value> = pools
-        .list()
-        .iter()
-        .map(|(name, available, total)| {
-            serde_json::json!({"name": name, "available": available, "total": total})
-        })
-        .collect();
-    Response::ok(serde_json::json!({"pools": list}))
-}
-
-fn cmd_file_read(cmd: Command) -> Response {
-    let path = match cmd.file_path {
-        Some(p) => p,
-        None => return Response::err("Missing file_path"),
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(content) => Response::ok(serde_json::json!({"path": path, "content": content})),
-        Err(e) => Response::err(format!("read: {}", e)),
-    }
-}
-
-fn cmd_file_write(cmd: Command) -> Response {
-    let path = match cmd.file_path {
-        Some(p) => p,
-        None => return Response::err("Missing file_path"),
-    };
-    let content = match cmd.file_content {
-        Some(c) => c,
-        None => return Response::err("Missing file_content"),
-    };
-    match std::fs::write(&path, content) {
-        Ok(()) => Response::ok_msg("written"),
-        Err(e) => Response::err(format!("write: {}", e)),
-    }
-}
-
-fn cmd_file_list(cmd: Command) -> Response {
-    let path = cmd.file_path.unwrap_or_else(|| ".".to_string());
-    let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&path) {
-        for entry in entries.flatten() {
-            files.push(serde_json::json!({
-                "name": entry.file_name().to_string_lossy(),
-                "is_dir": entry.file_type().ok().map(|t| t.is_dir()).unwrap_or(false),
-                "size": entry.metadata().ok().map(|m| m.len()).unwrap_or(0),
-            }));
-        }
-    }
-    Response::ok(serde_json::json!({"path": path, "entries": files}))
+fn cmd_restore(_mgr: &mut VmManager, cmd: Command) -> Response {
+    let _path = cmd.snapshot_path;
+    Response::err("restore not implemented")
 }

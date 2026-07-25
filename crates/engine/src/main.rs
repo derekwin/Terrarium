@@ -3,19 +3,11 @@
 //! Manages VM lifecycle, sandbox placement, resource scheduling,
 //! warm pool management, and billing metering.
 
-mod cgroup;
 mod cli;
 mod commands;
 mod daemon;
-mod files;
 mod manager;
-mod metering;
-mod placement;
-mod pool;
-mod registry;
-mod scheduler;
 mod spec;
-mod tools;
 mod vm;
 
 use std::env;
