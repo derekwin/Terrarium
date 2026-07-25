@@ -129,11 +129,7 @@ impl ChVmHandle {
 #[async_trait]
 impl VmHandle for ChVmHandle {
     async fn info(&self) -> Result<VmInfo, String> {
-        let details = self
-            .client
-            .vm_info()
-            .await
-            .map_err(|e| format!("vm.info: {}", e))?;
+        let details = retry_get_info(&self.client).await?;
         Ok(VmInfo {
             state: details.state,
             cpus: details
@@ -265,4 +261,21 @@ fn ch_args(spec: &VmSpec, socket: &str) -> Vec<String> {
     args.push("--console".into());
     args.push("off".into());
     args
+}
+
+/// Retry vm_info() up to 10 times with 500ms back-off.
+/// CH API may return transient errors during startup.
+async fn retry_get_info(client: &ChClient) -> Result<api::VmDetails, String> {
+    for attempt in 0..10 {
+        match client.vm_info().await {
+            Ok(details) => return Ok(details),
+            Err(e) => {
+                if attempt == 9 {
+                    return Err(format!("vm.info failed after 10 attempts: {}", e));
+                }
+                sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+    unreachable!()
 }

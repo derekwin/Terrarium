@@ -48,7 +48,22 @@ impl VmManager {
             self.overlays.insert(name.clone(), overlay_path);
         }
 
-        let handle = self.adapter.create(&spec).await?;
+        let handle = match self.adapter.create(&spec).await {
+            Ok(h) => h,
+            Err(e) => {
+                // Clean up overlay if adapter creation failed
+                if let Some(disk) = self.overlays.remove(&name) {
+                    let _ = std::fs::remove_file(&disk);
+                    let state_dir = std::env::var("TERRA_STATE_DIR")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "/tmp/terra-disks/vms".to_string());
+                    let vm_dir = format!("{}/{}", state_dir, name);
+                    let _ = std::fs::remove_dir_all(&vm_dir);
+                }
+                return Err(e);
+            }
+        };
         self.vms.insert(name, handle);
         Ok(())
     }

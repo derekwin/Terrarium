@@ -152,12 +152,25 @@ impl FcVmHandle {
 impl VmHandle for FcVmHandle {
     async fn info(&self) -> Result<VmInfo, String> {
         let client = FcClient::new(self.fc_socket());
-        let resp = client.get("/")?;
-        Ok(VmInfo {
-            state: resp["state"].as_str().unwrap_or("Running").into(),
-            cpus: resp["vcpu_count"].as_u64().map(|c| c as u8),
-            memory_mb: resp["mem_size_mib"].as_u64(),
-        })
+        // Retry on transient errors during startup
+        for attempt in 0..10 {
+            match client.get("/") {
+                Ok(resp) => {
+                    return Ok(VmInfo {
+                        state: resp["state"].as_str().unwrap_or("Running").into(),
+                        cpus: resp["vcpu_count"].as_u64().map(|c| c as u8),
+                        memory_mb: resp["mem_size_mib"].as_u64(),
+                    });
+                }
+                Err(e) => {
+                    if attempt == 9 {
+                        return Err(format!("vm.info failed after 10 attempts: {}", e));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        }
+        unreachable!()
     }
 
     async fn resize(&self, _cpu: Option<u32>, _mem: Option<u64>) -> Result<(), String> {

@@ -13,7 +13,7 @@ pub fn apply_tc_qos(iface: &str, qos: &NetworkQos) -> Result<(), String> {
         return Ok(());
     }
 
-    // Clear existing rules
+    // Clear existing rules (best-effort: may fail if no rules exist)
     let _ = Command::new("tc")
         .args(["qdisc", "del", "dev", iface, "root"])
         .output();
@@ -21,62 +21,54 @@ pub fn apply_tc_qos(iface: &str, qos: &NetworkQos) -> Result<(), String> {
         .args(["qdisc", "del", "dev", iface, "ingress"])
         .output();
 
-    // Egress shaping
+    // Egress shaping (HTB)
     if qos.egress_kbps > 0 {
-        let _ = Command::new("tc")
-            .args([
-                "qdisc", "add", "dev", iface, "root", "handle", "1:", "htb", "default", "1",
-            ])
-            .output();
-        let _ = Command::new("tc")
-            .args([
-                "class",
-                "add",
-                "dev",
-                iface,
-                "parent",
-                "1:",
-                "classid",
-                "1:1",
-                "htb",
-                "rate",
-                &format!("{}kbit", qos.egress_kbps),
-                "prio",
-                &qos.priority.to_string(),
-            ])
-            .output();
+        run_tc(&[
+            "qdisc", "add", "dev", iface, "root", "handle", "1:", "htb", "default", "1",
+        ])?;
+        run_tc(&[
+            "class",
+            "add",
+            "dev",
+            iface,
+            "parent",
+            "1:",
+            "classid",
+            "1:1",
+            "htb",
+            "rate",
+            &format!("{}kbit", qos.egress_kbps),
+            "prio",
+            &qos.priority.to_string(),
+        ])?;
     }
 
     // Ingress policing
     if qos.ingress_kbps > 0 {
-        let _ = Command::new("tc")
-            .args(["qdisc", "add", "dev", iface, "handle", "ffff:", "ingress"])
-            .output();
-        let _ = Command::new("tc")
-            .args([
-                "filter",
-                "add",
-                "dev",
-                iface,
-                "parent",
-                "ffff:",
-                "protocol",
-                "ip",
-                "u32",
-                "match",
-                "u32",
-                "0",
-                "0",
-                "police",
-                "rate",
-                &format!("{}kbit", qos.ingress_kbps),
-                "burst",
-                "10k",
-                "drop",
-                "flowid",
-                ":1",
-            ])
-            .output();
+        run_tc(&["qdisc", "add", "dev", iface, "handle", "ffff:", "ingress"])?;
+        run_tc(&[
+            "filter",
+            "add",
+            "dev",
+            iface,
+            "parent",
+            "ffff:",
+            "protocol",
+            "ip",
+            "u32",
+            "match",
+            "u32",
+            "0",
+            "0",
+            "police",
+            "rate",
+            &format!("{}kbit", qos.ingress_kbps),
+            "burst",
+            "10k",
+            "drop",
+            "flowid",
+            ":1",
+        ])?;
     }
 
     tracing::info!(
@@ -86,5 +78,20 @@ pub fn apply_tc_qos(iface: &str, qos: &NetworkQos) -> Result<(), String> {
         priority = qos.priority,
         "Applied network QoS"
     );
+    Ok(())
+}
+
+fn run_tc(args: &[&str]) -> Result<(), String> {
+    let output = Command::new("tc")
+        .args(args)
+        .output()
+        .map_err(|e| format!("tc command failed: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "tc {}: {}",
+            args.first().unwrap_or(&"?"),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
     Ok(())
 }

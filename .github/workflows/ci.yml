@@ -13,6 +13,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      # Verify Cargo.lock is up-to-date and respected
+      - run: cargo build --all --locked
+
+      # Formatting
       - run: cargo fmt --all -- --check
+
+      # Linting (warnings as errors)
       - run: cargo clippy --all-targets -- -D warnings
+
+      # Tests
       - run: cargo test --all
+
+      # Security audit (advisory DB)
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
