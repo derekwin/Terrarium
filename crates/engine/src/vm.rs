@@ -1,8 +1,7 @@
 //! VmHandle — manages a single Cloud Hypervisor VM process and its API client.
 
 use std::process::{Child, Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use tokio::time::{sleep, Duration, Instant};
 
 use adapter_cloud_hypervisor::api::VmDetails;
 use adapter_cloud_hypervisor::ChClient;
@@ -64,8 +63,6 @@ impl std::fmt::Debug for VmHandle {
     }
 }
 
-
-
 /// Create a qcow2 overlay disk via the overlay crate.
 fn create_qcow2_overlay(spec: &VmSpec) -> std::result::Result<(String, bool), VmError> {
     let base = spec.base_disk.as_ref().unwrap();
@@ -76,9 +73,13 @@ fn create_qcow2_overlay(spec: &VmSpec) -> std::result::Result<(String, bool), Vm
 }
 
 /// Take a CH VM snapshot.
-pub fn snapshot_vm(client: &ChClient, snapshot_path: &str) -> std::result::Result<(), VmError> {
+pub async fn snapshot_vm(
+    client: &ChClient,
+    snapshot_path: &str,
+) -> std::result::Result<(), VmError> {
     client
         .vm_snapshot(snapshot_path)
+        .await
         .map_err(|source| VmError::ClientError {
             name: "snapshot".into(),
             source,
@@ -90,7 +91,7 @@ impl VmHandle {
     ///
     /// The socket path is cleaned up before spawning to avoid stale-socket
     /// collisions from a previous run.
-    pub fn spawn(spec: VmSpec) -> Result<Self> {
+    pub async fn spawn(spec: VmSpec) -> Result<Self> {
         let name = spec.name.clone();
         let socket = spec.api_socket_path();
         let mut args = spec.to_ch_args();
@@ -151,7 +152,7 @@ impl VmHandle {
                     timeout_ms: socket_timeout.as_millis() as u64,
                 });
             }
-            thread::sleep(Duration::from_millis(100));
+            sleep(Duration::from_millis(100)).await;
         }
 
         // Socket file appeared, but CH's HTTP server may not be ready yet.
@@ -162,7 +163,7 @@ impl VmHandle {
         let poll_timeout = Duration::from_secs(15);
         let poll_start = Instant::now();
         loop {
-            match client.vm_info() {
+            match client.vm_info().await {
                 Ok(_) => {
                     tracing::info!(name = %name, "VM spawned and API ready");
                     break;
@@ -191,7 +192,7 @@ impl VmHandle {
                             timeout_ms: poll_timeout.as_millis() as u64,
                         });
                     }
-                    thread::sleep(Duration::from_millis(250));
+                    sleep(Duration::from_millis(250)).await;
                 }
             }
         }
@@ -211,12 +212,6 @@ impl VmHandle {
         &self.name
     }
 
-    /// Return a reference to the VM spec.
-    #[allow(dead_code)]
-    pub fn spec(&self) -> &VmSpec {
-        &self.spec
-    }
-
     /// Return the CH child process ID.
     pub fn pid(&self) -> u32 {
         self.child.id()
@@ -228,9 +223,9 @@ impl VmHandle {
     }
 
     /// Query VM info from the CH API. Retries on transient errors.
-    pub fn info(&self) -> std::result::Result<VmDetails, VmError> {
+    pub async fn info(&self) -> std::result::Result<VmDetails, VmError> {
         for attempt in 0..10 {
-            match self.client.vm_info() {
+            match self.client.vm_info().await {
                 Ok(details) => return Ok(details),
                 Err(e) => {
                     if attempt == 9 {
@@ -239,7 +234,7 @@ impl VmHandle {
                             source: e,
                         });
                     }
-                    thread::sleep(Duration::from_millis(500));
+                    sleep(Duration::from_millis(500)).await;
                 }
             }
         }
@@ -247,10 +242,11 @@ impl VmHandle {
     }
 
     /// Resize vCPUs. Pass None to leave unchanged.
-    pub fn resize_vcpus(&self, vcpus: Option<u8>) -> std::result::Result<(), VmError> {
+    pub async fn resize_vcpus(&self, vcpus: Option<u8>) -> std::result::Result<(), VmError> {
         tracing::info!(name = %self.name, ?vcpus, "Resizing vCPUs");
         self.client
             .vm_resize(vcpus, None)
+            .await
             .map_err(|source| VmError::ClientError {
                 name: self.name.clone(),
                 source,
@@ -258,10 +254,11 @@ impl VmHandle {
     }
 
     /// Resize memory (in bytes). Pass None to leave unchanged.
-    pub fn resize_memory(&self, ram_bytes: Option<u64>) -> std::result::Result<(), VmError> {
+    pub async fn resize_memory(&self, ram_bytes: Option<u64>) -> std::result::Result<(), VmError> {
         tracing::info!(name = %self.name, ram_mb = ram_bytes.map(|b| b / 1024 / 1024), "Resizing memory");
         self.client
             .vm_resize(None, ram_bytes)
+            .await
             .map_err(|source| VmError::ClientError {
                 name: self.name.clone(),
                 source,
@@ -269,11 +266,12 @@ impl VmHandle {
     }
 
     /// Gracefully shut down the VM via the CH API, then wait for the process.
-    pub fn shutdown(mut self) -> std::result::Result<(), VmError> {
+    pub async fn shutdown(mut self) -> std::result::Result<(), VmError> {
         tracing::info!(name = %self.name, "Shutting down VM");
         let result = self
             .client
             .vm_shutdown()
+            .await
             .map_err(|source| VmError::ClientError {
                 name: self.name.clone(),
                 source,
@@ -291,7 +289,7 @@ impl VmHandle {
                 let _ = self.child.wait();
                 break;
             }
-            thread::sleep(Duration::from_millis(100));
+            sleep(Duration::from_millis(100)).await;
         }
 
         let socket = self.spec.api_socket_path();
@@ -330,7 +328,8 @@ impl Drop for VmHandle {
             name = %self.name,
             "VmHandle dropped while VM still running — attempting shutdown"
         );
-        let _ = self.client.vm_shutdown();
+        // Can't call async vm_shutdown in Drop. Best-effort kill.
+        let _ = self.child.kill();
         // Wait up to 5 seconds for graceful shutdown, then force-kill.
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(5) {
@@ -338,7 +337,7 @@ impl Drop for VmHandle {
                 Ok(None) => {}
                 _ => return,
             }
-            thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(100));
         }
         tracing::warn!(name = %self.name, "Graceful shutdown timed out, force-killing");
         let _ = self.child.kill();
@@ -351,11 +350,11 @@ impl Drop for VmHandle {
 
 impl VmHandle {
     /// Destroy the VM and delete its persistent overlay disk.
-    pub fn destroy(self) -> std::result::Result<(), VmError> {
+    pub async fn destroy(self) -> std::result::Result<(), VmError> {
         let name = self.name.clone();
         let overlay = self.overlay_disk.clone();
-        let result = self.shutdown(); // shutdown consumes self
-                                      // Clean up after shutdown
+        let result = self.shutdown().await; // shutdown consumes self
+                                            // Clean up after shutdown
         if let Some(disk) = overlay {
             let _ = std::fs::remove_file(&disk);
             let state_dir = std::env::var("TERRA_STATE_DIR")

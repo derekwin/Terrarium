@@ -57,7 +57,8 @@ EXAMPLES:
     std::process::exit(1);
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt::init();
 
     let args: Vec<String> = env::args().collect();
@@ -68,7 +69,7 @@ fn main() {
     // "daemon" subcommand starts the server
     if args[1] == "daemon" {
         let socket = parse_socket_flag(&args);
-        daemon::run(&socket).expect("Daemon failed");
+        daemon::run(&socket).await.expect("Daemon failed");
         return;
     }
 

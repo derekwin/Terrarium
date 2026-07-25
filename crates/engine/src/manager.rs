@@ -24,13 +24,13 @@ impl VmManager {
     /// Spawn a new VM from the given spec.
     ///
     /// Returns an error if a VM with the same name already exists.
-    pub fn spawn(&mut self, spec: VmSpec) -> std::result::Result<&VmHandle, VmError> {
+    pub async fn spawn(&mut self, spec: VmSpec) -> std::result::Result<&VmHandle, VmError> {
         let name = spec.name.clone();
         if self.vms.contains_key(&name) {
             return Err(VmError::AlreadyExists { name });
         }
 
-        let handle = VmHandle::spawn(spec)?;
+        let handle = VmHandle::spawn(spec).await?;
         self.vms.insert(name.clone(), handle);
         Ok(self.vms.get(&name).unwrap())
     }
@@ -42,37 +42,17 @@ impl VmManager {
         })
     }
 
-    /// Get a mutable reference to a running VM by name.
-    #[allow(dead_code)]
-    pub fn get_mut(&mut self, name: &str) -> std::result::Result<&mut VmHandle, VmError> {
-        self.vms.get_mut(name).ok_or_else(|| VmError::NotFound {
-            name: name.to_string(),
-        })
-    }
-
     /// List all VM names.
     pub fn list_names(&self) -> Vec<&str> {
         self.vms.keys().map(|s| s.as_str()).collect()
     }
 
-    /// List all VM handles.
-    #[allow(dead_code)]
-    pub fn list(&self) -> Vec<&VmHandle> {
-        self.vms.values().collect()
-    }
-
-    /// Number of running VMs.
-    #[allow(dead_code)]
-    pub fn count(&self) -> usize {
-        self.vms.len()
-    }
-
     /// Gracefully shut down a VM by name and remove it from the registry.
-    pub fn shutdown(&mut self, name: &str) -> std::result::Result<(), VmError> {
+    pub async fn shutdown(&mut self, name: &str) -> std::result::Result<(), VmError> {
         let handle = self.vms.remove(name).ok_or_else(|| VmError::NotFound {
             name: name.to_string(),
         })?;
-        handle.shutdown()
+        handle.shutdown().await
     }
 
     /// Force-kill a VM by name and remove it from the registry.
@@ -84,19 +64,20 @@ impl VmManager {
     }
 
     /// Destroy a VM: shut down and delete persistent files (overlay disk, etc).
-    pub fn destroy(&mut self, name: &str) -> std::result::Result<(), VmError> {
+    pub async fn destroy(&mut self, name: &str) -> std::result::Result<(), VmError> {
         let handle = self.vms.remove(name).ok_or_else(|| VmError::NotFound {
             name: name.to_string(),
         })?;
-        handle.destroy()
+        handle.destroy().await
     }
 
     /// Shut down all VMs and clear the registry.
+    /// Will be wired to signal handling (SIGTERM/SIGINT).
     #[allow(dead_code)]
-    pub fn shutdown_all(&mut self) {
+    pub async fn shutdown_all(&mut self) {
         let names: Vec<String> = self.vms.keys().cloned().collect();
         for name in names {
-            if let Err(e) = self.shutdown(&name) {
+            if let Err(e) = self.shutdown(&name).await {
                 tracing::warn!(%name, error = %e, "Error shutting down VM");
             }
         }
@@ -104,7 +85,6 @@ impl VmManager {
 
     /// Reap any VMs whose processes have exited unexpectedly.
     /// Returns the names of VMs that were removed.
-    #[allow(dead_code)]
     pub fn reap_dead(&mut self) -> Vec<String> {
         let mut dead = Vec::new();
         let names: Vec<String> = self.vms.keys().cloned().collect();
@@ -140,7 +120,7 @@ mod tests {
     #[test]
     fn test_manager_empty() {
         let mgr = VmManager::new();
-        assert_eq!(mgr.count(), 0);
+        assert_eq!(mgr.list_names().len(), 0);
         assert!(mgr.list_names().is_empty());
     }
 

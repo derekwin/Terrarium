@@ -1,17 +1,18 @@
 //! Daemon mode: listens on a Unix domain socket, accepts JSON commands,
 //! dispatches them to the VmManager, and returns JSON responses.
 
-use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Mutex;
 
 use crate::commands::{execute, Command};
 use crate::manager::VmManager;
 
 /// Run the controller in daemon mode, listening on the given socket path.
-/// Blocks until the socket file is created and listens for connections.
-pub fn run(socket_path: &str) -> std::io::Result<()> {
+pub async fn run(socket_path: &str) -> std::io::Result<()> {
     let _ = std::fs::remove_file(socket_path);
 
     let listener = UnixListener::bind(socket_path)?;
@@ -20,12 +21,12 @@ pub fn run(socket_path: &str) -> std::io::Result<()> {
 
     let manager = Arc::new(Mutex::new(VmManager::new()));
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _addr)) => {
                 let mgr = Arc::clone(&manager);
-                std::thread::spawn(move || {
-                    handle_client(stream, &mgr);
+                tokio::spawn(async move {
+                    handle_client(stream, &mgr).await;
                 });
             }
             Err(e) => {
@@ -33,18 +34,14 @@ pub fn run(socket_path: &str) -> std::io::Result<()> {
             }
         }
     }
-
-    Ok(())
 }
 
-fn handle_client(
-    stream: UnixStream,
-    manager: &Arc<Mutex<VmManager>>,
-) {
-    let mut reader = BufReader::new(&stream);
+async fn handle_client(stream: UnixStream, manager: &Arc<Mutex<VmManager>>) {
+    let (reader_half, mut writer_half) = stream.into_split();
+    let mut reader = BufReader::new(reader_half);
     let mut line = String::new();
 
-    match reader.read_line(&mut line) {
+    match reader.read_line(&mut line).await {
         Ok(0) => return,
         Ok(_) => {}
         Err(e) => {
@@ -57,22 +54,23 @@ fn handle_client(
         Ok(c) => c,
         Err(e) => {
             let resp = crate::commands::Response::err(format!("Invalid JSON: {}", e));
-            let _ = writeln!(
-                &stream,
-                "{}",
-                serde_json::to_string(&resp).unwrap_or_default()
-            );
+            let json = serde_json::to_string(&resp).unwrap_or_default();
+            let _ = writer_half
+                .write_all(format!("{}\n", json).as_bytes())
+                .await;
             return;
         }
     };
 
     tracing::info!(command = %cmd.command, name = ?cmd.name, "Executing command");
 
-    let mut mgr = manager.lock().unwrap();
+    let mut mgr = manager.lock().await;
     mgr.reap_dead();
-    let response = execute(&mut mgr, cmd);
+    let response = execute(&mut mgr, cmd).await;
 
     let json = serde_json::to_string(&response)
         .unwrap_or_else(|_| r#"{"status":"error","error":"serialization failed"}"#.to_string());
-    let _ = writeln!(&stream, "{}", json);
+    let _ = writer_half
+        .write_all(format!("{}\n", json).as_bytes())
+        .await;
 }

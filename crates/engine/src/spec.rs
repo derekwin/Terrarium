@@ -125,7 +125,6 @@ impl VmSpec {
     }
 
     /// Enable memory hotplug with a ceiling in GB (convenience wrapper).
-    #[allow(dead_code)]
     pub fn hotplug_memory_gb(mut self, gb: u64) -> Self {
         self.max_memory_mb = Some(gb * 1024);
         self
@@ -168,13 +167,6 @@ impl VmSpec {
     #[allow(dead_code)]
     pub fn disk_size_gb(mut self, gb: u64) -> Self {
         self.disk_size_gb = gb;
-        self
-    }
-
-    /// Add a label.
-    #[allow(dead_code)]
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.labels.push((key.into(), value.into()));
         self
     }
 

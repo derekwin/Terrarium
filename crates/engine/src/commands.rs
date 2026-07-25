@@ -85,22 +85,22 @@ impl Response {
 }
 
 /// Execute a command against the given VM manager.
-pub fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
+pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
     match cmd.command.as_str() {
-        "create" => cmd_create(mgr, cmd),
-        "list" => cmd_list(mgr),
-        "info" => cmd_info(mgr, cmd),
-        "resize" => cmd_resize(mgr, cmd),
-        "shutdown" => cmd_shutdown(mgr, cmd),
+        "create" => cmd_create(mgr, cmd).await,
+        "list" => cmd_list(mgr).await,
+        "info" => cmd_info(mgr, cmd).await,
+        "resize" => cmd_resize(mgr, cmd).await,
+        "shutdown" => cmd_shutdown(mgr, cmd).await,
         "kill" => cmd_kill(mgr, cmd),
-        "destroy" => cmd_destroy(mgr, cmd),
-        "snapshot" => cmd_snapshot(mgr, cmd),
+        "destroy" => cmd_destroy(mgr, cmd).await,
+        "snapshot" => cmd_snapshot(mgr, cmd).await,
         "restore" => cmd_restore(mgr, cmd),
         _ => Response::err(format!("Unknown command: {}", cmd.command)),
     }
 }
 
-fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
+async fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
     let name = match cmd.name {
         Some(n) => n,
         None => return Response::err("Missing 'name' field"),
@@ -146,9 +146,9 @@ fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
         spec = spec.disk_size_gb(gb);
     }
 
-    match mgr.spawn(spec) {
+    match mgr.spawn(spec).await {
         Ok(handle) => {
-            let info = handle.info().ok();
+            let info = handle.info().await.ok();
             Response::ok(serde_json::json!({
                 "name": handle.name(),
                 "pid": handle.pid(),
@@ -159,24 +159,22 @@ fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
     }
 }
 
-fn cmd_list(mgr: &VmManager) -> Response {
+async fn cmd_list(mgr: &VmManager) -> Response {
     let names = mgr.list_names();
-    let vms: Vec<serde_json::Value> = names
-        .iter()
-        .map(|name| {
-            let vm = mgr.get(name).unwrap();
-            let info = vm.info().ok();
-            serde_json::json!({
-                "name": name,
-                "pid": vm.pid(),
-                "state": info.as_ref().map_or("unknown", |i| i.state.as_str()),
-            })
-        })
-        .collect();
+    let mut vms = Vec::new();
+    for name in &names {
+        let vm = mgr.get(name).unwrap();
+        let info = vm.info().await.ok();
+        vms.push(serde_json::json!({
+            "name": name,
+            "pid": vm.pid(),
+            "state": info.as_ref().map_or("unknown", |i| i.state.as_str()),
+        }));
+    }
     Response::ok(serde_json::json!({"vms": vms, "count": vms.len()}))
 }
 
-fn cmd_info(mgr: &VmManager, cmd: Command) -> Response {
+async fn cmd_info(mgr: &VmManager, cmd: Command) -> Response {
     let name = match cmd.name {
         Some(n) => n,
         None => return Response::err("Missing 'name' field"),
@@ -185,7 +183,7 @@ fn cmd_info(mgr: &VmManager, cmd: Command) -> Response {
         Ok(v) => v,
         Err(e) => return Response::err(e.to_string()),
     };
-    let details = match vm.info() {
+    let details = match vm.info().await {
         Ok(d) => d,
         Err(e) => return Response::err(e.to_string()),
     };
@@ -198,7 +196,7 @@ fn cmd_info(mgr: &VmManager, cmd: Command) -> Response {
     }))
 }
 
-fn cmd_resize(mgr: &mut VmManager, cmd: Command) -> Response {
+async fn cmd_resize(mgr: &mut VmManager, cmd: Command) -> Response {
     let name = match cmd.name {
         Some(n) => n,
         None => return Response::err("Missing 'name' field"),
@@ -209,24 +207,24 @@ fn cmd_resize(mgr: &mut VmManager, cmd: Command) -> Response {
     };
 
     if let Some(c) = cmd.cpus {
-        if let Err(e) = vm.resize_vcpus(Some(c)) {
+        if let Err(e) = vm.resize_vcpus(Some(c)).await {
             return Response::err(e.to_string());
         }
     }
     if let Some(m) = cmd.memory_bytes {
-        if let Err(e) = vm.resize_memory(Some(m)) {
+        if let Err(e) = vm.resize_memory(Some(m)).await {
             return Response::err(e.to_string());
         }
     }
     Response::ok_msg("resize completed")
 }
 
-fn cmd_shutdown(mgr: &mut VmManager, cmd: Command) -> Response {
+async fn cmd_shutdown(mgr: &mut VmManager, cmd: Command) -> Response {
     let name = match cmd.name {
         Some(n) => n,
         None => return Response::err("Missing 'name' field"),
     };
-    match mgr.shutdown(&name) {
+    match mgr.shutdown(&name).await {
         Ok(()) => Response::ok_msg(&format!("VM '{}' shut down", name)),
         Err(e) => Response::err(e.to_string()),
     }
@@ -243,18 +241,18 @@ fn cmd_kill(mgr: &mut VmManager, cmd: Command) -> Response {
     }
 }
 
-fn cmd_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
+async fn cmd_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
     let name = match cmd.name {
         Some(n) => n,
         None => return Response::err("Missing 'name' field"),
     };
-    match mgr.destroy(&name) {
+    match mgr.destroy(&name).await {
         Ok(()) => Response::ok_msg(&format!("VM '{}' destroyed (disk removed)", name)),
         Err(e) => Response::err(e.to_string()),
     }
 }
 
-fn cmd_snapshot(mgr: &VmManager, cmd: Command) -> Response {
+async fn cmd_snapshot(mgr: &VmManager, cmd: Command) -> Response {
     let name = match cmd.name {
         Some(n) => n,
         None => return Response::err("Missing 'name' field"),
@@ -267,7 +265,7 @@ fn cmd_snapshot(mgr: &VmManager, cmd: Command) -> Response {
         .snapshot_path
         .unwrap_or_else(|| format!("/tmp/terra-snap-{}.bin", name));
 
-    match crate::vm::snapshot_vm(vm.client(), &path) {
+    match crate::vm::snapshot_vm(vm.client(), &path).await {
         Ok(()) => Response::ok(serde_json::json!({"snapshot_path": path})),
         Err(e) => Response::err(e.to_string()),
     }

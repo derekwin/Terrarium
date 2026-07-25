@@ -56,9 +56,9 @@ fn start_ch(cpus_boot: u8, cpus_max: u8, memory_mb: u64) -> Child {
     panic!("API socket did not appear within 5 seconds");
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires KVM and guest image"]
-fn test_create_and_boot_vm() {
+async fn test_create_and_boot_vm() {
     if !env_ready() {
         eprintln!("Skipping: KVM or guest image not available");
         return;
@@ -67,19 +67,16 @@ fn test_create_and_boot_vm() {
     let mut ch_process = start_ch(1, 4, 512);
     let client = ChClient::new(API_SOCKET);
 
-    // VM is already created and booted by CLI flags.
-    // Verify we can query info.
-    let info = client.vm_info().expect("vm_info");
+    let info = client.vm_info().await.expect("vm_info");
     assert_eq!(info.state, "Running");
 
-    // Clean shutdown
-    client.vm_shutdown().expect("vm_shutdown");
+    client.vm_shutdown().await.expect("vm_shutdown");
     let _ = ch_process.wait();
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires KVM, guest image, and virtio-mem capable kernel"]
-fn test_resize_cpus() {
+async fn test_resize_cpus() {
     if !env_ready() {
         eprintln!("Skipping: KVM or guest image not available");
         return;
@@ -88,19 +85,22 @@ fn test_resize_cpus() {
     let mut ch_process = start_ch(2, 16, 512);
     let client = ChClient::new(API_SOCKET);
 
-    // Scale up to 8 vCPUs
-    client.vm_resize(Some(8), None).expect("resize vcpus to 8");
+    client
+        .vm_resize(Some(8), None)
+        .await
+        .expect("resize vcpus to 8");
+    client
+        .vm_resize(Some(2), None)
+        .await
+        .expect("resize vcpus to 2");
 
-    // Scale back down to 2
-    client.vm_resize(Some(2), None).expect("resize vcpus to 2");
-
-    client.vm_shutdown().expect("vm_shutdown");
+    client.vm_shutdown().await.expect("vm_shutdown");
     let _ = ch_process.wait();
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires KVM, guest image, and virtio-mem capable kernel"]
-fn test_resize_memory() {
+async fn test_resize_memory() {
     if !env_ready() {
         eprintln!("Skipping: KVM or guest image not available");
         return;
@@ -137,13 +137,15 @@ fn test_resize_memory() {
     // Expand memory to 4G
     client
         .vm_resize(None, Some(4 * 1024 * 1024 * 1024))
+        .await
         .expect("expand memory to 4G");
 
     // Shrink memory to 1G
     client
         .vm_resize(None, Some(1024 * 1024 * 1024))
+        .await
         .expect("shrink memory to 1G");
 
-    client.vm_shutdown().expect("vm_shutdown");
+    client.vm_shutdown().await.expect("vm_shutdown");
     let _ = ch.wait();
 }

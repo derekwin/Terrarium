@@ -11,8 +11,8 @@ use adapter_traits::{NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, 
 use async_trait::async_trait;
 use overlay::{OverlayManager, OverlaySpec};
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::{sleep, Instant};
 
 pub use client::ChClient;
 pub use error::ClientError;
@@ -46,7 +46,9 @@ impl VmAdapter for ChAdapter {
     }
 
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, String> {
-        ChVmHandle::spawn(spec).map(|h| Box::new(h) as Box<dyn VmHandle>)
+        ChVmHandle::spawn(spec)
+            .await
+            .map(|h| Box::new(h) as Box<dyn VmHandle>)
     }
 
     async fn restore(
@@ -71,7 +73,7 @@ struct ChVmHandle {
 }
 
 impl ChVmHandle {
-    fn spawn(spec: &VmSpec) -> Result<Self, String> {
+    async fn spawn(spec: &VmSpec) -> Result<Self, String> {
         let name = spec.name.clone();
         let socket = format!("/tmp/terra-{}.sock", name);
         let _ = std::fs::remove_file(&socket);
@@ -104,7 +106,7 @@ impl ChVmHandle {
                 let _ = child.kill();
                 return Err(format!("socket timeout for {}", name));
             }
-            thread::sleep(Duration::from_millis(100));
+            sleep(Duration::from_millis(100)).await;
         }
 
         let client = ChClient::new(&socket).with_timeout(Duration::from_secs(5));
@@ -125,6 +127,7 @@ impl VmHandle for ChVmHandle {
         let details = self
             .client
             .vm_info()
+            .await
             .map_err(|e| format!("vm.info: {}", e))?;
         Ok(VmInfo {
             state: details.state,
@@ -140,18 +143,21 @@ impl VmHandle for ChVmHandle {
     async fn resize(&self, cpu: Option<u32>, memory: Option<u64>) -> Result<(), String> {
         self.client
             .vm_resize(cpu.map(|c| c as u8), memory)
+            .await
             .map_err(|e| format!("vm.resize: {}", e))
     }
 
     async fn resize_disk(&self, disk_id: &str, size: u64) -> Result<(), String> {
         self.client
             .vm_resize_disk(disk_id, size)
+            .await
             .map_err(|e| format!("vm.resize-disk: {}", e))
     }
 
     async fn add_disk(&self, path: &str, _disk_id: &str) -> Result<(), String> {
         self.client
             .vm_add_disk(path)
+            .await
             .map_err(|e| format!("vm.add-disk: {}", e))
     }
 
@@ -163,12 +169,14 @@ impl VmHandle for ChVmHandle {
     async fn pause(&self) -> Result<(), String> {
         self.client
             .vm_pause()
+            .await
             .map_err(|e| format!("vm.pause: {}", e))
     }
 
     async fn resume(&self) -> Result<(), String> {
         self.client
             .vm_resume()
+            .await
             .map_err(|e| format!("vm.resume: {}", e))
     }
 
@@ -176,6 +184,7 @@ impl VmHandle for ChVmHandle {
         let path = format!("/tmp/terra-snap-{}.bin", self.name);
         self.client
             .vm_snapshot(&path)
+            .await
             .map_err(|e| format!("vm.snapshot: {}", e))?;
         Ok(Snapshot { path })
     }
@@ -183,6 +192,7 @@ impl VmHandle for ChVmHandle {
     async fn shutdown(&self) -> Result<(), String> {
         self.client
             .vm_shutdown()
+            .await
             .map_err(|e| format!("vm.shutdown: {}", e))
     }
 
@@ -193,7 +203,8 @@ impl VmHandle for ChVmHandle {
 
 impl Drop for ChVmHandle {
     fn drop(&mut self) {
-        let _ = self.client.vm_shutdown();
+        // Can't call async methods in Drop. Best-effort kill.
+        let _ = self.child.kill();
         let _ = self.child.wait();
         let socket = format!("/tmp/terra-{}.sock", self.name);
         let _ = std::fs::remove_file(&socket);

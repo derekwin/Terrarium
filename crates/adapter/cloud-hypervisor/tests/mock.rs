@@ -93,10 +93,10 @@ fn parse_request_line(req: &str) -> (String, String) {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_vm_create() {
+#[tokio::test]
+async fn test_vm_create() {
     let server = start_mock_server();
-    thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     let client = ChClient::new(&server.socket_path);
     let config = VmConfig {
@@ -111,77 +111,83 @@ fn test_vm_create() {
         console: None,
     };
 
-    let info = client.vm_create(&config).expect("vm_create");
+    let info = client.vm_create(&config).await.expect("vm_create");
     assert_eq!(info.id, "test-vm-1");
     assert_eq!(info.state, "Created");
 }
 
-#[test]
-fn test_vm_boot_and_shutdown() {
+#[tokio::test]
+async fn test_vm_boot_and_shutdown() {
     let server = start_mock_server();
-    thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     let client = ChClient::new(&server.socket_path);
-    client.vm_boot().expect("vm_boot");
-    client.vm_shutdown().expect("vm_shutdown");
+    client.vm_boot().await.expect("vm_boot");
+    client.vm_shutdown().await.expect("vm_shutdown");
 }
 
-#[test]
-fn test_vm_delete() {
+#[tokio::test]
+async fn test_vm_delete() {
     let server = start_mock_server();
-    thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     let client = ChClient::new(&server.socket_path);
-    client.vm_delete().expect("vm_delete");
+    client.vm_delete().await.expect("vm_delete");
 }
 
-#[test]
-fn test_vm_info() {
+#[tokio::test]
+async fn test_vm_info() {
     let server = start_mock_server();
-    thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     let client = ChClient::new(&server.socket_path);
-    let info = client.vm_info().expect("vm_info");
+    let info = client.vm_info().await.expect("vm_info");
     assert_eq!(info.state, "Running");
 }
 
-#[test]
-fn test_vm_resize() {
+#[tokio::test]
+async fn test_vm_resize() {
     let server = start_mock_server();
-    thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     let client = ChClient::new(&server.socket_path);
-    client.vm_resize(Some(8), None).expect("resize vcpus");
+    client.vm_resize(Some(8), None).await.expect("resize vcpus");
     client
         .vm_resize(None, Some(8 * 1024 * 1024 * 1024))
+        .await
         .expect("resize memory");
     client
         .vm_resize(Some(4), Some(2 * 1024 * 1024 * 1024))
+        .await
         .expect("resize both");
 }
 
-#[test]
-fn test_vm_resize_disk() {
+#[tokio::test]
+async fn test_vm_resize_disk() {
     let server = start_mock_server();
-    thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     let client = ChClient::new(&server.socket_path);
     client
         .vm_resize_disk("root", 20 * 1024 * 1024 * 1024)
+        .await
         .expect("resize_disk");
 }
 
-#[test]
-fn test_vm_add_disk() {
+#[tokio::test]
+async fn test_vm_add_disk() {
     let server = start_mock_server();
-    thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     let client = ChClient::new(&server.socket_path);
-    client.vm_add_disk("/tmp/extra.raw").expect("add_disk");
+    client
+        .vm_add_disk("/tmp/extra.raw")
+        .await
+        .expect("add_disk");
 }
 
-#[test]
-fn test_connection_refused() {
+#[tokio::test]
+async fn test_connection_refused() {
     let client = ChClient::new("/tmp/nonexistent-ch-socket.sock");
     let config = VmConfig {
         kernel: "/path/to/vmlinux.bin".into(),
@@ -195,7 +201,7 @@ fn test_connection_refused() {
         console: None,
     };
 
-    let result = client.vm_create(&config);
+    let result = client.vm_create(&config).await;
     assert!(result.is_err());
 }
 
