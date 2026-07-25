@@ -1,8 +1,11 @@
 [package]
-name = "mcp"
+name = "terra-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = "0.3"
