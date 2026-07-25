@@ -339,7 +339,10 @@ fn cmd_pool_create(pools: &mut crate::pool::WarmPool, cmd: Command) -> Response 
     for tool in &cmd.tool_layers {
         spec = spec.tool_layer(tool);
     }
-    match pools.create_pool(&name, &spec, size) {
+    let snapshot_path = cmd
+        .snapshot_path
+        .unwrap_or_else(|| format!("/tmp/terra-pool-{}.snap", name));
+    match pools.create_pool(&name, &spec, size, &snapshot_path) {
         Ok(()) => Response::ok_msg(&format!("Pool {} created with {} overlays", name, size)),
         Err(e) => Response::err(e),
     }
@@ -360,7 +363,9 @@ fn cmd_pool_list(pools: &crate::pool::WarmPool) -> Response {
     let list: Vec<serde_json::Value> = pools
         .list()
         .iter()
-        .map(|(name, count)| serde_json::json!({"name": name, "available": count}))
+        .map(|(name, available, total)| {
+            serde_json::json!({"name": name, "available": available, "total": total})
+        })
         .collect();
     Response::ok(serde_json::json!({"pools": list}))
 }
