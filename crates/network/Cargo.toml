@@ -1,0 +1,9 @@
+[package]
+name = "terrarium-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+adapter-traits = { path = "../adapter/traits" }
+tracing = { workspace = true }

@@ -12,6 +12,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "terrarium-network",
  "thiserror",
  "tracing",
 ]
@@ -332,6 +333,14 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "terrarium-network"
+version = "0.1.0"
+dependencies = [
+ "adapter-traits",
+ "tracing",
 ]
 
 [[package]]
