@@ -8,6 +8,7 @@ license.workspace = true
 adapter-traits = { path = "../traits" }
 terrarium-network = { path = "../../network" }
 overlay = { path = "../../overlay" }
+uds-http = { path = "../../uds-http" }
 async-trait = "0.1"
 serde = { workspace = true }
 serde_json = { workspace = true }

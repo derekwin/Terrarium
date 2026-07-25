@@ -35,18 +35,7 @@ impl ChClient {
         let (reader, mut writer) = stream.into_split();
 
         let body_str = body.unwrap_or("");
-        let req = format!(
-            "{} {} HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             \r\n\
-             {}",
-            method,
-            path,
-            body_str.len(),
-            body_str
-        );
+        let req = uds_http::build_request(method, path, body_str);
 
         tokio::time::timeout(self.timeout, writer.write_all(req.as_bytes()))
             .await
@@ -74,7 +63,7 @@ impl ChClient {
         // Read status line
         let mut status_line = String::new();
         buf_reader.read_line(&mut status_line).await?;
-        let status = Self::parse_status(&status_line)?;
+        let status = uds_http::parse_status(&status_line).map_err(ClientError::HttpParse)?;
 
         // Read headers, tracking Content-Length
         let mut content_length: usize = 0;
@@ -101,20 +90,6 @@ impl ChClient {
         let body = String::from_utf8_lossy(&resp_body).into_owned();
 
         Ok((status, body))
-    }
-
-    /// Parse HTTP status code from a status line like "HTTP/1.1 200 OK\r\n".
-    fn parse_status(status_line: &str) -> Result<u16> {
-        let parts: Vec<&str> = status_line.split_whitespace().collect();
-        if parts.len() < 2 {
-            return Err(ClientError::HttpParse(format!(
-                "Invalid status line: {}",
-                status_line.trim()
-            )));
-        }
-        parts[1]
-            .parse()
-            .map_err(|_| ClientError::HttpParse(format!("Invalid status code: {}", parts[1])))
     }
 
     // -----------------------------------------------------------------------

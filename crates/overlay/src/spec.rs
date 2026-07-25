@@ -63,6 +63,31 @@ impl OverlaySpec {
         self
     }
 
+    /// Set the disk format.
+    pub fn format(mut self, fmt: OverlayFormat) -> Self {
+        self.format = fmt;
+        self
+    }
+
+    /// Create or reuse an overlay, dispatching to the correct manager
+    /// based on `self.format`.
+    pub fn create_or_reuse(&self) -> Result<String, String> {
+        match self.format {
+            OverlayFormat::Qcow2 => crate::OverlayManager::create_or_reuse(self),
+            OverlayFormat::Raw => crate::RawDiskManager::create_or_reuse(self),
+        }
+    }
+
+    /// Check if the overlay already exists.
+    pub fn exists(&self) -> bool {
+        crate::OverlayManager::exists(self)
+    }
+
+    /// Destroy the overlay and its directory.
+    pub fn destroy(&self) -> Result<(), String> {
+        crate::OverlayManager::destroy(self)
+    }
+
     /// Path to the user overlay file.
     pub fn user_overlay_path(&self) -> String {
         format!("{}/{}/overlay.qcow2", self.state_dir, self.name)

@@ -16,6 +16,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uds-http",
 ]
 
 [[package]]
@@ -690,6 +691,10 @@ dependencies = [
  "tracing-core",
  "tracing-log",
 ]
+
+[[package]]
+name = "uds-http"
+version = "0.1.0"
 
 [[package]]
 name = "unicode-ident"
