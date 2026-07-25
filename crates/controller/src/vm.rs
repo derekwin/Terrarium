@@ -85,8 +85,7 @@ fn create_qcow2_overlay(spec: &VmSpec) -> std::result::Result<(String, bool), Vm
         ospec = ospec.tool_layer(tool);
     }
     let already_exists = overlay::OverlayManager::exists(&ospec);
-    let path =
-        overlay::OverlayManager::create_or_reuse(&ospec).map_err(VmError::SetupFailed)?;
+    let path = overlay::OverlayManager::create_or_reuse(&ospec).map_err(VmError::SetupFailed)?;
     Ok((path, already_exists))
 }
 

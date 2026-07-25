@@ -65,6 +65,20 @@ pub struct VmCapabilities {
     pub snapshot: bool,
     /// VM pause / resume supported.
     pub pause_resume: bool,
+    /// Per-VM network QoS (rate limiting) supported.
+    #[serde(default)]
+    pub network_qos: bool,
+}
+
+/// Network QoS configuration for a VM.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NetworkQos {
+    /// Egress bandwidth limit in kbps (0 = unlimited).
+    pub egress_kbps: u64,
+    /// Ingress bandwidth limit in kbps (0 = unlimited).
+    pub ingress_kbps: u64,
+    /// Priority class (0 = lowest, higher = preferred under congestion).
+    pub priority: u32,
 }
 
 /// VM info returned by the adapter.
@@ -149,6 +163,9 @@ pub trait VmHandle: Send + Sync {
 
     /// Hot-add a new disk. Not supported by all backends.
     async fn add_disk(&self, path: &str, disk_id: &str) -> Result<(), String>;
+
+    /// Apply network QoS (rate limiting + priority). Implemented via tc on TAP.
+    async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), String>;
 
     /// Take a VM snapshot. Not supported by all backends.
     async fn snapshot(&self) -> Result<Snapshot, String>;

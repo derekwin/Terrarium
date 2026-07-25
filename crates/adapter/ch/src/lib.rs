@@ -7,7 +7,7 @@ pub mod api;
 pub mod client;
 mod error;
 
-use adapter_traits::{Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmSpec};
+use adapter_traits::{NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmSpec};
 use async_trait::async_trait;
 use overlay::{OverlayManager, OverlaySpec};
 use std::process::{Command, Stdio};
@@ -40,6 +40,7 @@ impl VmAdapter for ChAdapter {
             disk_add: true,
             snapshot: true,
             pause_resume: true,
+            network_qos: true,
         }
     }
 
@@ -157,6 +158,11 @@ impl VmHandle for ChVmHandle {
             .map_err(|e| format!("vm.add-disk: {}", e))
     }
 
+    async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), String> {
+        let tap = format!("tap-{}", self.name);
+        apply_tc_qos(&tap, qos)
+    }
+
     async fn pause(&self) -> Result<(), String> {
         self.client
             .vm_pause()
@@ -242,4 +248,78 @@ fn ch_args(spec: &VmSpec, socket: &str) -> Vec<String> {
     args.push("--console".into());
     args.push("off".into());
     args
+}
+
+/// Apply Linux tc traffic control to a TAP interface.
+fn apply_tc_qos(tap: &str, qos: &NetworkQos) -> Result<(), String> {
+    if qos.egress_kbps == 0 && qos.ingress_kbps == 0 {
+        return Ok(()); // No limits
+    }
+
+    // Egress shaping (htb on root qdisc)
+    if qos.egress_kbps > 0 {
+        let _ = Command::new("tc")
+            .args([
+                "qdisc", "add", "dev", tap, "root", "handle", "1:", "htb", "default", "1",
+            ])
+            .output();
+        let _ = Command::new("tc")
+            .args([
+                "class",
+                "add",
+                "dev",
+                tap,
+                "parent",
+                "1:",
+                "classid",
+                "1:1",
+                "htb",
+                "rate",
+                &format!("{}kbit", qos.egress_kbps),
+                "prio",
+                &qos.priority.to_string(),
+            ])
+            .output();
+    }
+
+    // Ingress policing
+    if qos.ingress_kbps > 0 {
+        let _ = Command::new("tc")
+            .args(["qdisc", "add", "dev", tap, "handle", "ffff:", "ingress"])
+            .output();
+        let _ = Command::new("tc")
+            .args([
+                "filter",
+                "add",
+                "dev",
+                tap,
+                "parent",
+                "ffff:",
+                "protocol",
+                "ip",
+                "u32",
+                "match",
+                "u32",
+                "0",
+                "0",
+                "police",
+                "rate",
+                &format!("{}kbit", qos.ingress_kbps),
+                "burst",
+                "10k",
+                "drop",
+                "flowid",
+                ":1",
+            ])
+            .output();
+    }
+
+    tracing::info!(
+        tap = %tap,
+        egress_kbps = qos.egress_kbps,
+        ingress_kbps = qos.ingress_kbps,
+        priority = qos.priority,
+        "Applied network QoS"
+    );
+    Ok(())
 }
