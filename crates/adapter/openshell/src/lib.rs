@@ -7,7 +7,8 @@
 //! Requirements: OpenShell CLI and gateway running.
 
 use adapter_traits::{
-    ExecCommand, ExecResult, SandboxAdapter, SandboxHandle, SandboxSpec, VmHandle, VmName,
+    AdapterError, ExecCommand, ExecResult, SandboxAdapter, SandboxHandle, SandboxSpec, VmHandle,
+    VmName,
 };
 use async_trait::async_trait;
 use std::process::{Command, Stdio};
@@ -27,7 +28,7 @@ impl SandboxAdapter for OpenshellAdapter {
         &self,
         _vm: &dyn VmHandle,
         spec: &SandboxSpec,
-    ) -> Result<Box<dyn SandboxHandle>, String> {
+    ) -> Result<Box<dyn SandboxHandle>, AdapterError> {
         Ok(Box::new(OpenshellHandle {
             name: spec.name.clone(),
             tools: spec.tools.clone(),
@@ -45,15 +46,15 @@ struct OpenshellHandle {
 
 #[async_trait]
 impl SandboxHandle for OpenshellHandle {
-    async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, String> {
+    async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, AdapterError> {
         openshell_run(cmd, self.name.as_ref(), &self.env)
     }
 
-    async fn setup(&self, _tools: &[String]) -> Result<(), String> {
+    async fn setup(&self, _tools: &[String]) -> Result<(), AdapterError> {
         Ok(())
     }
 
-    async fn destroy(&self) -> Result<(), String> {
+    async fn destroy(&self) -> Result<(), AdapterError> {
         // OpenShell sandboxes auto-destroy after command completion
         Ok(())
     }
@@ -63,7 +64,7 @@ fn openshell_run(
     cmd: &ExecCommand,
     name: &str,
     env: &std::collections::HashMap<String, String>,
-) -> Result<ExecResult, String> {
+) -> Result<ExecResult, AdapterError> {
     let mut args: Vec<String> = vec![
         "sandbox".into(),
         "create".into(),
@@ -71,10 +72,15 @@ fn openshell_run(
         name.into(),
     ];
 
-    // Environment variables (credentials, API keys)
+    // Environment variables.
+    // NOTE: credentials in --env flags are visible in /proc/<pid>/cmdline.
+    // For production, agents should read secrets from files or the tool
+    // should support reading them from environment variables.
+    let mut process = Command::new("openshell");
     for (k, v) in env {
         args.push("--env".into());
         args.push(format!("{}={}", k, v));
+        process.env(k, v);
     }
 
     // Command separator
@@ -83,15 +89,19 @@ fn openshell_run(
         args.push(a.clone());
     }
 
-    tracing::info!(name = %name, ?args, "openshell run");
+    tracing::info!(
+        name = %name,
+        env_keys = ?env.keys().collect::<Vec<_>>(),
+        "openshell run"
+    );
 
-    let output = Command::new("openshell")
+    let output = process
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| format!("openshell: {} — is the gateway running?", e))?;
+        .map_err(|e| AdapterError::internal(format!("openshell: {}", e)))?;
 
     Ok(ExecResult {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

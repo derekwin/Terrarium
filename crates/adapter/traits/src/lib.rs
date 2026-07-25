@@ -7,6 +7,62 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
+use thiserror::Error;
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Unified error type for all adapter operations.
+#[derive(Debug, Error)]
+pub enum AdapterError {
+    #[error("{0}")]
+    Internal(String),
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("not supported: {0}")]
+    NotSupported(String),
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+    #[error("timeout: {0}")]
+    Timeout(String),
+}
+
+impl AdapterError {
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self::Internal(msg.into())
+    }
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self::NotFound(msg.into())
+    }
+    pub fn not_supported(msg: impl Into<String>) -> Self {
+        Self::NotSupported(msg.into())
+    }
+    pub fn invalid_argument(msg: impl Into<String>) -> Self {
+        Self::InvalidArgument(msg.into())
+    }
+    pub fn timeout(msg: impl Into<String>) -> Self {
+        Self::Timeout(msg.into())
+    }
+
+    /// True if this error is likely transient and the operation can be retried.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Timeout(_))
+    }
+}
+
+// Convenience: convert from &str / String for ergonomic use.
+impl From<&str> for AdapterError {
+    fn from(s: &str) -> Self {
+        Self::Internal(s.to_string())
+    }
+}
+
+impl From<String> for AdapterError {
+    fn from(s: String) -> Self {
+        Self::Internal(s)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Common types
@@ -240,41 +296,41 @@ pub trait VmAdapter: Send + Sync {
     /// What this backend can and cannot do.
     fn capabilities(&self) -> VmCapabilities;
 
-    async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, String>;
+    async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, AdapterError>;
     async fn restore(
         &self,
         snapshot: &Snapshot,
         spec: &VmSpec,
-    ) -> Result<Box<dyn VmHandle>, String>;
+    ) -> Result<Box<dyn VmHandle>, AdapterError>;
 }
 
 #[async_trait]
 pub trait VmHandle: Send + Sync {
-    async fn info(&self) -> Result<VmInfo, String>;
+    async fn info(&self) -> Result<VmInfo, AdapterError>;
 
     /// Resize vCPUs and/or memory. Backends that don't support this
     /// return an error; the engine checks capabilities() first.
-    async fn resize(&self, cpu: Option<u32>, memory: Option<u64>) -> Result<(), String>;
+    async fn resize(&self, cpu: Option<u32>, memory: Option<u64>) -> Result<(), AdapterError>;
 
     /// Resize an existing disk (online expand). Not supported by all backends.
-    async fn resize_disk(&self, disk_id: &str, size: u64) -> Result<(), String>;
+    async fn resize_disk(&self, disk_id: &str, size: u64) -> Result<(), AdapterError>;
 
     /// Hot-add a new disk. Not supported by all backends.
-    async fn add_disk(&self, path: &str, disk_id: &str) -> Result<(), String>;
+    async fn add_disk(&self, path: &str, disk_id: &str) -> Result<(), AdapterError>;
 
     /// Apply network QoS (rate limiting + priority). Implemented via tc on TAP.
-    async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), String>;
+    async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), AdapterError>;
 
     /// Take a VM snapshot. Not supported by all backends.
-    async fn snapshot(&self) -> Result<Snapshot, String>;
+    async fn snapshot(&self) -> Result<Snapshot, AdapterError>;
 
     /// Pause the VM. Not supported by all backends.
-    async fn pause(&self) -> Result<(), String>;
+    async fn pause(&self) -> Result<(), AdapterError>;
 
     /// Resume a paused VM.
-    async fn resume(&self) -> Result<(), String>;
+    async fn resume(&self) -> Result<(), AdapterError>;
 
-    async fn shutdown(&self) -> Result<(), String>;
+    async fn shutdown(&self) -> Result<(), AdapterError>;
     fn pid(&self) -> u32;
     /// Check if the VM/sandbox process is still running.
     /// Uses `try_wait()` on the underlying child process.
@@ -291,12 +347,12 @@ pub trait SandboxAdapter: Send + Sync {
         &self,
         vm: &dyn VmHandle,
         spec: &SandboxSpec,
-    ) -> Result<Box<dyn SandboxHandle>, String>;
+    ) -> Result<Box<dyn SandboxHandle>, AdapterError>;
 }
 
 #[async_trait]
 pub trait SandboxHandle: Send + Sync {
-    async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, String>;
-    async fn setup(&self, tools: &[String]) -> Result<(), String>;
-    async fn destroy(&self) -> Result<(), String>;
+    async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, AdapterError>;
+    async fn setup(&self, tools: &[String]) -> Result<(), AdapterError>;
+    async fn destroy(&self) -> Result<(), AdapterError>;
 }

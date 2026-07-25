@@ -6,7 +6,7 @@
 //! Requirements: `firecracker` binary in PATH.
 
 use adapter_traits::{
-    NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmName, VmSpec,
+    AdapterError, NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmName, VmSpec,
 };
 use async_trait::async_trait;
 use overlay::{OverlaySpec, RawDiskManager};
@@ -40,13 +40,19 @@ impl VmAdapter for FirecrackerAdapter {
         }
     }
 
-    async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, String> {
-        spec.validate()?;
+    async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, AdapterError> {
+        spec.validate().map_err(AdapterError::invalid_argument)?;
         FcVmHandle::spawn(spec).map(|h| Box::new(h) as Box<dyn VmHandle>)
     }
 
-    async fn restore(&self, _snap: &Snapshot, _spec: &VmSpec) -> Result<Box<dyn VmHandle>, String> {
-        Err("Firecracker restore not yet implemented".into())
+    async fn restore(
+        &self,
+        _snap: &Snapshot,
+        _spec: &VmSpec,
+    ) -> Result<Box<dyn VmHandle>, AdapterError> {
+        Err(AdapterError::not_supported(
+            "Firecracker restore not yet implemented",
+        ))
     }
 }
 
@@ -59,7 +65,7 @@ struct FcVmHandle {
 }
 
 impl FcVmHandle {
-    fn spawn(spec: &VmSpec) -> Result<Self, String> {
+    fn spawn(spec: &VmSpec) -> Result<Self, AdapterError> {
         let name = spec.name.clone();
         let socket = format!("/tmp/fc-{}.sock", name);
         let _ = std::fs::remove_file(&socket);
@@ -81,7 +87,7 @@ impl FcVmHandle {
             if Instant::now() > deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("socket timeout".into());
+                return Err(AdapterError::internal("socket timeout"));
             }
             thread::sleep(Duration::from_millis(100));
         }
@@ -150,7 +156,7 @@ impl FcVmHandle {
 
 #[async_trait]
 impl VmHandle for FcVmHandle {
-    async fn info(&self) -> Result<VmInfo, String> {
+    async fn info(&self) -> Result<VmInfo, AdapterError> {
         let client = FcClient::new(self.fc_socket());
         // Retry on transient errors during startup
         for attempt in 0..10 {
@@ -164,7 +170,10 @@ impl VmHandle for FcVmHandle {
                 }
                 Err(e) => {
                     if attempt == 9 {
-                        return Err(format!("vm.info failed after 10 attempts: {}", e));
+                        return Err(AdapterError::internal(format!(
+                            "vm.info failed after 10 attempts: {}",
+                            e
+                        )));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
@@ -173,48 +182,62 @@ impl VmHandle for FcVmHandle {
         unreachable!()
     }
 
-    async fn resize(&self, _cpu: Option<u32>, _mem: Option<u64>) -> Result<(), String> {
-        Err("Firecracker does not support live CPU/memory resize".into())
+    async fn resize(&self, _cpu: Option<u32>, _mem: Option<u64>) -> Result<(), AdapterError> {
+        Err(AdapterError::not_supported(
+            "Firecracker does not support live CPU/memory resize",
+        ))
     }
 
-    async fn resize_disk(&self, _id: &str, _size: u64) -> Result<(), String> {
-        Err("Firecracker does not support online disk resize".into())
+    async fn resize_disk(&self, _id: &str, _size: u64) -> Result<(), AdapterError> {
+        Err(AdapterError::not_supported(
+            "Firecracker does not support online disk resize",
+        ))
     }
 
-    async fn add_disk(&self, _path: &str, _id: &str) -> Result<(), String> {
-        Err("Firecracker does not support hot-adding disks".into())
+    async fn add_disk(&self, _path: &str, _id: &str) -> Result<(), AdapterError> {
+        Err(AdapterError::not_supported(
+            "Firecracker does not support hot-adding disks",
+        ))
     }
 
-    async fn pause(&self) -> Result<(), String> {
+    async fn pause(&self) -> Result<(), AdapterError> {
         let client = FcClient::new(self.fc_socket());
-        client.patch("/vm", &serde_json::json!({"state": "Paused"}))
+        client
+            .patch("/vm", &serde_json::json!({"state": "Paused"}))
+            .map_err(AdapterError::internal)
     }
 
-    async fn resume(&self) -> Result<(), String> {
+    async fn resume(&self) -> Result<(), AdapterError> {
         let client = FcClient::new(self.fc_socket());
-        client.patch("/vm", &serde_json::json!({"state": "Resumed"}))
+        client
+            .patch("/vm", &serde_json::json!({"state": "Resumed"}))
+            .map_err(AdapterError::internal)
     }
 
-    async fn snapshot(&self) -> Result<Snapshot, String> {
+    async fn snapshot(&self) -> Result<Snapshot, AdapterError> {
         let vm_path = format!("/tmp/fc-snap-{}.bin", self.name);
         let mem_path = format!("/tmp/fc-snap-{}.mem", self.name);
         let client = FcClient::new(self.fc_socket());
-        client.put(
-            "/snapshot/create",
-            &serde_json::json!({
-                "snapshot_path": vm_path,
-                "mem_file_path": mem_path,
-                "snapshot_type": "Full",
-            }),
-        )?;
+        client
+            .put(
+                "/snapshot/create",
+                &serde_json::json!({
+                    "snapshot_path": vm_path,
+                    "mem_file_path": mem_path,
+                    "snapshot_type": "Full",
+                }),
+            )
+            .map_err(AdapterError::internal)?;
         Ok(Snapshot { path: vm_path })
     }
 
-    async fn set_network_qos(&self, _qos: &NetworkQos) -> Result<(), String> {
-        Err("Firecracker does not support per-VM network QoS".into())
+    async fn set_network_qos(&self, _qos: &NetworkQos) -> Result<(), AdapterError> {
+        Err(AdapterError::not_supported(
+            "Firecracker does not support per-VM network QoS",
+        ))
     }
 
-    async fn shutdown(&self) -> Result<(), String> {
+    async fn shutdown(&self) -> Result<(), AdapterError> {
         let client = FcClient::new(self.fc_socket());
         let _ = client.put(
             "/actions",

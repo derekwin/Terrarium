@@ -137,7 +137,7 @@ async fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
     let name = spec.name.to_string();
     match mgr.spawn(spec).await {
         Ok(()) => Response::ok(serde_json::json!({"name": name, "status": "created"})),
-        Err(e) => Response::err(e),
+        Err(e) => Response::err(e.to_string()),
     }
 }
 
@@ -168,7 +168,7 @@ async fn cmd_info(mgr: &VmManager, cmd: Command) -> Response {
     };
     let details = match vm.info().await {
         Ok(d) => d,
-        Err(e) => return Response::err(e),
+        Err(e) => return Response::err(e.to_string()),
     };
     Response::ok(serde_json::json!({
         "name": name,
@@ -191,7 +191,7 @@ async fn cmd_resize(mgr: &VmManager, cmd: Command) -> Response {
 
     let cpus: Option<u32> = cmd.cpus.map(|c| c as u32);
     if let Err(e) = vm.resize(cpus, cmd.memory_bytes).await {
-        return Response::err(e);
+        return Response::err(e.to_string());
     }
     Response::ok_msg("resize completed")
 }
@@ -203,7 +203,7 @@ async fn cmd_shutdown(mgr: &mut VmManager, cmd: Command) -> Response {
     };
     match mgr.shutdown(&name).await {
         Ok(()) => Response::ok_msg(&format!("VM '{}' shut down", name)),
-        Err(e) => Response::err(e),
+        Err(e) => Response::err(e.to_string()),
     }
 }
 
@@ -214,7 +214,7 @@ async fn cmd_kill(mgr: &mut VmManager, cmd: Command) -> Response {
     };
     match mgr.kill(&name).await {
         Ok(()) => Response::ok_msg(&format!("VM '{}' killed", name)),
-        Err(e) => Response::err(e),
+        Err(e) => Response::err(e.to_string()),
     }
 }
 
@@ -225,7 +225,7 @@ async fn cmd_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
     };
     match mgr.destroy(&name).await {
         Ok(()) => Response::ok_msg(&format!("VM '{}' destroyed (disk removed)", name)),
-        Err(e) => Response::err(e),
+        Err(e) => Response::err(e.to_string()),
     }
 }
 
@@ -244,7 +244,7 @@ async fn cmd_snapshot(mgr: &VmManager, cmd: Command) -> Response {
 
     match vm.snapshot().await {
         Ok(snap) => Response::ok(serde_json::json!({"snapshot_path": snap.path})),
-        Err(e) => Response::err(e),
+        Err(e) => Response::err(e.to_string()),
     }
 }
 

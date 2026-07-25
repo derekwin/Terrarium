@@ -8,7 +8,7 @@ pub mod client;
 mod error;
 
 use adapter_traits::{
-    NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmName, VmSpec,
+    AdapterError, NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmName, VmSpec,
 };
 use async_trait::async_trait;
 use overlay::{OverlayManager, OverlaySpec};
@@ -50,8 +50,8 @@ impl VmAdapter for ChAdapter {
         }
     }
 
-    async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, String> {
-        spec.validate()?;
+    async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, AdapterError> {
+        spec.validate().map_err(AdapterError::invalid_argument)?;
         ChVmHandle::spawn(spec, &self.ch_binary)
             .await
             .map(|h| Box::new(h) as Box<dyn VmHandle>)
@@ -61,8 +61,10 @@ impl VmAdapter for ChAdapter {
         &self,
         _snapshot: &Snapshot,
         _spec: &VmSpec,
-    ) -> Result<Box<dyn VmHandle>, String> {
-        Err("CH restore not yet implemented via adapter".into())
+    ) -> Result<Box<dyn VmHandle>, AdapterError> {
+        Err(AdapterError::not_supported(
+            "CH restore not yet implemented via adapter",
+        ))
     }
 }
 
@@ -77,7 +79,7 @@ struct ChVmHandle {
 }
 
 impl ChVmHandle {
-    async fn spawn(spec: &VmSpec, ch_binary: &str) -> Result<Self, String> {
+    async fn spawn(spec: &VmSpec, ch_binary: &str) -> Result<Self, AdapterError> {
         let name = spec.name.clone();
         let socket = format!("/tmp/terra-{}.sock", name);
         let _ = std::fs::remove_file(&socket);
@@ -110,7 +112,7 @@ impl ChVmHandle {
             if Instant::now() > deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("socket timeout for {}", name));
+                return Err(format!("socket timeout for {}", name).into());
             }
             sleep(Duration::from_millis(100)).await;
         }
@@ -128,7 +130,7 @@ impl ChVmHandle {
 
 #[async_trait]
 impl VmHandle for ChVmHandle {
-    async fn info(&self) -> Result<VmInfo, String> {
+    async fn info(&self) -> Result<VmInfo, AdapterError> {
         let details = retry_get_info(&self.client).await?;
         Ok(VmInfo {
             state: details.state,
@@ -141,60 +143,60 @@ impl VmHandle for ChVmHandle {
         })
     }
 
-    async fn resize(&self, cpu: Option<u32>, memory: Option<u64>) -> Result<(), String> {
+    async fn resize(&self, cpu: Option<u32>, memory: Option<u64>) -> Result<(), AdapterError> {
         self.client
             .vm_resize(cpu.map(|c| c as u8), memory)
             .await
-            .map_err(|e| format!("vm.resize: {}", e))
+            .map_err(|e| AdapterError::internal(format!("vm.resize: {}", e)))
     }
 
-    async fn resize_disk(&self, disk_id: &str, size: u64) -> Result<(), String> {
+    async fn resize_disk(&self, disk_id: &str, size: u64) -> Result<(), AdapterError> {
         self.client
             .vm_resize_disk(disk_id, size)
             .await
-            .map_err(|e| format!("vm.resize-disk: {}", e))
+            .map_err(|e| AdapterError::internal(format!("vm.resize-disk: {}", e)))
     }
 
-    async fn add_disk(&self, path: &str, _disk_id: &str) -> Result<(), String> {
+    async fn add_disk(&self, path: &str, _disk_id: &str) -> Result<(), AdapterError> {
         self.client
             .vm_add_disk(path)
             .await
-            .map_err(|e| format!("vm.add-disk: {}", e))
+            .map_err(|e| AdapterError::internal(format!("vm.add-disk: {}", e)))
     }
 
-    async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), String> {
+    async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), AdapterError> {
         let tap = format!("tap-{}", self.name);
-        terrarium_network::apply_tc_qos(&tap, qos)
+        terrarium_network::apply_tc_qos(&tap, qos).map_err(AdapterError::internal)
     }
 
-    async fn pause(&self) -> Result<(), String> {
+    async fn pause(&self) -> Result<(), AdapterError> {
         self.client
             .vm_pause()
             .await
-            .map_err(|e| format!("vm.pause: {}", e))
+            .map_err(|e| AdapterError::internal(format!("vm.pause: {}", e)))
     }
 
-    async fn resume(&self) -> Result<(), String> {
+    async fn resume(&self) -> Result<(), AdapterError> {
         self.client
             .vm_resume()
             .await
-            .map_err(|e| format!("vm.resume: {}", e))
+            .map_err(|e| AdapterError::internal(format!("vm.resume: {}", e)))
     }
 
-    async fn snapshot(&self) -> Result<Snapshot, String> {
+    async fn snapshot(&self) -> Result<Snapshot, AdapterError> {
         let path = format!("/tmp/terra-snap-{}.bin", self.name);
         self.client
             .vm_snapshot(&path)
             .await
-            .map_err(|e| format!("vm.snapshot: {}", e))?;
+            .map_err(|e| AdapterError::internal(format!("vm.snapshot: {}", e)))?;
         Ok(Snapshot { path })
     }
 
-    async fn shutdown(&self) -> Result<(), String> {
+    async fn shutdown(&self) -> Result<(), AdapterError> {
         self.client
             .vm_shutdown()
             .await
-            .map_err(|e| format!("vm.shutdown: {}", e))
+            .map_err(|e| AdapterError::internal(format!("vm.shutdown: {}", e)))
     }
 
     fn pid(&self) -> u32 {
@@ -265,13 +267,16 @@ fn ch_args(spec: &VmSpec, socket: &str) -> Vec<String> {
 
 /// Retry vm_info() up to 10 times with 500ms back-off.
 /// CH API may return transient errors during startup.
-async fn retry_get_info(client: &ChClient) -> Result<api::VmDetails, String> {
+async fn retry_get_info(client: &ChClient) -> Result<api::VmDetails, AdapterError> {
     for attempt in 0..10 {
         match client.vm_info().await {
             Ok(details) => return Ok(details),
             Err(e) => {
                 if attempt == 9 {
-                    return Err(format!("vm.info failed after 10 attempts: {}", e));
+                    return Err(AdapterError::internal(format!(
+                        "vm.info failed after 10 attempts: {}",
+                        e
+                    )));
                 }
                 sleep(Duration::from_millis(500)).await;
             }

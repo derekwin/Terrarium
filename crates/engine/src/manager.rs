@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use adapter_traits::{VmAdapter, VmHandle, VmName, VmSpec};
+use adapter_traits::{AdapterError, VmAdapter, VmHandle, VmName, VmSpec};
 
 /// Central VM registry for the controller.
 ///
@@ -30,10 +30,13 @@ impl VmManager {
     ///
     /// Creates qcow2 overlay if base_disk is configured, then delegates
     /// to the adapter. Returns an error if a VM with the same name already exists.
-    pub async fn spawn(&mut self, spec: VmSpec) -> Result<(), String> {
+    pub async fn spawn(&mut self, spec: VmSpec) -> Result<(), AdapterError> {
         let name = spec.name.clone();
         if self.vms.contains_key(&name) {
-            return Err(format!("VM '{}' already exists", name));
+            return Err(AdapterError::internal(format!(
+                "VM '{}' already exists",
+                name
+            )));
         }
 
         // Create qcow2 overlay if base_disk is configured.
@@ -43,7 +46,7 @@ impl VmManager {
             let overlay_spec =
                 overlay::OverlaySpec::new(name.to_string(), base).disk_size_gb(spec.disk_size_gb);
             let overlay_path = overlay::OverlayManager::create_or_reuse(&overlay_spec)
-                .map_err(|e| format!("overlay: {}", e))?;
+                .map_err(|e| AdapterError::internal(format!("overlay: {}", e)))?;
             spec.disks.push(overlay_path.clone());
             self.overlays.insert(name.clone(), overlay_path);
         }
@@ -79,31 +82,31 @@ impl VmManager {
     }
 
     /// Gracefully shut down a VM by name and remove it from the registry.
-    pub async fn shutdown(&mut self, name: &str) -> Result<(), String> {
+    pub async fn shutdown(&mut self, name: &str) -> Result<(), AdapterError> {
         let handle = self
             .vms
             .remove(name)
-            .ok_or_else(|| format!("VM '{}' not found", name))?;
+            .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
         handle.shutdown().await
     }
 
     /// Force-kill is not supported through the adapter trait.
     /// Use shutdown with a timeout instead.
-    pub async fn kill(&mut self, name: &str) -> Result<(), String> {
+    pub async fn kill(&mut self, name: &str) -> Result<(), AdapterError> {
         // Adapter trait has no kill method. Remove from registry
         // and let the handle drop (which should kill the process).
         self.vms
             .remove(name)
-            .ok_or_else(|| format!("VM '{}' not found", name))?;
+            .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
         Ok(())
     }
 
     /// Destroy a VM: shut down and delete persistent files (overlay disk, etc).
-    pub async fn destroy(&mut self, name: &str) -> Result<(), String> {
+    pub async fn destroy(&mut self, name: &str) -> Result<(), AdapterError> {
         let handle = self
             .vms
             .remove(name)
-            .ok_or_else(|| format!("VM '{}' not found", name))?;
+            .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
         handle.shutdown().await?;
 
         // Clean up overlay disk

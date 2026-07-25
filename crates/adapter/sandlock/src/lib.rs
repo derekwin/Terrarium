@@ -7,7 +7,8 @@
 //! Requirements: `sandlock` binary in PATH.
 
 use adapter_traits::{
-    ExecCommand, ExecResult, SandboxAdapter, SandboxHandle, SandboxSpec, VmHandle, VmName,
+    AdapterError, ExecCommand, ExecResult, SandboxAdapter, SandboxHandle, SandboxSpec, VmHandle,
+    VmName,
 };
 use async_trait::async_trait;
 use std::process::{Command, Stdio};
@@ -27,7 +28,7 @@ impl SandboxAdapter for SandlockAdapter {
         &self,
         _vm: &dyn VmHandle,
         spec: &SandboxSpec,
-    ) -> Result<Box<dyn SandboxHandle>, String> {
+    ) -> Result<Box<dyn SandboxHandle>, AdapterError> {
         Ok(Box::new(SandlockHandle {
             name: spec.name.clone(),
             tools: spec.tools.clone(),
@@ -46,22 +47,22 @@ struct SandlockHandle {
 
 #[async_trait]
 impl SandboxHandle for SandlockHandle {
-    async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, String> {
+    async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, AdapterError> {
         sandlock_run(cmd, &self)
     }
 
-    async fn setup(&self, _tools: &[String]) -> Result<(), String> {
+    async fn setup(&self, _tools: &[String]) -> Result<(), AdapterError> {
         // Sandlock has no persistent setup — it applies rules per-run
         Ok(())
     }
 
-    async fn destroy(&self) -> Result<(), String> {
+    async fn destroy(&self) -> Result<(), AdapterError> {
         Ok(())
     }
 }
 
 /// Build and invoke `sandlock run ...` with mapped flags.
-fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult, String> {
+fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult, AdapterError> {
     let mut args: Vec<String> = vec!["run".into()];
 
     // Filesystem: readable paths
@@ -112,10 +113,15 @@ fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult
         args.push("50".into());
     }
 
-    // Environment
+    // Environment variables.
+    // NOTE: credentials in --env flags are visible in /proc/<pid>/cmdline.
+    // For production, agents should read secrets from files or the tool
+    // should support reading them from environment variables.
+    let mut process = Command::new("sandlock");
     for (k, v) in &handle.env {
         args.push("--env".into());
         args.push(format!("{}={}", k, v));
+        process.env(k, v);
     }
 
     // Clean environment by default
@@ -129,15 +135,20 @@ fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult
         args.push(a.clone());
     }
 
-    tracing::info!(name = %handle.name, ?args, "sandlock run");
+    tracing::info!(
+        name = %handle.name,
+        ?args,
+        env_keys = ?handle.env.keys().collect::<Vec<_>>(),
+        "sandlock run"
+    );
 
-    let output = Command::new("sandlock")
+    let output = process
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| format!("sandlock: {}", e))?;
+        .map_err(|e| AdapterError::internal(format!("sandlock: {}", e)))?;
 
     Ok(ExecResult {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
