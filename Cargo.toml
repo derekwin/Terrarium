@@ -11,6 +11,7 @@ members = [
     "crates/adapter/ch",
     "crates/adapter/sandboxd",
     "crates/adapter/sandlock",
+    "crates/adapter/openshell",
     "crates/network",
     "crates/overlay",
 ]

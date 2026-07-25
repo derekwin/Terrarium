@@ -18,6 +18,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "adapter-openshell"
+version = "0.1.0"
+dependencies = [
+ "adapter-traits",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "adapter-sandboxd"
 version = "0.1.0"
 dependencies = [
