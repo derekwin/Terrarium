@@ -1,0 +1,13 @@
+[package]
+name = "adapter-firecracker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+adapter-traits = { path = "../traits" }
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

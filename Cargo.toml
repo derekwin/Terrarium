@@ -9,6 +9,8 @@ members = [
     "crates/mcp",
     "crates/adapter/traits",
     "crates/adapter/cloud-hypervisor",
+    "crates/adapter/firecracker",
+    "crates/adapter/sandlock",
     "crates/adapter/openshell",
     "crates/network",
     "crates/overlay",

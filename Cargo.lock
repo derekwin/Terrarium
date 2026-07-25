@@ -18,7 +18,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "adapter-firecracker"
+version = "0.1.0"
+dependencies = [
+ "adapter-traits",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "adapter-openshell"
+version = "0.1.0"
+dependencies = [
+ "adapter-traits",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "adapter-sandlock"
 version = "0.1.0"
 dependencies = [
  "adapter-traits",
