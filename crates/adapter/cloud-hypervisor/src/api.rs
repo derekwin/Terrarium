@@ -61,19 +61,8 @@ pub struct ResizeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub desired_ram: Option<u64>,
     /// Desired balloon size in bytes (if changing).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", rename = "desired_balloon")]
     pub balloon_size: Option<u64>,
-}
-
-/// VM state as returned by the API.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct VmInfo {
-    /// VM identifier assigned by CH.
-    #[serde(default)]
-    pub id: String,
-    /// Current VM state (Created, Running, Shutdown).
-    #[serde(default)]
-    pub state: String,
 }
 
 /// VM information from vm.info endpoint.

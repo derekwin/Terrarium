@@ -121,12 +121,11 @@ impl ChClient {
     // VM Lifecycle API
     // -----------------------------------------------------------------------
 
-    pub async fn vm_create(&self, config: &VmConfig) -> Result<VmInfo> {
-        let body = serde_json::to_string(config)?;
-        let (_status, resp) = self
-            .request("PUT", "/api/v1/vm.create", Some(&body))
+    pub async fn vm_create(&self, config: &VmConfig) -> Result<()> {
+        let body = serde_json::json!({"payload": config});
+        self.request("PUT", "/api/v1/vm.create", Some(&body.to_string()))
             .await?;
-        Ok(serde_json::from_str(&resp)?)
+        Ok(())
     }
 
     pub async fn vm_boot(&self) -> Result<()> {
@@ -201,7 +200,7 @@ impl ChClient {
     pub async fn vm_resize_disk(&self, disk_id: &str, size: u64) -> Result<()> {
         let body = serde_json::json!({
             "id": disk_id,
-            "size": size,
+            "desired_size": size,
         });
         self.request("PUT", "/api/v1/vm.resize-disk", Some(&body.to_string()))
             .await?;

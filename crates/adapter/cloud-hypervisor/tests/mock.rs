@@ -13,7 +13,6 @@ use adapter_cloud_hypervisor::ChClient;
 
 /// Response templates for the mock server.
 mod responses {
-    pub const VM_CREATE: &str = r#"{"id":"test-vm-1","state":"Created"}"#;
     pub const VM_INFO: &str = r#"{"cpus":{"boot_vcpus":2,"max_vcpus":16},"memory":{"size":536870912,"hotplug_size":34359738368},"state":"Running"}"#;
     pub const HTTP_OK: &str =
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ";
@@ -65,7 +64,7 @@ fn match_req(req: &str) -> String {
     let (method, path) = parse_request_line(req);
 
     match (method.as_str(), path.as_str()) {
-        ("PUT", "/api/v1/vm.create") => json_response(responses::VM_CREATE),
+        ("PUT", "/api/v1/vm.create") => responses::HTTP_NO_CONTENT.to_string(),
         ("PUT", "/api/v1/vm.boot") => responses::HTTP_NO_CONTENT.to_string(),
         ("PUT", "/api/v1/vm.shutdown") => responses::HTTP_NO_CONTENT.to_string(),
         ("PUT", "/api/v1/vm.delete") => responses::HTTP_NO_CONTENT.to_string(),
@@ -111,9 +110,8 @@ async fn test_vm_create() {
         console: None,
     };
 
-    let info = client.vm_create(&config).await.expect("vm_create");
-    assert_eq!(info.id, "test-vm-1");
-    assert_eq!(info.state, "Created");
+    // vm.create returns HTTP 204 No Content on success
+    client.vm_create(&config).await.expect("vm_create");
 }
 
 #[tokio::test]
