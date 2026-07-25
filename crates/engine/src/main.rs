@@ -7,12 +7,14 @@ mod cgroup;
 mod cli;
 mod commands;
 mod daemon;
+mod files;
 mod manager;
 mod metering;
 mod placement;
 mod pool;
 mod scheduler;
 mod spec;
+mod tools;
 mod vm;
 
 use std::env;
