@@ -51,6 +51,9 @@ fn handle_client(mut stream: UnixStream) {
     let command = cmd["command"].as_str().unwrap_or("");
     match command {
         "exec" => cmd_exec(&mut stream, &cmd),
+        "read_file" => cmd_read_file(&mut stream, &cmd),
+        "write_file" => cmd_write_file(&mut stream, &cmd),
+        "list_dir" => cmd_list_dir(&mut stream, &cmd),
         "ping" => respond(&mut stream, "ok", "pong", None),
         _ => respond(
             &mut stream,
@@ -213,6 +216,70 @@ fn build_cgroup_setup(memory_mb: Option<u64>, cpu_shares: Option<u64>) -> String
         ));
     }
     setup
+}
+
+fn cmd_read_file(stream: &mut UnixStream, cmd: &serde_json::Value) {
+    let path = match cmd["path"].as_str() {
+        Some(p) => p,
+        None => {
+            respond(stream, "error", "Missing 'path' field", None);
+            return;
+        }
+    };
+    match std::fs::read_to_string(path) {
+        Ok(content) => respond(
+            stream,
+            "ok",
+            "file read",
+            Some(&serde_json::json!({"path": path, "content": content})),
+        ),
+        Err(e) => respond(stream, "error", &format!("read_file failed: {}", e), None),
+    }
+}
+
+fn cmd_write_file(stream: &mut UnixStream, cmd: &serde_json::Value) {
+    let path = match cmd["path"].as_str() {
+        Some(p) => p,
+        None => {
+            respond(stream, "error", "Missing 'path' field", None);
+            return;
+        }
+    };
+    let content = match cmd["content"].as_str() {
+        Some(c) => c,
+        None => {
+            respond(stream, "error", "Missing 'content' field", None);
+            return;
+        }
+    };
+    match std::fs::write(path, content) {
+        Ok(()) => respond(
+            stream,
+            "ok",
+            "file written",
+            Some(&serde_json::json!({"path": path})),
+        ),
+        Err(e) => respond(stream, "error", &format!("write_file failed: {}", e), None),
+    }
+}
+
+fn cmd_list_dir(stream: &mut UnixStream, cmd: &serde_json::Value) {
+    let path = cmd["path"].as_str().unwrap_or("/home/agent");
+    match std::fs::read_dir(path) {
+        Ok(entries) => {
+            let files: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path().display().to_string())
+                .collect();
+            respond(
+                stream,
+                "ok",
+                "directory listed",
+                Some(&serde_json::json!({"path": path, "entries": files})),
+            );
+        }
+        Err(e) => respond(stream, "error", &format!("list_dir failed: {}", e), None),
+    }
 }
 
 fn respond(stream: &mut UnixStream, status: &str, message: &str, data: Option<&serde_json::Value>) {
