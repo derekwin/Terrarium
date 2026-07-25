@@ -1,43 +1,39 @@
 #!/bin/bash
-# One-command Terrarium guest image build.
+# Terrarium guest image build — kernel + rootfs + tool layers.
 #
-# Usage: bash build.sh [kernel_version]
-#   Default: 6.12
+# Usage:
+#   bash build.sh kernel [version] [config]     Build kernel only
+#   bash build.sh rootfs [type]                 Build rootfs only
+#   bash build.sh toolfs <name> <rootfs>        Build tool layer
+#   bash build.sh all                           Build kernel + busybox rootfs
 #
-# Output:
-#   target/guest/vmlinux.bin   — guest kernel (bzImage)
-#   target/guest/rootfs/       — root filesystem tree
+# Examples:
+#   bash build.sh all                                    # default: kernel 6.12 + busybox
+#   bash build.sh kernel 6.6 configs/kvm-minimal         # custom kernel
+#   bash build.sh rootfs alpine ROOTFS_SRC=/tmp/alpine   # alpine rootfs
+#   bash build.sh toolfs python base.qcow2               # python tool layer
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CMD="${1:-all}"
 
-echo "========================================="
-echo "  Terrarium Guest Image Build"
-echo "========================================="
-echo ""
-
-echo ">>> Step 1/2: Building guest kernel"
-bash "${SCRIPT_DIR}/build-kernel.sh" "$@"
-
-echo ""
-echo ">>> Step 2/2: Building root filesystem"
-bash "${SCRIPT_DIR}/build-rootfs.sh"
-
-echo ""
-echo "========================================="
-echo "  Build Complete"
-echo "========================================="
-echo "Output files:"
-echo "  Kernel: target/guest/vmlinux.bin"
-echo "  Rootfs: target/guest/rootfs/"
-echo ""
-echo "Quick test with Cloud Hypervisor:"
-echo "  cloud-hypervisor \\"
-echo "    --kernel target/guest/vmlinux.bin \\"
-echo "    --cmdline \"console=ttyS0 quiet\" \\"
-echo "    --cpus boot=1 \\"
-echo "    --memory size=256M \\"
-echo "    --fs target/guest/rootfs \\"
-echo "    --serial tty --console off"
-echo ""
+case "$CMD" in
+    kernel)
+        bash "${SCRIPT_DIR}/build-kernel.sh" "${2:-6.12}" "${3:-${SCRIPT_DIR}/kernel/config-minimal}" "${4:-}"
+        ;;
+    rootfs)
+        bash "${SCRIPT_DIR}/build-rootfs.sh" "${2:-busybox}" "${3:-}"
+        ;;
+    toolfs)
+        bash "${SCRIPT_DIR}/build-toolfs.sh" "${2:?}" "${3:?}" "${4:-5}" "${5:-}"
+        ;;
+    all)
+        bash "${SCRIPT_DIR}/build-kernel.sh" "${2:-6.12}" "${3:-${SCRIPT_DIR}/kernel/config-minimal}" "${4:-}"
+        bash "${SCRIPT_DIR}/build-rootfs.sh" busybox
+        ;;
+    *)
+        echo "Usage: bash build.sh {kernel|rootfs|toolfs|all} [args...]"
+        exit 1
+        ;;
+esac
