@@ -1,0 +1,12 @@
+[package]
+name = "adapter-sandboxd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+adapter-traits = { path = "../traits" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+tracing = { workspace = true }

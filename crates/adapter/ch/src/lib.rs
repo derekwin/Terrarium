@@ -1,0 +1,230 @@
+//! Cloud Hypervisor adapter — implements VmAdapter for CH.
+//!
+//! Wraps ch-client and the VM spawning logic (formerly in controller/vm.rs)
+//! into the standard VmAdapter trait.
+
+use adapter_traits::{Snapshot, VmAdapter, VmHandle, VmInfo, VmSpec};
+use async_trait::async_trait;
+use ch_client::ChClient;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[derive(Default)]
+pub struct ChAdapter;
+
+impl ChAdapter {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl VmAdapter for ChAdapter {
+    async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, String> {
+        ChVmHandle::spawn(spec).map(|h| Box::new(h) as Box<dyn VmHandle>)
+    }
+
+    async fn restore(
+        &self,
+        _snapshot: &Snapshot,
+        _spec: &VmSpec,
+    ) -> Result<Box<dyn VmHandle>, String> {
+        Err("CH restore not yet implemented via adapter".into())
+    }
+}
+
+/// A running CH VM.
+struct ChVmHandle {
+    name: String,
+    child: Child,
+    client: ChClient,
+    #[allow(dead_code)]
+    spec: VmSpec,
+}
+
+impl ChVmHandle {
+    fn spawn(spec: &VmSpec) -> Result<Self, String> {
+        let name = spec.name.clone();
+        let socket = format!("/tmp/terra-{}.sock", name);
+        let _ = std::fs::remove_file(&socket);
+
+        let mut args = ch_args(spec, &socket);
+
+        // Create qcow2 overlay if base_disk is set
+        if let Some(ref base) = spec.base_disk {
+            let overlay = create_overlay(&name, base, spec.disk_size_gb, &spec.tool_layers)?;
+            args.push("--disk".to_string());
+            args.push(format!("path={}", overlay));
+        }
+
+        tracing::info!(name = %name, socket = %socket, "Spawning CH VM");
+
+        let mut child = Command::new("/tmp/cloud-hypervisor-static")
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn CH: {}", e))?;
+
+        // Wait for socket
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if std::path::Path::new(&socket).exists() {
+                break;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                return Err(format!("socket timeout for {}", name));
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        let client = ChClient::new(&socket).with_timeout(Duration::from_secs(5));
+        tracing::info!(name = %name, "CH VM ready");
+
+        Ok(Self {
+            name,
+            child,
+            client,
+            spec: spec.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl VmHandle for ChVmHandle {
+    async fn info(&self) -> Result<VmInfo, String> {
+        let details = self
+            .client
+            .vm_info()
+            .map_err(|e| format!("vm.info: {}", e))?;
+        Ok(VmInfo {
+            state: details.state,
+            cpus: details
+                .config
+                .as_ref()
+                .and_then(|c| c.cpus.as_ref())
+                .map(|c| c.boot),
+            memory_mb: details.memory_actual_size.map(|s| s / 1024 / 1024),
+        })
+    }
+
+    async fn resize(&self, cpu: Option<u32>, memory: Option<u64>) -> Result<(), String> {
+        self.client
+            .vm_resize(cpu.map(|c| c as u8), memory)
+            .map_err(|e| format!("vm.resize: {}", e))
+    }
+
+    async fn resize_disk(&self, disk_id: &str, size: u64) -> Result<(), String> {
+        self.client
+            .vm_resize_disk(disk_id, size)
+            .map_err(|e| format!("vm.resize-disk: {}", e))
+    }
+
+    async fn snapshot(&self) -> Result<Snapshot, String> {
+        let path = format!("/tmp/terra-snap-{}.bin", self.name);
+        self.client
+            .vm_snapshot(&path)
+            .map_err(|e| format!("vm.snapshot: {}", e))?;
+        Ok(Snapshot { path })
+    }
+
+    async fn shutdown(&self) -> Result<(), String> {
+        self.client
+            .vm_shutdown()
+            .map_err(|e| format!("vm.shutdown: {}", e))
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+}
+
+impl Drop for ChVmHandle {
+    fn drop(&mut self) {
+        let _ = self.client.vm_shutdown();
+        let _ = self.child.wait();
+        let socket = format!("/tmp/terra-{}.sock", self.name);
+        let _ = std::fs::remove_file(&socket);
+    }
+}
+
+fn ch_args(spec: &VmSpec, socket: &str) -> Vec<String> {
+    let mut args = vec![
+        "--api-socket".into(),
+        socket.into(),
+        "--kernel".into(),
+        spec.kernel.clone(),
+        "--cpus".into(),
+        format!("boot={},max={}", spec.boot_vcpus, spec.max_vcpus),
+    ];
+    if let Some(ref c) = spec.cmdline {
+        args.push("--cmdline".into());
+        args.push(c.clone());
+    }
+    if let Some(ref i) = spec.initramfs {
+        args.push("--initramfs".into());
+        args.push(i.clone());
+    }
+    if let Some(hotplug) = spec.hotplug_memory_gb {
+        args.push("--memory".into());
+        args.push(format!(
+            "size={}M,hotplug_method=virtio-mem,hotplug_size={}G",
+            spec.memory_mb, hotplug
+        ));
+    } else {
+        args.push("--memory".into());
+        args.push(format!("size={}M", spec.memory_mb));
+    }
+    for disk in &spec.disks {
+        args.push("--disk".into());
+        args.push(format!("path={}", disk));
+    }
+    args.push("--serial".into());
+    args.push("null".into());
+    args.push("--console".into());
+    args.push("off".into());
+    args
+}
+
+fn create_overlay(
+    name: &str,
+    base: &str,
+    size_gb: u64,
+    tool_layers: &[String],
+) -> Result<String, String> {
+    let state = "/tmp/terra-disks/vms";
+    let vm_dir = format!("{}/{}", state, name);
+    std::fs::create_dir_all(&vm_dir).map_err(|e| format!("mkdir {}: {}", vm_dir, e))?;
+
+    let overlay = format!("{}/overlay.qcow2", vm_dir);
+    if std::path::Path::new(&overlay).exists() {
+        return Ok(overlay);
+    }
+
+    let backing = tool_layers.last().map(|s| s.as_str()).unwrap_or(base);
+    let output = Command::new("qemu-img")
+        .args([
+            "create",
+            "-f",
+            "qcow2",
+            "-b",
+            backing,
+            "-F",
+            "qcow2",
+            &overlay,
+            &format!("{}G", size_gb),
+        ])
+        .output()
+        .map_err(|e| format!("qemu-img: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "qemu-img create: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(overlay)
+}

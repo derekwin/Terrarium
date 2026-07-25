@@ -8,6 +8,9 @@ members = [
     "crates/checkpoint",
     "crates/cli",
     "crates/mcp",
+    "crates/adapter/traits",
+    "crates/adapter/ch",
+    "crates/adapter/sandboxd",
 ]
 
 [workspace.package]

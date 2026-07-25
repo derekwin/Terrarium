@@ -1,0 +1,9 @@
+[package]
+name = "adapter-traits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+async-trait = "0.1"
