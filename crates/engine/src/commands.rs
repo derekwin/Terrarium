@@ -3,84 +3,9 @@
 //! Each function takes a `&mut VmManager` and a typed command payload,
 //! executes it, and returns a serializable response.
 
-use serde::{Deserialize, Serialize};
-
 use crate::manager::VmManager;
 use adapter_traits::{VmName, VmSpec};
-
-/// A command received from the client.
-#[derive(Debug, Deserialize)]
-pub struct Command {
-    pub command: String,
-
-    // create / info / resize / shutdown / kill
-    #[serde(default)]
-    pub name: Option<String>,
-
-    // create
-    #[serde(default)]
-    pub kernel: Option<String>,
-    #[serde(default)]
-    pub initramfs: Option<String>,
-    #[serde(default)]
-    pub disks: Vec<String>,
-    #[serde(default)]
-    pub cmdline: Option<String>,
-    #[serde(default)]
-    pub cpus: Option<u8>,
-    #[serde(default)]
-    pub max_cpus: Option<u8>,
-    #[serde(default)]
-    pub memory_mb: Option<u64>,
-    #[serde(default)]
-    pub hotplug_memory_gb: Option<u64>,
-    #[serde(default)]
-    pub max_memory_mb: Option<u64>,
-
-    // snapshot / restore
-    #[serde(default)]
-    pub snapshot_path: Option<String>,
-    #[serde(default)]
-    pub base_disk: Option<String>,
-    #[serde(default)]
-    pub disk_size_gb: Option<u64>,
-
-    // resize
-    #[serde(default)]
-    pub memory_bytes: Option<u64>,
-}
-
-/// Response sent back to the client.
-#[derive(Debug, Serialize)]
-pub struct Response {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-impl Response {
-    pub fn ok(data: serde_json::Value) -> Self {
-        Self {
-            status: "ok".into(),
-            data: Some(data),
-            error: None,
-        }
-    }
-
-    pub fn ok_msg(msg: &str) -> Self {
-        Self::ok(serde_json::json!({"message": msg}))
-    }
-
-    pub fn err(error: impl Into<String>) -> Self {
-        Self {
-            status: "error".into(),
-            data: None,
-            error: Some(error.into()),
-        }
-    }
-}
+pub use terrarium_protocol::{Command, Response};
 
 /// Execute a command against the given VM manager.
 pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {

@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::commands::{execute, Command};
 use crate::manager::VmManager;
+use terrarium_protocol::Response;
 
 /// Maximum size of a single JSON command line (64 KB).
 const MAX_COMMAND_LINE: usize = 64 * 1024;
@@ -74,7 +75,7 @@ async fn handle_client(stream: UnixStream, manager: &Arc<Mutex<VmManager>>) {
     let cmd: Command = match serde_json::from_str(line.trim()) {
         Ok(c) => c,
         Err(e) => {
-            let resp = crate::commands::Response::err(format!("Invalid JSON: {}", e));
+            let resp = Response::err(format!("Invalid JSON: {}", e));
             let json = serde_json::to_string(&resp).unwrap_or_default();
             let _ = writer_half
                 .write_all(format!("{}\n", json).as_bytes())

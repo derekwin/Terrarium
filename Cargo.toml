@@ -12,6 +12,7 @@ members = [
     "crates/adapter/openshell",
     "crates/network",
     "crates/overlay",
+    "crates/protocol",
 ]
 
 [workspace.package]

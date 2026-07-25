@@ -24,9 +24,16 @@ class Vm:
         """Query VM state and resource usage."""
         return self._client.vm_info(self.name)
 
-    def resize(self, *, cpus: int | None = None, memory_bytes: int | None = None) -> dict:
+    def resize(
+        self,
+        *,
+        cpus: int | None = None,
+        memory_bytes: int | None = None,
+    ) -> dict:
         """Resize CPU or memory online."""
-        return self._client.vm_resize(self.name, cpus=cpus, memory_bytes=memory_bytes)
+        return self._client.vm_resize(
+            self.name, cpus=cpus, memory_bytes=memory_bytes
+        )
 
     def shutdown(self) -> dict:
         """Gracefully shut down the VM. Overlay disk is kept."""
@@ -40,10 +47,10 @@ class Vm:
         """Shut down and delete the overlay disk permanently."""
         return self._client.vm_destroy(self.name)
 
-    def __enter__(self) -> Vm:
+    def __enter__(self) -> "Vm":
         return self
 
-    def __exit__(self, *args) -> None:
+    def __exit__(self, *args: object) -> None:
         self.shutdown()
 
 
@@ -58,7 +65,6 @@ def create(
     memory_mb: int = 512,
     max_memory_mb: int | None = None,
     base_disk: str | None = None,
-    tool_layers: list[str] | None = None,
     disk_size_gb: int = 20,
     client: TerraClient | None = None,
 ) -> Vm:
@@ -69,7 +75,6 @@ def create(
         kernel: Path to kernel image (bzImage).
         initramfs: Path to initramfs cpio archive.
         base_disk: Base qcow2 for overlay (shared read-only).
-        tool_layers: Tool qcow2 layers stacked base→outer.
     """
     if client is None:
         client = TerraClient()
@@ -83,7 +88,6 @@ def create(
         memory_mb=memory_mb,
         max_memory_mb=max_memory_mb,
         base_disk=base_disk,
-        tool_layers=tool_layers,
         disk_size_gb=disk_size_gb,
     )
     if resp.get("status") != "ok":
@@ -101,5 +105,7 @@ def list_vms(client: TerraClient | None = None) -> list[Vm]:
         raise RuntimeError(f"VM list failed: {resp.get('error', resp)}")
     vms = []
     for item in resp.get("data", {}).get("vms", []):
-        vms.append(Vm(name=item["name"], client=client, pid=item.get("pid")))
+        vms.append(
+            Vm(name=item["name"], client=client, pid=item.get("pid"))
+        )
     return vms

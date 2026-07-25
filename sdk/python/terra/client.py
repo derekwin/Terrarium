@@ -3,9 +3,10 @@
 Communicates over a Unix domain socket with newline-delimited JSON.
 """
 
+from __future__ import annotations
+
 import json
 import socket
-import os
 
 
 class TerraClient:
@@ -49,7 +50,6 @@ class TerraClient:
         memory_mb: int = 512,
         max_memory_mb: int | None = None,
         base_disk: str | None = None,
-        tool_layers: list[str] | None = None,
         disk_size_gb: int = 20,
     ) -> dict:
         """Create a new VM."""
@@ -65,8 +65,6 @@ class TerraClient:
             cmd["max_memory_mb"] = max_memory_mb
         if base_disk:
             cmd["base_disk"] = base_disk
-        if tool_layers:
-            cmd["tool_layers"] = tool_layers
         cmd["disk_size_gb"] = disk_size_gb
         return self._send(cmd)
 
@@ -78,7 +76,13 @@ class TerraClient:
         """Get VM details."""
         return self._send({"command": "info", "name": name})
 
-    def vm_resize(self, name: str, *, cpus: int | None = None, memory_bytes: int | None = None) -> dict:
+    def vm_resize(
+        self,
+        name: str,
+        *,
+        cpus: int | None = None,
+        memory_bytes: int | None = None,
+    ) -> dict:
         """Resize VM resources."""
         cmd = {"command": "resize", "name": name}
         if cpus is not None:
@@ -98,40 +102,3 @@ class TerraClient:
     def vm_destroy(self, name: str) -> dict:
         """Destroy a VM and its overlay disk."""
         return self._send({"command": "destroy", "name": name})
-
-    # Sandbox operations (via sandboxd adapter)
-
-    def sandbox_exec(
-        self,
-        args: list[str],
-        *,
-        work_dir: str | None = None,
-        env: dict[str, str] | None = None,
-        memory_mb: int | None = None,
-        cpu_shares: int | None = None,
-    ) -> dict:
-        """Execute a command inside a sandbox."""
-        cmd: dict = {"command": "exec", "args": args}
-        if work_dir:
-            cmd["work_dir"] = work_dir
-        if env:
-            cmd["env"] = env
-        if memory_mb or cpu_shares:
-            cmd["limits"] = {}
-            if memory_mb:
-                cmd["limits"]["memory_mb"] = memory_mb
-            if cpu_shares:
-                cmd["limits"]["cpu_shares"] = cpu_shares
-        return self._send(cmd)
-
-    def sandbox_read_file(self, path: str) -> dict:
-        """Read a file from inside the sandbox."""
-        return self._send({"command": "read_file", "path": path})
-
-    def sandbox_write_file(self, path: str, content: str) -> dict:
-        """Write a file into the sandbox."""
-        return self._send({"command": "write_file", "path": path, "content": content})
-
-    def sandbox_list_dir(self, path: str = ".") -> dict:
-        """List directory contents inside the sandbox."""
-        return self._send({"command": "list_dir", "path": path})

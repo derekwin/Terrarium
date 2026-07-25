@@ -6,6 +6,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
+use terrarium_protocol::Command;
+
 const ENGINE_SOCKET: &str = "/tmp/terra.sock";
 const SERVER_NAME: &str = "terrarium-mcp";
 const SERVER_VERSION: &str = "0.1.0";
@@ -21,7 +23,7 @@ fn main() {
     loop {
         line.clear();
         match reader.read_line(&mut line) {
-            Ok(0) => break, // EOF
+            Ok(0) => break,
             Ok(_) => {}
             Err(e) => {
                 eprintln!("read error: {}", e);
@@ -34,7 +36,6 @@ fn main() {
         let request: serde_json::Value = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(_) => {
-                line.clear();
                 continue;
             }
         };
@@ -95,22 +96,19 @@ fn tools_list() -> Vec<serde_json::Value> {
         ),
         tool("terra_vm_list", "List all running VMs.", vec![]),
         tool(
-            "terra_sandbox_exec",
-            "Execute a command in a sandbox.",
-            vec![("args", "string", "Command and arguments (space-separated)")],
+            "terra_vm_info",
+            "Get info about a running VM.",
+            vec![("name", "string", "VM name")],
         ),
         tool(
-            "terra_file_read",
-            "Read a file from the sandbox filesystem.",
-            vec![("path", "string", "File path inside the sandbox")],
+            "terra_vm_shutdown",
+            "Gracefully shut down a VM.",
+            vec![("name", "string", "VM name")],
         ),
         tool(
-            "terra_file_write",
-            "Write a file to the sandbox filesystem.",
-            vec![
-                ("path", "string", "File path inside the sandbox"),
-                ("content", "string", "File content"),
-            ],
+            "terra_vm_destroy",
+            "Shut down and delete VM disk.",
+            vec![("name", "string", "VM name")],
         ),
     ]
 }
@@ -135,50 +133,43 @@ fn tool(name: &str, desc: &str, params: Vec<(&str, &str, &str)>) -> serde_json::
 fn call_tool(name: &str, args: &serde_json::Value) -> String {
     let cmd = match name {
         "terra_vm_create" => {
-            let mut c = serde_json::json!({"command": "create"});
-            if let Some(v) = args.get("name") {
-                c["name"] = v.clone();
+            let mut c = Command::create(
+                args.get("name").and_then(|a| a.as_str()).unwrap_or(""),
+                args.get("kernel").and_then(|a| a.as_str()).unwrap_or(""),
+            );
+            if let Some(v) = args.get("cpus").and_then(|a| a.as_u64()) {
+                c = c.with_cpus(v as u8);
             }
-            if let Some(v) = args.get("kernel") {
-                c["kernel"] = v.clone();
+            if let Some(v) = args.get("memory_mb").and_then(|a| a.as_u64()) {
+                c = c.with_memory_mb(v);
             }
-            if let Some(v) = args.get("initramfs") {
-                c["initramfs"] = v.clone();
+            if let Some(v) = args.get("initramfs").and_then(|a| a.as_str()) {
+                c = c.with_initramfs(v);
             }
-            if let Some(v) = args.get("cpus") {
-                c["cpus"] = v.clone();
-            }
-            if let Some(v) = args.get("memory_mb") {
-                c["memory_mb"] = v.clone();
-            }
-            if let Some(v) = args.get("rootfs_disk") {
-                c["base_disk"] = v.clone();
+            if let Some(v) = args.get("rootfs_disk").and_then(|a| a.as_str()) {
+                c = c.with_base_disk(v);
             }
             send_to_engine(&c)
         }
-        "terra_vm_list" => send_to_engine(&serde_json::json!({"command": "list"})),
-        "terra_sandbox_exec" => {
-            let raw = args.get("args").and_then(|a| a.as_str()).unwrap_or("");
-            let parts: Vec<&str> = raw.split_whitespace().collect();
-            send_to_engine(&serde_json::json!({"command": "exec", "args": parts}))
+        "terra_vm_list" => send_to_engine(&Command::new("list")),
+        "terra_vm_info" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            send_to_engine(&Command::new("info").with_name(name))
         }
-        "terra_file_read" => {
-            let path = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
-            send_to_engine(&serde_json::json!({"command": "file_read", "file_path": path}))
+        "terra_vm_shutdown" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            send_to_engine(&Command::new("shutdown").with_name(name))
         }
-        "terra_file_write" => {
-            let path = args.get("path").and_then(|p| p.as_str()).unwrap_or("");
-            let content = args.get("content").and_then(|c| c.as_str()).unwrap_or("");
-            send_to_engine(
-                &serde_json::json!({"command": "file_write", "file_path": path, "file_content": content}),
-            )
+        "terra_vm_destroy" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            send_to_engine(&Command::new("destroy").with_name(name))
         }
-        _ => "Unknown tool".to_string(),
+        _ => r#"{"status":"error","error":"unknown tool"}"#.to_string(),
     };
     cmd
 }
 
-fn send_to_engine(cmd: &serde_json::Value) -> String {
+fn send_to_engine(cmd: &Command) -> String {
     match UnixStream::connect(ENGINE_SOCKET) {
         Ok(mut stream) => {
             let json = serde_json::to_string(cmd).unwrap_or_default();
@@ -189,11 +180,11 @@ fn send_to_engine(cmd: &serde_json::Value) -> String {
             if reader.read_line(&mut line).is_ok() {
                 line.trim().to_string()
             } else {
-                r#"{"status":"error","message":"no response from engine"}"#.to_string()
+                r#"{"status":"error","error":"no response from engine"}"#.to_string()
             }
         }
         Err(e) => format!(
-            r#"{{"status":"error","message":"engine unavailable: {}"}}"#,
+            r#"{{"status":"error","error":"engine unavailable: {}"}}"#,
             e
         ),
     }

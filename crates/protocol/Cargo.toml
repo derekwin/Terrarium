@@ -1,5 +1,5 @@
 [package]
-name = "terra-mcp"
+name = "terrarium-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,6 +7,3 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = "0.3"
-terrarium-protocol = { path = "../protocol" }

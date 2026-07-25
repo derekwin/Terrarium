@@ -8,3 +8,4 @@ license.workspace = true
 clap = { version = "4", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+terrarium-protocol = { path = "../protocol" }

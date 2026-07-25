@@ -197,6 +197,7 @@ dependencies = [
  "overlay",
  "serde",
  "serde_json",
+ "terrarium-protocol",
  "thiserror",
  "tokio",
  "tracing",
@@ -546,6 +547,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "terrarium-protocol",
 ]
 
 [[package]]
@@ -554,6 +556,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "terrarium-protocol",
  "tracing",
  "tracing-subscriber",
 ]
@@ -564,6 +567,14 @@ version = "0.1.0"
 dependencies = [
  "adapter-traits",
  "tracing",
+]
+
+[[package]]
+name = "terrarium-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

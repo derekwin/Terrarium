@@ -7,22 +7,20 @@ Usage:
     vm = terra.vm.create("demo", kernel="target/guest/vmlinux.bin",
                          initramfs="target/guest/alpine-python.cpio")
 
-    # Create a sandbox inside the VM
-    sb = terra.sandbox.create("agent-1", tools=["python"])
+    # Query VM info
+    info = vm.info()
 
-    # Execute commands
-    result = sb.exec("python3", "-c", "print(2 ** 10)")
-    print(result.stdout)  # 1024
-
-    # Read agent output files
-    content = sb.read_file("/home/agent/output.txt")
+    # Resize VM
+    vm.resize(cpus=4)
 
     # Cleanup
     vm.shutdown()
+
+    # List all VMs
+    vms = terra.vm.list_vms()
 """
 
 from .client import TerraClient
 from . import vm
-from . import sandbox
 
-__all__ = ["TerraClient", "vm", "sandbox"]
+__all__ = ["TerraClient", "vm"]

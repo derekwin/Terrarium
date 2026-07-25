@@ -6,6 +6,8 @@ use clap::{Parser, Subcommand};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
+use terrarium_protocol::{Command, Response};
+
 const DEFAULT_SOCKET: &str = "/tmp/terra.sock";
 
 #[derive(Parser)]
@@ -56,24 +58,6 @@ enum Commands {
     Destroy {
         name: String,
     },
-    Exec {
-        args: Vec<String>,
-        #[arg(long)]
-        memory_mb: Option<u64>,
-    },
-    /// Read a file from inside the sandbox.
-    FileRead {
-        path: String,
-    },
-    /// Write content to a file inside the sandbox.
-    FileWrite {
-        path: String,
-        content: String,
-    },
-    /// List files inside the sandbox.
-    FileList {
-        path: Option<String>,
-    },
 }
 
 fn main() {
@@ -89,109 +73,92 @@ fn main() {
             rootfs_disk,
             disk_size,
         } => {
-            let mut cmd = serde_json::json!({
-                "command": "create", "name": name, "kernel": kernel,
-                "cpus": cpus, "memory_mb": memory, "disk_size_gb": disk_size,
-            });
+            let mut cmd = Command::create(&name, &kernel)
+                .with_cpus(cpus)
+                .with_memory_mb(memory)
+                .with_disk_size_gb(disk_size);
             if let Some(i) = initramfs {
-                cmd["initramfs"] = serde_json::json!(i);
+                cmd = cmd.with_initramfs(i);
             }
             if let Some(m) = max_cpus {
-                cmd["max_cpus"] = serde_json::json!(m);
+                cmd = cmd.with_max_cpus(m);
             }
             if let Some(b) = rootfs_disk {
-                cmd["base_disk"] = serde_json::json!(b);
+                cmd = cmd.with_base_disk(b);
             }
             print_response(send(&cli.socket, &cmd));
         }
-        Commands::List => print_response(send(&cli.socket, &serde_json::json!({"command":"list"}))),
-        Commands::Info { name } => print_response(send(
-            &cli.socket,
-            &serde_json::json!({"command":"info","name":name}),
-        )),
+        Commands::List => {
+            print_response(send(&cli.socket, &Command::new("list")));
+        }
+        Commands::Info { name } => {
+            print_response(send(&cli.socket, &Command::new("info").with_name(name)));
+        }
         Commands::Resize {
             name,
             cpus,
             memory_bytes,
         } => {
-            let mut cmd = serde_json::json!({"command":"resize","name":name});
+            let mut cmd = Command::new("resize").with_name(name);
             if let Some(c) = cpus {
-                cmd["cpus"] = serde_json::json!(c);
+                cmd = cmd.with_cpus(c);
             }
             if let Some(m) = memory_bytes {
-                cmd["memory_bytes"] = serde_json::json!(m);
+                cmd = cmd.with_memory_bytes(m);
             }
             print_response(send(&cli.socket, &cmd));
         }
-        Commands::Shutdown { name } => print_response(send(
-            &cli.socket,
-            &serde_json::json!({"command":"shutdown","name":name}),
-        )),
-        Commands::Kill { name } => print_response(send(
-            &cli.socket,
-            &serde_json::json!({"command":"kill","name":name}),
-        )),
-        Commands::Destroy { name } => print_response(send(
-            &cli.socket,
-            &serde_json::json!({"command":"destroy","name":name}),
-        )),
-        Commands::Exec { args, memory_mb } => {
-            let mut cmd = serde_json::json!({"command":"exec","args":args});
-            if let Some(mb) = memory_mb {
-                cmd["limits"] = serde_json::json!({"memory_mb": mb});
-            }
-            print_response(send(&cli.socket, &cmd));
+        Commands::Shutdown { name } => {
+            print_response(send(&cli.socket, &Command::new("shutdown").with_name(name)));
         }
-        Commands::FileRead { path } => {
-            print_response(send(
-                &cli.socket,
-                &serde_json::json!({"command":"file_read","file_path":path}),
-            ));
+        Commands::Kill { name } => {
+            print_response(send(&cli.socket, &Command::new("kill").with_name(name)));
         }
-        Commands::FileWrite { path, content } => {
-            print_response(send(
-                &cli.socket,
-                &serde_json::json!({"command":"file_write","file_path":path,"file_content":content}),
-            ));
-        }
-        Commands::FileList { path } => {
-            let path = path.unwrap_or_else(|| ".".to_string());
-            print_response(send(
-                &cli.socket,
-                &serde_json::json!({"command":"file_list","file_path":path}),
-            ));
+        Commands::Destroy { name } => {
+            print_response(send(&cli.socket, &Command::new("destroy").with_name(name)));
         }
     }
 }
 
-fn send(socket: &str, cmd: &serde_json::Value) -> serde_json::Value {
-    let mut stream = UnixStream::connect(socket).unwrap_or_else(|e| {
-        eprintln!(
-            "ERROR: Cannot connect to engine daemon at {}: {}",
-            socket, e
-        );
-        std::process::exit(1);
-    });
-    let json = serde_json::to_string(cmd).unwrap();
-    writeln!(stream, "{}", json).unwrap();
-    stream.flush().unwrap();
-    let mut reader = BufReader::new(&stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    serde_json::from_str(&line).unwrap_or_else(|_| serde_json::json!({"status":"error"}))
+fn send(socket: &str, cmd: &Command) -> String {
+    match UnixStream::connect(socket) {
+        Ok(mut stream) => {
+            let json = serde_json::to_string(cmd).unwrap_or_default();
+            let _ = writeln!(stream, "{}", json);
+            let _ = stream.flush();
+            let mut reader = BufReader::new(&stream);
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_ok() {
+                line.trim().to_string()
+            } else {
+                r#"{"status":"error","error":"no response from engine"}"#.to_string()
+            }
+        }
+        Err(e) => format!(
+            r#"{{"status":"error","error":"engine unavailable: {}"}}"#,
+            e
+        ),
+    }
 }
 
-fn print_response(resp: serde_json::Value) {
-    if resp["status"].as_str() != Some("ok") {
-        eprintln!(
-            "ERROR: {}",
-            resp["message"].as_str().unwrap_or("unknown error")
-        );
-        std::process::exit(1);
-    }
-    if let Some(data) = resp.get("data") {
-        println!("{}", serde_json::to_string_pretty(data).unwrap());
-    } else if let Some(msg) = resp.get("message").and_then(|m| m.as_str()) {
-        println!("{}", msg);
+fn print_response(raw: String) {
+    match serde_json::from_str::<Response>(&raw) {
+        Ok(resp) => {
+            if resp.is_ok() {
+                if let Some(data) = &resp.data {
+                    println!("{}", serde_json::to_string_pretty(data).unwrap_or_default());
+                } else {
+                    println!("OK");
+                }
+            } else {
+                eprintln!(
+                    "ERROR: {}",
+                    resp.error.as_deref().unwrap_or("unknown error")
+                );
+            }
+        }
+        Err(_) => {
+            eprintln!("ERROR: invalid response: {}", raw);
+        }
     }
 }
