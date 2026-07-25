@@ -9,6 +9,7 @@ mod error;
 
 use adapter_traits::{Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmSpec};
 use async_trait::async_trait;
+use overlay::{OverlayManager, OverlaySpec};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -76,7 +77,12 @@ impl ChVmHandle {
         let mut args = ch_args(spec, &socket);
 
         if let Some(ref base) = spec.base_disk {
-            let overlay = create_overlay(&name, base, spec.disk_size_gb, &spec.tool_layers)?;
+            let overlay_spec = OverlaySpec::new(&name, base).disk_size_gb(spec.disk_size_gb);
+            let overlay_spec = spec
+                .tool_layers
+                .iter()
+                .fold(overlay_spec, |os, t| os.tool_layer(t));
+            let overlay = OverlayManager::create_or_reuse(&overlay_spec)?;
             args.push("--disk".to_string());
             args.push(format!("path={}", overlay));
         }
@@ -236,44 +242,4 @@ fn ch_args(spec: &VmSpec, socket: &str) -> Vec<String> {
     args.push("--console".into());
     args.push("off".into());
     args
-}
-
-fn create_overlay(
-    name: &str,
-    base: &str,
-    size_gb: u64,
-    tool_layers: &[String],
-) -> Result<String, String> {
-    let state = "/tmp/terra-disks/vms";
-    let vm_dir = format!("{}/{}", state, name);
-    std::fs::create_dir_all(&vm_dir).map_err(|e| format!("mkdir {}: {}", vm_dir, e))?;
-
-    let overlay = format!("{}/overlay.qcow2", vm_dir);
-    if std::path::Path::new(&overlay).exists() {
-        return Ok(overlay);
-    }
-
-    let backing = tool_layers.last().map(|s| s.as_str()).unwrap_or(base);
-    let output = Command::new("qemu-img")
-        .args([
-            "create",
-            "-f",
-            "qcow2",
-            "-b",
-            backing,
-            "-F",
-            "qcow2",
-            &overlay,
-            &format!("{}G", size_gb),
-        ])
-        .output()
-        .map_err(|e| format!("qemu-img: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "qemu-img create: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(overlay)
 }

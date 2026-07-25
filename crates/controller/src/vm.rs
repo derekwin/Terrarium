@@ -77,72 +77,17 @@ fn read_child_stderr(child: &mut Child) -> String {
         .unwrap_or_default()
 }
 
-/// Create a qcow2 overlay disk. The backing file is the last tool layer
-/// (if any), otherwise the base disk. This enables composable tool stacks:
-/// base → tool-python → tool-nodejs → user overlay.
+/// Create a qcow2 overlay disk via the overlay crate.
 fn create_qcow2_overlay(spec: &VmSpec) -> std::result::Result<(String, bool), VmError> {
-    let name = &spec.name;
     let base = spec.base_disk.as_ref().unwrap();
-
-    // Determine backing file: last tool layer, or base if no tools
-    let backing = spec.tool_layers.last().unwrap_or(base);
-    let tool_desc = if spec.tool_layers.is_empty() {
-        "base".to_string()
-    } else {
-        spec.tool_layers
-            .iter()
-            .map(|t| {
-                std::path::Path::new(t)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-            })
-            .collect::<Vec<_>>()
-            .join("+")
-    };
-
-    // Persistent overlay path: /tmp/terra-disks/vms/{name}/overlay.qcow2
-    // (production: configurable base path via TERRA_STATE_DIR env var)
-    let state_dir = std::env::var("TERRA_STATE_DIR")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/tmp/terra-disks/vms".to_string());
-    let vm_dir = format!("{}/{}", state_dir, name);
-    std::fs::create_dir_all(&vm_dir)
-        .map_err(|e| VmError::SetupFailed(format!("Cannot create VM dir {}: {}", vm_dir, e)))?;
-
-    let overlay = format!("{}/overlay.qcow2", vm_dir);
-    let already_exists = std::path::Path::new(&overlay).exists();
-
-    if !already_exists {
-        let output = std::process::Command::new("qemu-img")
-            .args([
-                "create",
-                "-f",
-                "qcow2",
-                "-b",
-                backing,
-                "-F",
-                "qcow2",
-                &overlay,
-                &format!("{}G", spec.disk_size_gb),
-            ])
-            .output()
-            .map_err(|e| VmError::SetupFailed(format!("qemu-img not found: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(VmError::SetupFailed(format!(
-                "qemu-img create overlay failed: {}",
-                stderr.trim()
-            )));
-        }
-        tracing::info!(%overlay, %backing, tools = %tool_desc, size_gb = spec.disk_size_gb, "Created qcow2 overlay disk");
-    } else {
-        tracing::info!(%overlay, "Reusing existing overlay disk");
+    let mut ospec = overlay::OverlaySpec::new(&spec.name, base).disk_size_gb(spec.disk_size_gb);
+    for tool in &spec.tool_layers {
+        ospec = ospec.tool_layer(tool);
     }
-
-    Ok((overlay, already_exists))
+    let already_exists = overlay::OverlayManager::exists(&ospec);
+    let path =
+        overlay::OverlayManager::create_or_reuse(&ospec).map_err(VmError::SetupFailed)?;
+    Ok((path, already_exists))
 }
 
 /// Take a CH VM snapshot.
