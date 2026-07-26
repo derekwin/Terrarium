@@ -1,6 +1,7 @@
 //! Sandbox execution: spawn and capture process output.
 
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -22,6 +23,7 @@ pub fn exec_isolated(program: &str, args: &[String], work_dir: &str) -> Result<E
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| format!("spawn failed: {}", e))?;
 
@@ -61,7 +63,10 @@ pub fn exec_isolated(program: &str, args: &[String], work_dir: &str) -> Result<E
         Ok(Ok(s)) => s,
         Ok(Err(e)) => return Err(format!("wait failed: {}", e)),
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
+            // SAFETY: pid is a valid process ID from Command::spawn().
+            // killpg(-pid, SIGKILL) kills the entire process group,
+            // preventing orphaned grandchild processes.
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
             return Err(format!("command timed out after {}s", EXEC_TIMEOUT_SECS));
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {

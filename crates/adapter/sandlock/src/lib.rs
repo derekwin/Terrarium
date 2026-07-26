@@ -12,6 +12,7 @@ use adapter_traits::{
 };
 use async_trait::async_trait;
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -119,20 +120,22 @@ fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult
         args.push(max_procs.to_string());
     }
 
-    // Environment variables.
-    // NOTE: credentials in --env flags are visible in /proc/<pid>/cmdline.
-    // For production, agents should read secrets from files or the tool
-    // should support reading them from environment variables.
+    // Environment: pass via process environment instead of --env argv
+    // flags — argv is world-readable via /proc/<pid>/cmdline.
+    // env_clear + whitelist replaces sandlock's --clean-env: the child
+    // inherits exactly the requested variables and nothing else.
+    // NOTE: assumes sandlock passes its own environment through to the
+    // confined process; verify against the real sandlock binary.
     let mut process = Command::new("sandlock");
-    for (k, v) in &handle.env {
-        args.push("--env".into());
-        args.push(format!("{}={}", k, v));
-        process.env(k, v);
-    }
-
-    // Clean environment by default
     if !handle.env.is_empty() {
-        args.push("--clean-env".into());
+        process.env_clear();
+        // sandlock itself still needs PATH to resolve the target binary.
+        if let Ok(path) = std::env::var("PATH") {
+            process.env("PATH", path);
+        }
+        for (k, v) in &handle.env {
+            process.env(k, v);
+        }
     }
 
     // Command and its args
@@ -153,44 +156,59 @@ fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| AdapterError::internal(format!("sandlock spawn: {}", e)))?;
 
-    // Take pipes before moving child into the wait thread.
-    let stdout_pipe = child.stdout.take().unwrap();
-    let stderr_pipe = child.stderr.take().unwrap();
+    // Drain pipes concurrently BEFORE waiting — a child writing more than
+    // the 64KB pipe buffer would otherwise block on write and never exit.
+    let stdout_rx = spawn_pipe_reader(child.stdout.take().unwrap());
+    let stderr_rx = spawn_pipe_reader(child.stderr.take().unwrap());
 
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = tx.send(child.wait());
-    });
-
-    let exit_status = match rx.recv_timeout(Duration::from_secs(60)) {
-        Ok(Ok(s)) => s,
-        _ => {
-            return Err(AdapterError::timeout(
-                "sandlock command timed out after 60s",
-            ))
+    // Poll try_wait so we keep the Child handle for a race-free kill
+    // (no kill-by-pid, no detached wait thread, no zombie on timeout).
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                // SAFETY: pid is from Command::spawn(). Negative pid kills
+                // the entire process group, preventing orphaned grandchildren.
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                let _ = child.wait();
+                return Err(AdapterError::timeout(
+                    "sandlock command timed out after 60s",
+                ));
+            }
+            Err(e) => return Err(AdapterError::internal(format!("wait failed: {}", e))),
         }
     };
 
-    /// Max output per pipe for sandbox commands.
-    const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
-
-    let mut stdout_buf = Vec::new();
-    let mut stderr_buf = Vec::new();
-    stdout_pipe
-        .take(MAX_OUTPUT_BYTES as u64)
-        .read_to_end(&mut stdout_buf)
-        .ok();
-    stderr_pipe
-        .take(MAX_OUTPUT_BYTES as u64)
-        .read_to_end(&mut stderr_buf)
-        .ok();
+    let stdout_buf = stdout_rx.recv().unwrap_or_default();
+    let stderr_buf = stderr_rx.recv().unwrap_or_default();
 
     Ok(ExecResult {
         stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
         stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
         exit_code: exit_status.code().unwrap_or(-1),
     })
+}
+
+/// Max output captured per pipe for sandbox commands.
+const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Spawn a thread that drains a pipe into a capped buffer.
+fn spawn_pipe_reader(pipe: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        pipe.take(MAX_OUTPUT_BYTES as u64)
+            .read_to_end(&mut buf)
+            .ok();
+        let _ = tx.send(buf);
+    });
+    rx
 }

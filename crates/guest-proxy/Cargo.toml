@@ -6,6 +6,7 @@ license.workspace = true
 
 # Phase 1: basic exec. Phase 2+ will add nix for namespace ops.
 [dependencies]
+libc = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
