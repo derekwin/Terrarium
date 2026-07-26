@@ -107,6 +107,12 @@ impl Command {
         self
     }
 
+    /// Set the maximum memory in MB (enables memory hotplug up to this size).
+    pub fn with_max_memory_mb(mut self, max: u64) -> Self {
+        self.max_memory_mb = Some(max);
+        self
+    }
+
     /// Builder: set memory in MB.
     pub fn with_memory_mb(mut self, mb: u64) -> Self {
         self.memory_mb = Some(mb);

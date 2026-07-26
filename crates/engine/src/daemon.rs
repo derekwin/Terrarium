@@ -38,7 +38,12 @@ pub async fn run(socket_path: &str) -> std::io::Result<()> {
     // Handle SIGTERM/SIGINT for graceful shutdown.
     let mgr_clone = Arc::clone(&manager);
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
         tracing::info!("Received shutdown signal, stopping all VMs");
         mgr_clone.lock().await.shutdown_all().await;
         std::process::exit(0);

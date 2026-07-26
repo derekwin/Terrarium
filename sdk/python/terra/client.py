@@ -9,6 +9,14 @@ import json
 import socket
 
 
+class TerraError(Exception):
+    """Raised when the engine daemon returns an error response."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
 class TerraClient:
     """Client for the terrarium engine daemon."""
 
@@ -16,7 +24,7 @@ class TerraClient:
         self.socket_path = socket_path
 
     def _send(self, cmd: dict) -> dict:
-        """Send a JSON command and return the parsed response."""
+        """Send a JSON command and return the parsed response data."""
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(30)
         try:
@@ -35,7 +43,10 @@ class TerraClient:
                     sock.close()
                     raise TimeoutError("engine daemon did not respond within timeout") from None
 
-            return json.loads(response.decode())
+            resp = json.loads(response.decode())
+            if resp.get("status") == "error":
+                raise TerraError(resp.get("error", "unknown error"))
+            return resp.get("data", resp)
         finally:
             sock.close()
 

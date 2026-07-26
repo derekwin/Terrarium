@@ -31,6 +31,8 @@ enum Commands {
         cpus: u8,
         #[arg(long)]
         max_cpus: Option<u8>,
+        #[arg(long)]
+        max_memory: Option<u64>,
         #[arg(long, default_value = "512")]
         memory: u64,
         #[arg(long)]
@@ -69,6 +71,7 @@ fn main() {
             initramfs,
             cpus,
             max_cpus,
+            max_memory,
             memory,
             rootfs_disk,
             disk_size,
@@ -82,6 +85,9 @@ fn main() {
             }
             if let Some(m) = max_cpus {
                 cmd = cmd.with_max_cpus(m);
+            }
+            if let Some(m) = max_memory {
+                cmd = cmd.with_max_memory_mb(m);
             }
             if let Some(b) = rootfs_disk {
                 cmd = cmd.with_base_disk(b);

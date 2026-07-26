@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from .client import TerraClient
+from .client import TerraClient, TerraError
+
+__all__ = ["Vm", "create", "list_vms", "TerraError"]
 
 
 class Vm:
@@ -21,7 +23,7 @@ class Vm:
         return self._pid
 
     def info(self) -> dict:
-        """Query VM state and resource usage."""
+        """Query VM state and resource usage. Returns unwrapped data dict."""
         return self._client.vm_info(self.name)
 
     def resize(
@@ -75,6 +77,9 @@ def create(
         kernel: Path to kernel image (bzImage).
         initramfs: Path to initramfs cpio archive.
         base_disk: Base qcow2 for overlay (shared read-only).
+
+    Raises:
+        TerraError: If the engine returns an error.
     """
     if client is None:
         client = TerraClient()
@@ -90,21 +95,20 @@ def create(
         base_disk=base_disk,
         disk_size_gb=disk_size_gb,
     )
-    if resp.get("status") != "ok":
-        raise RuntimeError(f"VM create failed: {resp.get('error', resp)}")
-    data = resp.get("data", {})
-    return Vm(name=name, client=client, pid=data.get("pid"))
+    return Vm(name=name, client=client, pid=resp.get("pid"))
 
 
 def list_vms(client: TerraClient | None = None) -> list[Vm]:
-    """List all running VMs."""
+    """List all running VMs.
+
+    Raises:
+        TerraError: If the engine returns an error.
+    """
     if client is None:
         client = TerraClient()
     resp = client.vm_list()
-    if resp.get("status") != "ok":
-        raise RuntimeError(f"VM list failed: {resp.get('error', resp)}")
     vms = []
-    for item in resp.get("data", {}).get("vms", []):
+    for item in resp.get("vms", []):
         vms.append(
             Vm(name=item["name"], client=client, pid=item.get("pid"))
         )

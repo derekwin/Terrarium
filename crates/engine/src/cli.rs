@@ -149,15 +149,11 @@ pub fn print_response(cmd_name: &str, response: serde_json::Value) {
             println!("VM: {}", data["name"].as_str().unwrap_or("?"));
             println!("  PID:    {}", data["pid"].as_u64().unwrap_or(0));
             println!("  State:  {}", data["state"].as_str().unwrap_or("?"));
-            if let Some(cpus) = data["cpus"].as_object() {
-                println!(
-                    "  vCPUs:  boot={}, max={}",
-                    cpus["boot"].as_u64().unwrap_or(0),
-                    cpus["max"].as_u64().unwrap_or(0),
-                );
+            if let Some(cpus) = data["cpus"].as_u64() {
+                println!("  vCPUs:  {}", cpus);
             }
-            if let Some(mem) = data["memory"].as_u64() {
-                println!("  Memory: {} MB", mem / 1024 / 1024);
+            if let Some(mem) = data["memory_mb"].as_u64() {
+                println!("  Memory: {} MB", mem);
             }
         }
         _ => {

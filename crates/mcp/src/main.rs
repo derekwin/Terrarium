@@ -39,7 +39,12 @@ fn main() {
                 continue;
             }
         };
+        // JSON-RPC notifications have no "id" field — process but never respond.
+        let is_notification = request.get("id").is_none();
         let response = handle_request(&request);
+        if is_notification {
+            continue;
+        }
         println!("{}", serde_json::to_string(&response).unwrap_or_default());
         std::io::stdout().flush().ok();
     }
@@ -50,8 +55,6 @@ fn handle_request(req: &serde_json::Value) -> serde_json::Value {
     let method = req["method"].as_str().unwrap_or("");
 
     match method {
-        // JSON-RPC notifications have no "id" field — do not respond.
-        "" if id == serde_json::Value::Null => serde_json::Value::Null,
         "initialize" => jsonrpc_ok(
             id,
             &serde_json::json!({
@@ -100,6 +103,24 @@ fn tools_list() -> Vec<serde_json::Value> {
         tool(
             "terra_vm_info",
             "Get info about a running VM.",
+            vec![("name", "string", "VM name")],
+        ),
+        tool(
+            "terra_vm_resize",
+            "Resize VM CPU or memory online.",
+            vec![
+                ("name", "string", "VM name"),
+                ("cpus", "number", "Desired vCPU count (optional)"),
+                (
+                    "memory_bytes",
+                    "number",
+                    "Desired memory in bytes (optional)",
+                ),
+            ],
+        ),
+        tool(
+            "terra_vm_kill",
+            "Force-kill a VM (keep disk).",
             vec![("name", "string", "VM name")],
         ),
         tool(
@@ -161,6 +182,21 @@ fn call_tool(name: &str, args: &serde_json::Value) -> String {
         "terra_vm_shutdown" => {
             let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
             send_to_engine(&Command::new("shutdown").with_name(name))
+        }
+        "terra_vm_kill" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            send_to_engine(&Command::new("kill").with_name(name))
+        }
+        "terra_vm_resize" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            let mut c = Command::new("resize").with_name(name);
+            if let Some(v) = args.get("cpus").and_then(|a| a.as_u64()) {
+                c = c.with_cpus(v as u8);
+            }
+            if let Some(v) = args.get("memory_bytes").and_then(|a| a.as_u64()) {
+                c = c.with_memory_bytes(v);
+            }
+            send_to_engine(&c)
         }
         "terra_vm_destroy" => {
             let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
