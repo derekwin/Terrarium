@@ -28,6 +28,9 @@ pub struct ChAdapter {
     virtiofsd_binary: String,
     layer_dir: String,
     fs_root: String,
+    /// EROFS layer images already mounted (shared across VMs; layers are
+    /// immutable, mounts live for the daemon's lifetime).
+    mounted_layers: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl ChAdapter {
@@ -48,8 +51,92 @@ impl ChAdapter {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "/var/lib/terra/layers".into()),
             fs_root: format!("{}/fs", fs_base),
+            mounted_layers: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
+
+    /// Resolve a layer name to a usable lowerdir path.
+    ///
+    /// Resolution order: `<layer_dir>/<name>` directory first, then
+    /// `<layer_dir>/<name>.erofs` image (mounted on first use). EROFS
+    /// mounts are shared by all VMs and kept for the daemon's lifetime.
+    fn resolve_layer(&self, name: &str) -> Result<String, AdapterError> {
+        let dir = format!("{}/{}", self.layer_dir, name);
+        if std::path::Path::new(&dir).is_dir() {
+            return Ok(dir);
+        }
+        let image = format!("{}/{}.erofs", self.layer_dir, name);
+        if !std::path::Path::new(&image).exists() {
+            return Err(AdapterError::not_found(format!(
+                "layer '{}' not found under {} (neither directory nor .erofs image)",
+                name, self.layer_dir
+            )));
+        }
+        let mnt = format!("{}/layers-mnt/{}", self.fs_root, name);
+        // Already mounted? /proc/mounts is authoritative (survives
+        // daemon restarts; EROFS mounts are read-only so no marker file
+        // can be written into the mountpoint itself).
+        if is_mounted(&mnt) {
+            return Ok(mnt);
+        }
+        let mut set = self
+            .mounted_layers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if set.contains(name) {
+            return Ok(mnt);
+        }
+        std::fs::create_dir_all(&mnt).map_err(|e| format!("mkdir {}: {}", mnt, e))?;
+        mount_erofs(&image, &mnt)?;
+        set.insert(name.to_string());
+        Ok(mnt)
+    }
+}
+
+/// Whether `mnt` is an active mountpoint according to /proc/mounts.
+fn is_mounted(mnt: &str) -> bool {
+    std::fs::read_to_string("/proc/mounts")
+        .map(|c| c.lines().any(|l| l.split(' ').nth(1) == Some(mnt)))
+        .unwrap_or(false)
+}
+
+/// Mount an EROFS image read-only at `mnt`. Kernel loop mount when
+/// privileged, erofsfuse fallback otherwise.
+fn mount_erofs(image: &str, mnt: &str) -> Result<(), AdapterError> {
+    // Try kernel mount first (root path — best performance).
+    let kernel = Command::new("mount")
+        .args(["-o", "loop,ro", "-t", "erofs", image, mnt])
+        .output();
+    if let Ok(out) = kernel {
+        if out.status.success() {
+            tracing::info!(%image, %mnt, "EROFS layer mounted (kernel)");
+            return Ok(());
+        }
+    }
+    // Unprivileged fallback: erofsfuse.
+    let fuse_bin = std::env::var("TERRA_EROFSFUSE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "erofsfuse".into());
+    let out = Command::new(&fuse_bin)
+        .args([image, mnt])
+        .output()
+        .map_err(|e| {
+            format!(
+                "mount failed (need root) and erofsfuse not found: {}",
+                e
+            )
+        })?;
+    if !out.status.success() {
+        return Err(format!(
+            "erofsfuse {}: {}",
+            image,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+        .into());
+    }
+    tracing::info!(%image, %mnt, "EROFS layer mounted (erofsfuse)");
+    Ok(())
 }
 
 #[async_trait]
@@ -184,14 +271,8 @@ async fn compose_fs(
                 layer
             )));
         }
-        let p = format!("{}/{}", adapter.layer_dir, layer);
-        if !std::path::Path::new(&p).is_dir() {
-            return Err(AdapterError::not_found(format!(
-                "layer '{}' not found under {}",
-                layer, adapter.layer_dir
-            )));
-        }
-        lowers.push(p);
+        // Resolves plain dirs directly and mounts .erofs images on demand.
+        lowers.push(adapter.resolve_layer(layer)?);
     }
     // OverlayFS lowerdir is right-to-left priority: our layers list is
     // highest-priority-first, base last — join as-is.

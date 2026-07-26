@@ -417,6 +417,40 @@ def test_layered_boot() -> None:
     assert not (fs_root / "sdk-fs1").exists(), "fs work dir leaked"
 
 
+def test_layered_boot_erofs() -> None:
+    """EROFS image layers: built on the fly, mounted by the adapter."""
+    client = _state["client"]
+    if not _state.get("vfsd"):
+        print("SKIP test_layered_boot_erofs: no virtiofsd binary found")
+        return
+    if not shutil.which("mkfs.erofs"):
+        print("SKIP test_layered_boot_erofs: no mkfs.erofs")
+        return
+    layer_dir = Path(_state["state_dir"]) / "layers"
+    # build EROFS images from the dir layers, under distinct names
+    for src, name in ((layer_dir / "base", "ebase"), (layer_dir / "marker", "emarker")):
+        subprocess.run(
+            ["bash", "images/build-layer.sh", str(src), name, str(layer_dir)],
+            cwd=REPO, check=True, capture_output=True,
+        )
+    vm = create(
+        "sdk-fs2", str(KERNEL),
+        initramfs=str(IRFS_VIRTIOFS),
+        cpus=1, memory_mb=256,
+        layers=["emarker", "ebase"],
+        client=client,
+    )
+    _track("sdk-fs2")
+    assert vm.info()["state"] == "Running"
+    sup = _find_fs_supervisor("sdk-fs2")
+    assert sup, "fs supervisor not found"
+    ns_merged = Path(f"/proc/{sup}/root{_state['fs_root']}/sdk-fs2/merged")
+    assert (ns_merged / "usr/bin/hello.py").exists(), "EROFS marker layer missing"
+    assert (ns_merged / "bin/busybox").exists(), "EROFS base layer missing"
+    client.vm_destroy("sdk-fs2")
+    _state["created"].remove("sdk-fs2")
+
+
 # ---------------------------------------------------------------------------
 # Standalone runner
 # ---------------------------------------------------------------------------

@@ -35,5 +35,5 @@
 |---|---|---|
 | FS-M1 冷启动 | ~~裸目录层 + OverlayFS + virtiofsd + CH --fs + switch_root init；内核 VIRTIO_FS~~ ✅ 2026-07-26 完成：trait FsSpec、CH adapter 组合栈（unshare supervisor）、三端 layers 参数、e2e 9/9（真实 KVM） | VM 以组合层为 rootfs 启动 |
 | FS-M2 基准裁决 | DAX + cache=always；对比 qcow2 历史数据：启动时间、pip install 耗时、内存密度。**数据不赢不换默认** | docs/ 实测报告 |
-| FS-M3 EROFS 打包 | mkfs.erofs 工具链 + 层注册表（名称/版本/镜像） | 层镜像可构建可组合 |
+| FS-M3 EROFS 打包 | ~~mkfs.erofs 工具链 + 层注册表~~ ✅ 2026-07-26：`images/build-layer.sh`（LZ4，base 8.2M→5.3M）；adapter 按名解析 `<name>` 目录或 `<name>.erofs` 镜像并自动挂载（root 走内核 loop mount，非特权走 erofsfuse fallback，`/proc/mounts` 判重，层间共享、daemon 生命周期内不卸载）；e2e 10/10 | 层镜像可构建可组合可启动 |
 | FS-M4 预热池热启动 | vsock 通道 + guest-proxy mount 协议 + CH add-fs/remove-device + 内核 HOTPLUG_PCI_ACPI | 热分配任务层 < 100ms |
