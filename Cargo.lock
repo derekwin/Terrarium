@@ -38,6 +38,7 @@ version = "0.1.0"
 dependencies = [
  "adapter-traits",
  "async-trait",
+ "libc",
  "serde",
  "serde_json",
  "tracing",
@@ -49,6 +50,7 @@ version = "0.1.0"
 dependencies = [
  "adapter-traits",
  "async-trait",
+ "libc",
  "serde",
  "serde_json",
  "tracing",
@@ -235,6 +237,7 @@ dependencies = [
 name = "guest-proxy"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "tracing",
