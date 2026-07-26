@@ -97,6 +97,11 @@ CONFIG_INPUT_EVDEV=y
 # virtiofs rootfs (FS-M1): guest mounts host-shared layers via virtiofs
 CONFIG_FUSE_FS=y
 CONFIG_VIRTIO_FS=y
+# virtiofs DAX (FS-M2): map host page cache directly into the guest
+CONFIG_DAX=y
+CONFIG_ZONE_DEVICE=y
+CONFIG_FS_DAX=y
+CONFIG_FUSE_DAX=y
 CONFIG_VIRTIO_MEM=y
 CONFIG_VIRTIO_BALLOON=y
 

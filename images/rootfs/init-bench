@@ -1,0 +1,23 @@
+#!/bin/sh
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /newroot
+
+T0=$(awk '{print $1}' /proc/uptime)
+mount -t virtiofs rootfs /newroot || { echo "BENCH_FAIL mount rc=$?"; poweroff -f; }
+T1=$(awk '{print $1}' /proc/uptime)
+echo "BENCH mount_virtiofs: ${T0} -> ${T1}"
+
+T2=$(awk '{print $1}' /proc/uptime)
+COUNT=$(find /newroot -type f | wc -l)
+BYTES=$(find /newroot -type f -exec cat {} + 2>/dev/null | wc -c)
+T3=$(awk '{print $1}' /proc/uptime)
+echo "BENCH read_all_cold: files=$COUNT bytes=$BYTES ${T2} -> ${T3}"
+
+T4=$(awk '{print $1}' /proc/uptime)
+find /newroot -type f -exec cat {} + 2>/dev/null | wc -c > /dev/null
+T5=$(awk '{print $1}' /proc/uptime)
+echo "BENCH read_all_warm: ${T4} -> ${T5}"
+echo "BENCH_DONE"
+poweroff -f
