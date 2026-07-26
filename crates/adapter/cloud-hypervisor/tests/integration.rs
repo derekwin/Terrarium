@@ -34,11 +34,18 @@ fn test_socket(name: &str) -> String {
     format!("/tmp/ch-test-{}.sock", name)
 }
 
-const KERNEL_PATH: &str = "target/guest/vmlinux.bin";
+/// Guest kernel path. cargo test runs with the package dir as CWD, so
+/// resolve relative to the workspace root via CARGO_MANIFEST_DIR.
+fn kernel_path() -> String {
+    format!(
+        "{}/../../../target/guest/vmlinux.bin",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
 
 /// Check if the environment is ready for integration tests.
 fn env_ready() -> bool {
-    std::path::Path::new("/dev/kvm").exists() && std::path::Path::new(KERNEL_PATH).exists()
+    std::path::Path::new("/dev/kvm").exists() && std::path::Path::new(&kernel_path()).exists()
 }
 
 /// Start Cloud Hypervisor for testing. Returns the process handle.
@@ -49,7 +56,7 @@ fn start_ch(socket: &str, cpus_boot: u8, cpus_max: u8, memory_mb: u64) -> Child 
         .arg("--api-socket")
         .arg(socket)
         .arg("--kernel")
-        .arg(KERNEL_PATH)
+        .arg(kernel_path())
         .arg("--cmdline")
         .arg("console=ttyS0 quiet")
         .arg("--cpus")
@@ -71,6 +78,22 @@ fn start_ch(socket: &str, cpus_boot: u8, cpus_max: u8, memory_mb: u64) -> Child 
     panic!("API socket did not appear within 5 seconds");
 }
 
+/// Shut down CH via API, then wait briefly and force-kill if the guest
+/// doesn't honor ACPI shutdown. Minimal initramfs guests (busybox init,
+/// no acpid) ignore the power button, so a bare `child.wait()` after
+/// vm.shutdown hangs forever.
+async fn stop_ch(client: &ChClient, mut child: Child) {
+    let _ = client.vm_shutdown().await;
+    for _ in 0..50 {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 #[tokio::test]
 #[ignore = "requires KVM and guest image"]
 async fn test_create_and_boot_vm() {
@@ -80,14 +103,13 @@ async fn test_create_and_boot_vm() {
     }
 
     let socket = test_socket("create-boot");
-    let mut ch_process = start_ch(&socket, 1, 4, 512);
+    let ch_process = start_ch(&socket, 1, 4, 512);
     let client = ChClient::new(&socket);
 
     let info = client.vm_info().await.expect("vm_info");
     assert_eq!(info.state, "Running");
 
-    client.vm_shutdown().await.expect("vm_shutdown");
-    let _ = ch_process.wait();
+    stop_ch(&client, ch_process).await;
     let _ = std::fs::remove_file(&socket);
 }
 
@@ -100,7 +122,7 @@ async fn test_resize_cpus() {
     }
 
     let socket = test_socket("resize-cpus");
-    let mut ch_process = start_ch(&socket, 2, 16, 512);
+    let ch_process = start_ch(&socket, 2, 16, 512);
     let client = ChClient::new(&socket);
 
     client
@@ -112,8 +134,7 @@ async fn test_resize_cpus() {
         .await
         .expect("resize vcpus to 2");
 
-    client.vm_shutdown().await.expect("vm_shutdown");
-    let _ = ch_process.wait();
+    stop_ch(&client, ch_process).await;
     let _ = std::fs::remove_file(&socket);
 }
 
@@ -128,11 +149,11 @@ async fn test_resize_memory() {
     let socket = test_socket("resize-mem");
     let _ = std::fs::remove_file(&socket);
 
-    let mut ch = Command::new(ch_binary())
+    let ch = Command::new(ch_binary())
         .arg("--api-socket")
         .arg(&socket)
         .arg("--kernel")
-        .arg(KERNEL_PATH)
+        .arg(kernel_path())
         .arg("--cmdline")
         .arg("console=ttyS0 quiet")
         .arg("--cpus")
@@ -161,7 +182,6 @@ async fn test_resize_memory() {
         .await
         .expect("shrink memory to 768M");
 
-    client.vm_shutdown().await.expect("vm_shutdown");
-    let _ = ch.wait();
+    stop_ch(&client, ch).await;
     let _ = std::fs::remove_file(&socket);
 }
