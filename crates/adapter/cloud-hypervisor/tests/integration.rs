@@ -1,7 +1,7 @@
 //! Integration tests for the ch-client crate.
 //!
 //! These tests require a running Cloud Hypervisor instance with KVM.
-//! Run with: `cargo test -p ch-client --test integration -- --ignored`
+//! Run with: `cargo test -p adapter-cloud-hypervisor --test integration -- --ignored --test-threads=1`
 //!
 //! Prerequisites:
 //! - cloud-hypervisor binary in PATH
@@ -14,8 +14,26 @@ use std::time::Duration;
 
 use adapter_cloud_hypervisor::ChClient;
 
-const CH_BINARY: &str = "cloud-hypervisor";
-const API_SOCKET: &str = "/tmp/ch-test-api.sock";
+/// CH binary — check common locations including PATH.
+fn ch_binary() -> &'static str {
+    for path in &[
+        "/tmp/cloud-hypervisor-static",
+        "/usr/local/bin/cloud-hypervisor",
+        "cloud-hypervisor",
+    ] {
+        if std::path::Path::new(path).exists() || path == &"cloud-hypervisor" {
+            return path;
+        }
+    }
+    "cloud-hypervisor"
+}
+
+/// Per-test unique socket path to avoid conflicts when running in parallel
+/// (still recommended to use `--test-threads=1`).
+fn test_socket(name: &str) -> String {
+    format!("/tmp/ch-test-{}.sock", name)
+}
+
 const KERNEL_PATH: &str = "target/guest/vmlinux.bin";
 
 /// Check if the environment is ready for integration tests.
@@ -24,13 +42,12 @@ fn env_ready() -> bool {
 }
 
 /// Start Cloud Hypervisor for testing. Returns the process handle.
-fn start_ch(cpus_boot: u8, cpus_max: u8, memory_mb: u64) -> Child {
-    // Clean up any existing socket
-    let _ = std::fs::remove_file(API_SOCKET);
+fn start_ch(socket: &str, cpus_boot: u8, cpus_max: u8, memory_mb: u64) -> Child {
+    let _ = std::fs::remove_file(socket);
 
-    let mut child = Command::new(CH_BINARY)
+    let mut child = Command::new(ch_binary())
         .arg("--api-socket")
-        .arg(API_SOCKET)
+        .arg(socket)
         .arg("--kernel")
         .arg(KERNEL_PATH)
         .arg("--cmdline")
@@ -42,15 +59,13 @@ fn start_ch(cpus_boot: u8, cpus_max: u8, memory_mb: u64) -> Child {
         .spawn()
         .expect("Failed to start cloud-hypervisor");
 
-    // Wait for API socket to appear
     for _ in 0..50 {
-        if std::path::Path::new(API_SOCKET).exists() {
+        if std::path::Path::new(socket).exists() {
             return child;
         }
         thread::sleep(Duration::from_millis(100));
     }
 
-    // Socket didn't appear — kill CH and report
     let _ = child.kill();
     let _ = child.wait();
     panic!("API socket did not appear within 5 seconds");
@@ -64,14 +79,16 @@ async fn test_create_and_boot_vm() {
         return;
     }
 
-    let mut ch_process = start_ch(1, 4, 512);
-    let client = ChClient::new(API_SOCKET);
+    let socket = test_socket("create-boot");
+    let mut ch_process = start_ch(&socket, 1, 4, 512);
+    let client = ChClient::new(&socket);
 
     let info = client.vm_info().await.expect("vm_info");
     assert_eq!(info.state, "Running");
 
     client.vm_shutdown().await.expect("vm_shutdown");
     let _ = ch_process.wait();
+    let _ = std::fs::remove_file(&socket);
 }
 
 #[tokio::test]
@@ -82,8 +99,9 @@ async fn test_resize_cpus() {
         return;
     }
 
-    let mut ch_process = start_ch(2, 16, 512);
-    let client = ChClient::new(API_SOCKET);
+    let socket = test_socket("resize-cpus");
+    let mut ch_process = start_ch(&socket, 2, 16, 512);
+    let client = ChClient::new(&socket);
 
     client
         .vm_resize(Some(8), None)
@@ -96,6 +114,7 @@ async fn test_resize_cpus() {
 
     client.vm_shutdown().await.expect("vm_shutdown");
     let _ = ch_process.wait();
+    let _ = std::fs::remove_file(&socket);
 }
 
 #[tokio::test]
@@ -106,13 +125,12 @@ async fn test_resize_memory() {
         return;
     }
 
-    // Clean up any existing socket
-    let _ = std::fs::remove_file(API_SOCKET);
+    let socket = test_socket("resize-mem");
+    let _ = std::fs::remove_file(&socket);
 
-    // Start with hotplug_size to enable virtio-mem
-    let mut ch = Command::new(CH_BINARY)
+    let mut ch = Command::new(ch_binary())
         .arg("--api-socket")
-        .arg(API_SOCKET)
+        .arg(&socket)
         .arg("--kernel")
         .arg(KERNEL_PATH)
         .arg("--cmdline")
@@ -120,32 +138,30 @@ async fn test_resize_memory() {
         .arg("--cpus")
         .arg("boot=1,max=4")
         .arg("--memory")
-        .arg("size=512M,hotplug_method=virtio-mem,hotplug_size=32G")
+        .arg("size=512M,hotplug_method=virtio-mem,hotplug_size=2G")
         .spawn()
         .expect("Failed to start CH");
 
-    // Wait for API socket
     for _ in 0..50 {
-        if std::path::Path::new(API_SOCKET).exists() {
+        if std::path::Path::new(&socket).exists() {
             break;
         }
         thread::sleep(Duration::from_millis(100));
     }
 
-    let client = ChClient::new(API_SOCKET);
+    let client = ChClient::new(&socket);
 
-    // Expand memory to 4G
-    client
-        .vm_resize(None, Some(4 * 1024 * 1024 * 1024))
-        .await
-        .expect("expand memory to 4G");
-
-    // Shrink memory to 1G
     client
         .vm_resize(None, Some(1024 * 1024 * 1024))
         .await
-        .expect("shrink memory to 1G");
+        .expect("expand memory to 1G");
+
+    client
+        .vm_resize(None, Some(768 * 1024 * 1024))
+        .await
+        .expect("shrink memory to 768M");
 
     client.vm_shutdown().await.expect("vm_shutdown");
     let _ = ch.wait();
+    let _ = std::fs::remove_file(&socket);
 }

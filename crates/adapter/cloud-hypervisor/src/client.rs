@@ -31,19 +31,34 @@ impl ChClient {
 
     /// Send an HTTP request to the CH API and return the response body.
     async fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<(u16, String)> {
+        self.request_with_timeout(self.timeout, method, path, body)
+            .await
+    }
+
+    /// Send an HTTP request with an explicit timeout.
+    ///
+    /// Long-running operations (snapshot, restore) need a much larger
+    /// budget than interactive ones (info, resize).
+    async fn request_with_timeout(
+        &self,
+        timeout: Duration,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, String)> {
         let stream = UnixStream::connect(&self.socket_path).await?;
         let (reader, mut writer) = stream.into_split();
 
         let body_str = body.unwrap_or("");
         let req = uds_http::build_request(method, path, body_str);
 
-        tokio::time::timeout(self.timeout, writer.write_all(req.as_bytes()))
+        tokio::time::timeout(timeout, writer.write_all(req.as_bytes()))
             .await
             .map_err(|_| ClientError::Timeout)?
             .map_err(ClientError::Io)?;
 
         // Read response with timeout
-        let (status, body) = tokio::time::timeout(self.timeout, Self::read_response(reader))
+        let (status, body) = tokio::time::timeout(timeout, Self::read_response(reader))
             .await
             .map_err(|_| ClientError::Timeout)??;
 
@@ -204,22 +219,36 @@ impl ChClient {
     // Snapshot API
     // -----------------------------------------------------------------------
 
+    /// Snapshot/restore can take minutes for large-memory VMs — far beyond
+    /// the interactive default timeout.
+    const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(600);
+
     pub async fn vm_snapshot(&self, snapshot_path: &str) -> Result<()> {
         let body = serde_json::json!({
             "destination_url": format!("file://{}", snapshot_path),
         });
-        self.request("PUT", "/api/v1/vm.snapshot", Some(&body.to_string()))
-            .await?;
+        self.request_with_timeout(
+            Self::SNAPSHOT_TIMEOUT,
+            "PUT",
+            "/api/v1/vm.snapshot",
+            Some(&body.to_string()),
+        )
+        .await?;
         Ok(())
     }
 
-    /// Restore a VM from a snapshot. Uses longer timeout (10 min).
+    /// Restore a VM from a snapshot. Uses the snapshot-class timeout (10 min).
     pub async fn vm_restore(&self, snapshot_path: &str) -> Result<()> {
         let body = serde_json::json!({
             "source_url": format!("file://{}", snapshot_path),
         });
-        self.request("PUT", "/api/v1/vm.restore", Some(&body.to_string()))
-            .await?;
+        self.request_with_timeout(
+            Self::SNAPSHOT_TIMEOUT,
+            "PUT",
+            "/api/v1/vm.restore",
+            Some(&body.to_string()),
+        )
+        .await?;
         Ok(())
     }
 }

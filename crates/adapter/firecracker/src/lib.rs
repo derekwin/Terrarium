@@ -150,27 +150,33 @@ impl FcVmHandle {
 impl VmHandle for FcVmHandle {
     async fn info(&self) -> Result<VmInfo, AdapterError> {
         let client = FcClient::new(self.fc_socket());
+        // Instance state lives at GET /, but vcpu_count/mem_size_mib are
+        // only exposed by GET /machine-config — fetch both.
+        let mut last_err = String::new();
         for attempt in 0..10 {
-            match client.get("/") {
-                Ok(resp) => {
+            let result = client
+                .get("/")
+                .and_then(|inst| client.get("/machine-config").map(|mc| (inst, mc)));
+            match result {
+                Ok((inst, mc)) => {
                     return Ok(VmInfo {
-                        state: resp["state"].as_str().unwrap_or("Running").into(),
-                        cpus: resp["vcpu_count"].as_u64().map(|c| c as u8),
-                        memory_mb: resp["mem_size_mib"].as_u64(),
+                        state: inst["state"].as_str().unwrap_or("unknown").into(),
+                        cpus: mc["vcpu_count"].as_u64().map(|c| c as u8),
+                        memory_mb: mc["mem_size_mib"].as_u64(),
                     });
                 }
                 Err(e) => {
-                    if attempt == 9 {
-                        return Err(AdapterError::internal(format!(
-                            "vm.info failed after 10 attempts: {}",
-                            e
-                        )));
+                    last_err = e;
+                    if attempt < 9 {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
             }
         }
-        unreachable!()
+        Err(AdapterError::internal(format!(
+            "info failed after 10 attempts: {}",
+            last_err
+        )))
     }
 
     async fn resize(&self, _cpu: Option<u32>, _mem: Option<u64>) -> Result<(), AdapterError> {
@@ -208,17 +214,23 @@ impl VmHandle for FcVmHandle {
     async fn snapshot(&self) -> Result<Snapshot, AdapterError> {
         let vm_path = format!("/tmp/fc-snap-{}.bin", self.name);
         let mem_path = format!("/tmp/fc-snap-{}.mem", self.name);
-        let client = FcClient::new(self.fc_socket());
+        // Full snapshot requires the VM to be paused first; large memory
+        // dumps can take minutes, so use a snapshot-class timeout.
+        let client = FcClient::new(self.fc_socket()).with_timeout(Duration::from_secs(600));
         client
-            .put(
-                "/snapshot/create",
-                &serde_json::json!({
-                    "snapshot_path": vm_path,
-                    "mem_file_path": mem_path,
-                    "snapshot_type": "Full",
-                }),
-            )
+            .patch("/vm", &serde_json::json!({"state": "Paused"}))
             .map_err(AdapterError::internal)?;
+        let result = client.put(
+            "/snapshot/create",
+            &serde_json::json!({
+                "snapshot_path": vm_path,
+                "mem_file_path": mem_path,
+                "snapshot_type": "Full",
+            }),
+        );
+        // Always try to resume, even if the snapshot failed.
+        let _ = client.patch("/vm", &serde_json::json!({"state": "Resumed"}));
+        result.map_err(AdapterError::internal)?;
         Ok(Snapshot { path: vm_path })
     }
 
@@ -230,11 +242,12 @@ impl VmHandle for FcVmHandle {
 
     async fn shutdown(&self) -> Result<(), AdapterError> {
         let client = FcClient::new(self.fc_socket());
-        let _ = client.put(
-            "/actions",
-            &serde_json::json!({"action_type": "SendCtrlAltDel"}),
-        );
-        Ok(())
+        client
+            .put(
+                "/actions",
+                &serde_json::json!({"action_type": "SendCtrlAltDel"}),
+            )
+            .map_err(AdapterError::internal)
     }
 
     fn pid(&self) -> u32 {
@@ -267,6 +280,11 @@ impl FcClient {
             socket: socket.into(),
             timeout: Duration::from_secs(5),
         }
+    }
+
+    fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<String, String> {

@@ -12,8 +12,11 @@ use adapter_cloud_hypervisor::api::*;
 use adapter_cloud_hypervisor::ChClient;
 
 /// Response templates for the mock server.
+///
+/// VM_INFO mirrors the real CH vm.info response shape: cpus/memory are
+/// nested under `config`, and actual memory is reported separately.
 mod responses {
-    pub const VM_INFO: &str = r#"{"cpus":{"boot_vcpus":2,"max_vcpus":16},"memory":{"size":536870912,"hotplug_size":34359738368},"state":"Running"}"#;
+    pub const VM_INFO: &str = r#"{"config":{"payload":{"kernel":"/path/to/vmlinux.bin"},"cpus":{"boot_vcpus":2,"max_vcpus":16},"memory":{"size":536870912,"hotplug_size":34359738368,"hotplug_method":"VirtioMem"}},"state":"Running","memory_actual_size":536870912}"#;
     pub const HTTP_OK: &str =
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ";
     pub const HTTP_NO_CONTENT: &str = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
@@ -99,15 +102,19 @@ async fn test_vm_create() {
 
     let client = ChClient::new(&server.socket_path);
     let config = VmConfig {
-        kernel: "/path/to/vmlinux.bin".into(),
-        cmdline: Some("console=ttyS0".into()),
+        payload: PayloadConfig {
+            kernel: "/path/to/vmlinux.bin".into(),
+            cmdline: Some("console=ttyS0".into()),
+            initramfs: None,
+        },
         cpus: CpusConfig { boot: 2, max: 16 },
         memory: MemoryConfig {
             size: 512 * 1024 * 1024,
             hotplug_size: Some(32 * 1024 * 1024 * 1024),
+            hotplug_method: Some("VirtioMem".into()),
         },
         disks: vec![],
-        console: None,
+        console: Some(ConsoleConfig { mode: "Off".into() }),
     };
 
     // vm.create returns HTTP 204 No Content on success
@@ -141,6 +148,10 @@ async fn test_vm_info() {
     let client = ChClient::new(&server.socket_path);
     let info = client.vm_info().await.expect("vm_info");
     assert_eq!(info.state, "Running");
+    // config is nested in the real CH response — verify it is parsed
+    let config = info.config.expect("config section");
+    assert_eq!(config.cpus.expect("cpus").boot, 2);
+    assert_eq!(info.memory_actual_size, Some(512 * 1024 * 1024));
 }
 
 #[tokio::test]
@@ -188,12 +199,16 @@ async fn test_vm_add_disk() {
 async fn test_connection_refused() {
     let client = ChClient::new("/tmp/nonexistent-ch-socket.sock");
     let config = VmConfig {
-        kernel: "/path/to/vmlinux.bin".into(),
-        cmdline: None,
+        payload: PayloadConfig {
+            kernel: "/path/to/vmlinux.bin".into(),
+            cmdline: None,
+            initramfs: None,
+        },
         cpus: CpusConfig { boot: 1, max: 1 },
         memory: MemoryConfig {
             size: 256 * 1024 * 1024,
             hotplug_size: None,
+            hotplug_method: None,
         },
         disks: vec![],
         console: None,
@@ -201,6 +216,40 @@ async fn test_connection_refused() {
 
     let result = client.vm_create(&config).await;
     assert!(result.is_err());
+}
+
+#[test]
+fn test_vm_config_serialization() {
+    // Lock the CH openapi VmConfig shape: kernel under `payload`, console
+    // as a {mode} object, hotplug_method explicit for virtio-mem.
+    let config = VmConfig {
+        payload: PayloadConfig {
+            kernel: "/path/to/vmlinux.bin".into(),
+            cmdline: Some("console=ttyS0".into()),
+            initramfs: None,
+        },
+        cpus: CpusConfig { boot: 2, max: 16 },
+        memory: MemoryConfig {
+            size: 512 * 1024 * 1024,
+            hotplug_size: Some(32 * 1024 * 1024 * 1024),
+            hotplug_method: Some("VirtioMem".into()),
+        },
+        disks: vec![DiskConfig {
+            path: "/tmp/overlay.qcow2".into(),
+            id: Some("root".into()),
+        }],
+        console: Some(ConsoleConfig { mode: "Off".into() }),
+    };
+
+    let json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&config).expect("serialize")).expect("parse");
+
+    assert_eq!(json["payload"]["kernel"], "/path/to/vmlinux.bin");
+    assert!(json.get("kernel").is_none(), "kernel must not be top-level");
+    assert_eq!(json["cpus"]["boot_vcpus"], 2);
+    assert_eq!(json["memory"]["hotplug_method"], "VirtioMem");
+    assert_eq!(json["console"]["mode"], "Off");
+    assert_eq!(json["disks"][0]["id"], "root");
 }
 
 #[test]

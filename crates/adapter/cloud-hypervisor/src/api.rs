@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 /// VM configuration used when creating a new VM.
+///
+/// Matches the Cloud Hypervisor `VmConfig` schema (CH openapi): the kernel
+/// lives under `payload`, and `console` is a `{mode: ...}` object — not
+/// top-level string fields.
 #[derive(Debug, Clone, Serialize)]
 pub struct VmConfig {
-    /// Path to the kernel image (vmlinux.bin / bzImage).
-    pub kernel: String,
-    /// Kernel command line parameters.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cmdline: Option<String>,
+    /// Boot payload: kernel image plus optional cmdline/initramfs.
+    pub payload: PayloadConfig,
     /// vCPU configuration.
     pub cpus: CpusConfig,
     /// Memory configuration.
@@ -15,9 +16,29 @@ pub struct VmConfig {
     /// Disk configuration.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub disks: Vec<DiskConfig>,
-    /// Console mode.
+    /// Console configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub console: Option<String>,
+    pub console: Option<ConsoleConfig>,
+}
+
+/// Boot payload (the `payload` object of CH `VmConfig`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PayloadConfig {
+    /// Path to the kernel image (vmlinux.bin / bzImage).
+    pub kernel: String,
+    /// Kernel command line parameters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmdline: Option<String>,
+    /// Path to the initramfs image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initramfs: Option<String>,
+}
+
+/// Console configuration (CH expects a `{mode: ...}` object).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleConfig {
+    /// Console mode: "Off", "Null", "Pty", "Serial", "Tty", or "File".
+    pub mode: String,
 }
 
 /// vCPU configuration for a VM.
@@ -36,9 +57,13 @@ pub struct CpusConfig {
 pub struct MemoryConfig {
     /// Amount of RAM in bytes.
     pub size: u64,
-    /// Hotplug method and size. Uses virtio-mem for dynamic resizing.
+    /// Hotpluggable memory size in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hotplug_size: Option<u64>,
+    /// Hotplug method: "Acpi" or "VirtioMem". CH defaults to "Acpi", so
+    /// virtio-mem setups must set this explicitly alongside hotplug_size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hotplug_method: Option<String>,
 }
 
 /// Disk configuration for a VM.
