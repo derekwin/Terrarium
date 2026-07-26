@@ -29,11 +29,14 @@ case "$TYPE" in
         BUSYBOX=$(which busybox)
         cp "$BUSYBOX" "${OUTPUT}/bin/busybox"
         chmod +x "${OUTPUT}/bin/busybox"
-        for cmd in sh ls cat cp mv rm mkdir rmdir mount umount ip echo grep awk cut head tail wc sleep sync reboot poweroff ps kill free df du chmod chown ln tar gzip; do
+        for cmd in sh ls cat cp mv rm mkdir rmdir mount umount ip echo grep awk cut head tail wc sleep sync reboot poweroff ps kill free df du chmod chown ln tar gzip acpid; do
             ln -sf /bin/busybox "${OUTPUT}/bin/${cmd}"
         done
         cp "${SCRIPT_DIR}/rootfs/init" "${OUTPUT}/init"
         chmod +x "${OUTPUT}/init"
+        # ACPI power-button handler (CH vm.power-button → acpid → poweroff)
+        mkdir -p "${OUTPUT}/etc/acpi/PWRF"
+        printf 'poweroff -f\n' > "${OUTPUT}/etc/acpi/PWRF/00000080"
         ;;
     alpine|custom)
         if [ -z "${ROOTFS_SRC:-}" ] || [ ! -d "$ROOTFS_SRC" ]; then

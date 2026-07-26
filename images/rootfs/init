@@ -13,6 +13,10 @@ mount -t tmpfs tmpfs /tmp
 # Bring up loopback
 ip link set lo up 2>/dev/null || true
 
+# Handle ACPI power button (CH vm.power-button) via busybox acpid.
+# Event rules live in /etc/acpi/<group>/<event>; PWRF/00000080 -> poweroff -f.
+acpid &
+
 # Display guest info
 echo "Terrarium guest ready."
 echo "Kernel: $(uname -r)"
