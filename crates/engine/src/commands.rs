@@ -45,6 +45,14 @@ fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
         memory_mb,
         max_memory_mb,
         initramfs: cmd.initramfs.clone(),
+        fs: if cmd.layers.is_empty() {
+            None
+        } else {
+            Some(adapter_traits::FsSpec {
+                layers: cmd.layers.clone(),
+                upper: adapter_traits::UpperPolicy::Ephemeral,
+            })
+        },
         backend_config: None,
     })
 }

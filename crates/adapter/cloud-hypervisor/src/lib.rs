@@ -8,7 +8,8 @@ pub mod client;
 mod error;
 
 use adapter_traits::{
-    AdapterError, NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo, VmName, VmSpec,
+    AdapterError, FsSpec, NetworkQos, Snapshot, UpperPolicy, VmAdapter, VmCapabilities, VmHandle,
+    VmInfo, VmName, VmSpec,
 };
 use async_trait::async_trait;
 use std::process::{Command, Stdio};
@@ -24,12 +25,29 @@ pub use error::ClientError;
 
 pub struct ChAdapter {
     ch_binary: String,
+    virtiofsd_binary: String,
+    layer_dir: String,
+    fs_root: String,
 }
 
 impl ChAdapter {
     pub fn new(ch_binary: impl Into<String>) -> Self {
+        let fs_base = std::env::var("TERRA_STATE_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/tmp/terra-disks".into());
         Self {
             ch_binary: ch_binary.into(),
+            // qemu's virtiofsd (apt) and rust-vmm's (cargo) share the CLI.
+            virtiofsd_binary: std::env::var("TERRA_VIRTIOFSD")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "virtiofsd".into()),
+            layer_dir: std::env::var("TERRA_LAYER_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "/var/lib/terra/layers".into()),
+            fs_root: format!("{}/fs", fs_base),
         }
     }
 }
@@ -51,7 +69,7 @@ impl VmAdapter for ChAdapter {
 
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, AdapterError> {
         spec.validate().map_err(AdapterError::invalid_argument)?;
-        ChVmHandle::spawn(spec, &self.ch_binary)
+        ChVmHandle::spawn(spec, self)
             .await
             .map(|h| Box::new(h) as Box<dyn VmHandle>)
     }
@@ -75,19 +93,40 @@ struct ChVmHandle {
     name: VmName,
     child: std::process::Child,
     client: ChClient,
+    fs: Option<FsStack>,
+}
+
+/// A composed layered rootfs: overlayfs mount + virtiofsd, running inside
+/// a private user/mount namespace so the whole stack (including the
+/// mount) dies with the supervisor process — no privileged cleanup needed.
+struct FsStack {
+    supervisor: std::process::Child,
+    socket: String,
+    /// Working dir root for this VM (upper/work/merged).
+    dir: String,
+    /// Persistent upperdirs live outside `dir` and survive Drop.
+    persistent: bool,
 }
 
 impl ChVmHandle {
-    async fn spawn(spec: &VmSpec, ch_binary: &str) -> Result<Self, AdapterError> {
+    async fn spawn(spec: &VmSpec, adapter: &ChAdapter) -> Result<Self, AdapterError> {
         let name = spec.name.clone();
         let socket = format!("/tmp/terra-{}.sock", name);
         let _ = std::fs::remove_file(&socket);
 
-        let args = ch_args(spec, &socket);
+        // Compose the layered rootfs first — CH needs the virtiofsd
+        // socket at boot.
+        let fs = match spec.fs {
+            Some(ref fs_spec) => Some(compose_fs(fs_spec, name.as_ref(), adapter).await?),
+            None => None,
+        };
+        let fs_socket = fs.as_ref().map(|f| f.socket.as_str());
 
-        tracing::info!(name = %name, socket = %socket, "Spawning CH VM");
+        let args = ch_args(spec, &socket, fs_socket);
 
-        let mut child = Command::new(ch_binary)
+        tracing::info!(name = %name, socket = %socket, layered = fs.is_some(), "Spawning CH VM");
+
+        let mut child = Command::new(&adapter.ch_binary)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -115,8 +154,121 @@ impl ChVmHandle {
             name,
             child,
             client,
+            fs,
         })
     }
+}
+
+/// Compose a layered rootfs: resolve layer names under the layer dir,
+/// overlayfs-mount them with a per-VM upperdir, and serve the result via
+/// virtiofsd — all inside one `unshare -Urm` supervisor so no root is
+/// required and teardown is just killing the process.
+async fn compose_fs(
+    fs_spec: &FsSpec,
+    name: &str,
+    adapter: &ChAdapter,
+) -> Result<FsStack, AdapterError> {
+    if fs_spec.layers.is_empty() {
+        return Err(AdapterError::invalid_argument(
+            "fs.layers must not be empty".to_string(),
+        ));
+    }
+    let mut lowers: Vec<String> = Vec::new();
+    for layer in &fs_spec.layers {
+        if !layer
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            return Err(AdapterError::invalid_argument(format!(
+                "invalid layer name {:?}",
+                layer
+            )));
+        }
+        let p = format!("{}/{}", adapter.layer_dir, layer);
+        if !std::path::Path::new(&p).is_dir() {
+            return Err(AdapterError::not_found(format!(
+                "layer '{}' not found under {}",
+                layer, adapter.layer_dir
+            )));
+        }
+        lowers.push(p);
+    }
+    // OverlayFS lowerdir is right-to-left priority: our layers list is
+    // highest-priority-first, base last — join as-is.
+    let lowerdir = lowers.join(":");
+
+    let dir = format!("{}/{}", adapter.fs_root, name);
+    let (upper, persistent) = match &fs_spec.upper {
+        UpperPolicy::Ephemeral => (format!("{}/upper", dir), false),
+        UpperPolicy::Persistent(pname) => {
+            if !pname
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+            {
+                return Err(AdapterError::invalid_argument(format!(
+                    "invalid upper name {:?}",
+                    pname
+                )));
+            }
+            (format!("{}/uppers/{}", adapter.fs_root, pname), true)
+        }
+    };
+    let work = format!("{}/work", dir);
+    let merged = format!("{}/merged", dir);
+    for d in [&upper, &work, &merged] {
+        std::fs::create_dir_all(d).map_err(|e| format!("mkdir {}: {}", d, e))?;
+    }
+
+    let socket = format!("/tmp/terra-{}-fs.sock", name);
+    let _ = std::fs::remove_file(&socket);
+
+    let script = format!(
+        "set -e; mount -t overlay overlay -o lowerdir={},upperdir={},workdir={} {}; \
+         exec {} --socket-path={} --shared-dir={} --sandbox=none --cache=always",
+        lowerdir, upper, work, merged, adapter.virtiofsd_binary, socket, merged
+    );
+    let mut child = Command::new("unshare")
+        .args(["-Urm", "bash", "-c", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn unshare supervisor: {}", e))?;
+
+    // Wait for the virtiofsd socket; surface supervisor stderr on failure.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if std::path::Path::new(&socket).exists() {
+            break;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let mut err = String::new();
+            use std::io::Read;
+            if let Some(mut e) = child.stderr.take() {
+                let _ = e.read_to_string(&mut err);
+            }
+            return Err(format!(
+                "fs supervisor exited ({}) before virtiofsd was ready: {}",
+                status,
+                err.trim()
+            )
+            .into());
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("virtiofsd socket timeout".into());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    tracing::info!(name = %name, layers = ?fs_spec.layers, %persistent, "Layered rootfs composed");
+    Ok(FsStack {
+        supervisor: child,
+        socket,
+        dir,
+        persistent,
+    })
 }
 
 #[async_trait]
@@ -209,6 +361,23 @@ impl Drop for ChVmHandle {
         // CH creates a lock file next to the API socket — remove it too,
         // otherwise stale .sock.lock files accumulate across VM lifecycles.
         let _ = std::fs::remove_file(format!("{}.lock", socket));
+        if let Some(mut fs) = self.fs.take() {
+            // Killing the supervisor tears down the whole namespace:
+            // virtiofsd dies and the overlayfs mount evaporates with it.
+            let _ = fs.supervisor.kill();
+            let _ = fs.supervisor.wait();
+            let _ = std::fs::remove_file(&fs.socket);
+            if !fs.persistent {
+                // overlayfs creates its internal work/work dir with mode
+                // 0000 — restore owner permissions before removing.
+                let _ = Command::new("chmod")
+                    .args(["-R", "u+rwX", &fs.dir])
+                    .output();
+                if let Err(e) = std::fs::remove_dir_all(&fs.dir) {
+                    tracing::warn!(dir = %fs.dir, error = %e, "fs work dir cleanup failed");
+                }
+            }
+        }
     }
 }
 
@@ -216,7 +385,7 @@ impl Drop for ChVmHandle {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn ch_args(spec: &VmSpec, socket: &str) -> Vec<String> {
+fn ch_args(spec: &VmSpec, socket: &str, fs_socket: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "--api-socket".into(),
         socket.into(),
@@ -237,24 +406,35 @@ fn ch_args(spec: &VmSpec, socket: &str) -> Vec<String> {
         args.push("--initramfs".into());
         args.push(i.clone());
     }
+    // vhost-user devices (virtiofs) require shared guest memory.
+    let shared = if fs_socket.is_some() {
+        ",shared=on"
+    } else {
+        ""
+    };
     if let Some(max_mem) = spec.max_memory_mb {
         args.push("--memory".into());
         args.push(format!(
-            "size={}M,hotplug_method=virtio-mem,hotplug_size={}G",
+            "size={}M,hotplug_method=virtio-mem,hotplug_size={}G{}",
             spec.memory_mb,
-            max_mem / 1024
+            max_mem / 1024,
+            shared
         ));
     } else {
         args.push("--memory".into());
-        args.push(format!("size={}M", spec.memory_mb));
+        args.push(format!("size={}M{}", spec.memory_mb, shared));
+    }
+    if let Some(fs_sock) = fs_socket {
+        args.push("--fs".into());
+        args.push(format!("tag=rootfs,socket={},num_queues=1", fs_sock));
     }
     args.push("--serial".into());
     args.push("null".into());
     args.push("--console".into());
     args.push("off".into());
     // Landlock confines the CH process to the paths explicitly given on
-    // the command line (kernel/initramfs/api socket) — anything the VMM
-    // might be tricked into opening outside that set is denied.
+    // the command line (kernel/initramfs/api socket/fs socket) — anything
+    // the VMM might be tricked into opening outside that set is denied.
     args.push("--landlock".into());
     args
 }

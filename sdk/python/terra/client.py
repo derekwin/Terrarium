@@ -61,8 +61,14 @@ class TerraClient:
         max_cpus: int | None = 16,
         memory_mb: int = 512,
         max_memory_mb: int | None = None,
+        layers: list[str] | None = None,
     ) -> dict:
-        """Create a new VM."""
+        """Create a new VM.
+
+        Args:
+            layers: virtiofs layer names, highest priority first, base
+                layer last. None = plain initramfs boot.
+        """
         cmd = {"command": "create", "name": name, "kernel": kernel}
         if initramfs:
             cmd["initramfs"] = initramfs
@@ -73,6 +79,8 @@ class TerraClient:
         cmd["memory_mb"] = memory_mb
         if max_memory_mb:
             cmd["max_memory_mb"] = max_memory_mb
+        if layers:
+            cmd["layers"] = list(layers)
         return self._send(cmd)
 
     def vm_list(self) -> dict:

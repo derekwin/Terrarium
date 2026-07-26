@@ -90,6 +90,11 @@ fn tools_list() -> Vec<serde_json::Value> {
                 ("name", "string", "Unique VM name"),
                 ("kernel", "string", "Path to kernel image"),
                 ("initramfs", "string", "Path to initramfs (optional)"),
+                (
+                    "layers",
+                    "array",
+                    "virtiofs layer names, highest priority first, base last (optional)",
+                ),
                 ("cpus", "number", "vCPU count (default 2)"),
                 ("memory_mb", "number", "Memory in MB (default 512)"),
             ],
@@ -163,6 +168,15 @@ fn call_tool(name: &str, args: &serde_json::Value) -> String {
             }
             if let Some(v) = args.get("initramfs").and_then(|a| a.as_str()) {
                 c = c.with_initramfs(v);
+            }
+            if let Some(arr) = args.get("layers").and_then(|a| a.as_array()) {
+                let layers: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                if !layers.is_empty() {
+                    c = c.with_layers(layers);
+                }
             }
             send_to_engine(&c)
         }

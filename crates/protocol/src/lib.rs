@@ -21,6 +21,10 @@ pub struct Command {
     // create
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel: Option<String>,
+    // create: layer names for a virtiofs rootfs (highest priority first,
+    // base layer last). Empty = plain initramfs boot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initramfs: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,6 +57,7 @@ impl Command {
             name: None,
             kernel: None,
             initramfs: None,
+            layers: Vec::new(),
             cmdline: None,
             cpus: None,
             max_cpus: None,
@@ -113,6 +118,12 @@ impl Command {
     /// Builder: set memory resize bytes.
     pub fn with_memory_bytes(mut self, bytes: u64) -> Self {
         self.memory_bytes = Some(bytes);
+        self
+    }
+
+    /// Builder: set virtiofs layers (highest priority first, base last).
+    pub fn with_layers(mut self, layers: Vec<String>) -> Self {
+        self.layers = layers;
         self
     }
 

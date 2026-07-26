@@ -35,6 +35,10 @@ enum Commands {
         max_memory: Option<u64>,
         #[arg(long, default_value = "512")]
         memory: u64,
+        /// virtiofs layers, comma-separated, highest priority first
+        /// (e.g. --layers python,base). Empty = initramfs boot.
+        #[arg(long, value_delimiter = ',')]
+        layers: Vec<String>,
     },
     List,
     Info {
@@ -70,10 +74,12 @@ fn main() {
             max_cpus,
             max_memory,
             memory,
+            layers,
         } => {
             let mut cmd = Command::create(&name, &kernel)
                 .with_cpus(cpus)
-                .with_memory_mb(memory);
+                .with_memory_mb(memory)
+                .with_layers(layers);
             if let Some(i) = initramfs {
                 cmd = cmd.with_initramfs(i);
             }

@@ -20,7 +20,7 @@
 
 ## 三个已识别的硬问题（评审结论，实施时必读）
 
-1. **挂载权限**：`mount -t erofs/overlayfs` 需要 CAP_SYS_ADMIN。MVP 决策：daemon 以 root/特权运行（tc/cgroup 本来也需要）；user-namespace 沙箱化留作后续加固。
+1. **挂载权限**：`mount -t erofs/overlayfs` 需要 CAP_SYS_ADMIN。~~MVP 决策：daemon 以 root/特权运行~~ → **已解决（2026-07-26，优于原方案）**：组合栈跑在 `unshare -Urm` 私有 user/mount namespace 里（mount + virtiofsd 同 ns，杀 supervisor 即整体回收，零特权零残留）。注意 Ubuntu 24.04 默认 `kernel.apparmor_restrict_unprivileged_userns=1` 会阻断非特权 userns，需 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` 或以 root 运行；root 路径不受影响。
 2. **热启动需要 host→guest 通道**：预热池热插 virtiofs 设备后，guest 内需 agent 执行 mount——走 vsock（guest 内核已有 `CONFIG_VIRTIO_VSOCKETS`），guest-proxy 需扩展 vsock 监听与 mount 协议。这是 FS-M4 的实质工作量。
 3. **guest 内核缺口**：需补 `CONFIG_VIRTIO_FS`（M1）、`CONFIG_FUSE_DAX`（M2）、`CONFIG_HOTPLUG_PCI_ACPI`（M4）。每次改配置后必须核对 `.config` 生效（VIRTIO_MEM 被 olddefconfig 静默丢弃的教训）。
 
@@ -33,7 +33,7 @@
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| FS-M1 冷启动 | 裸目录层 + OverlayFS + virtiofsd + CH --fs + switch_root init；内核 VIRTIO_FS | VM 以组合层为 rootfs 启动 |
+| FS-M1 冷启动 | ~~裸目录层 + OverlayFS + virtiofsd + CH --fs + switch_root init；内核 VIRTIO_FS~~ ✅ 2026-07-26 完成：trait FsSpec、CH adapter 组合栈（unshare supervisor）、三端 layers 参数、e2e 9/9（真实 KVM） | VM 以组合层为 rootfs 启动 |
 | FS-M2 基准裁决 | DAX + cache=always；对比 qcow2 历史数据：启动时间、pip install 耗时、内存密度。**数据不赢不换默认** | docs/ 实测报告 |
 | FS-M3 EROFS 打包 | mkfs.erofs 工具链 + 层注册表（名称/版本/镜像） | 层镜像可构建可组合 |
 | FS-M4 预热池热启动 | vsock 通道 + guest-proxy mount 协议 + CH add-fs/remove-device + 内核 HOTPLUG_PCI_ACPI | 热分配任务层 < 100ms |

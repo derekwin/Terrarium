@@ -143,11 +143,12 @@ pub struct VmSpec {
     /// Path to initramfs (cpio archive).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initramfs: Option<String>,
+    /// Layered root filesystem (virtiofs). When set, the adapter composes
+    /// the named layers on the host and boots the VM with the result as
+    /// its rootfs (initramfs is then only the thin virtiofs bootstrap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs: Option<FsSpec>,
     /// Backend-specific configuration (JSON blob, adapter-defined).
-    ///
-    /// Storage/filesystem configuration (e.g. virtiofs layer sets) is
-    /// carried here until it graduates to first-class fields — see
-    /// docs/plans/ for the filesystem design.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_config: Option<serde_json::Value>,
 }
@@ -167,6 +168,32 @@ pub struct VmCapabilities {
     /// (virtiofs or equivalent). False for block-only backends.
     #[serde(default)]
     pub virtio_fs: bool,
+}
+
+/// Writable-layer policy for a layered (virtiofs) root filesystem.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum UpperPolicy {
+    /// Per-VM upperdir, deleted when the VM is destroyed (default).
+    #[default]
+    Ephemeral,
+    /// Named upperdir that survives VM destruction and is re-attached
+    /// when a later VM requests the same name.
+    Persistent(String),
+}
+
+/// Layered root filesystem configuration (EROFS/plain layers composed
+/// with OverlayFS on the host, exposed via virtiofs).
+///
+/// Layers are named directories under the engine's layer dir, given
+/// bottom-to-top: the LAST entry is the base layer, earlier entries
+/// override it (OverlayFS lowerdir is built right-to-left).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsSpec {
+    /// Layer names, highest priority first, base layer last.
+    pub layers: Vec<String>,
+    /// Writable layer policy.
+    #[serde(default)]
+    pub upper: UpperPolicy,
 }
 
 /// Network QoS configuration for a VM.

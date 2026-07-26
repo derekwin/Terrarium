@@ -43,8 +43,21 @@ from terra.vm import create, list_vms  # noqa: E402
 
 KERNEL = REPO / "target/guest/vmlinux.bin"
 INITRAMFS = REPO / "target/guest/alpine.cpio"
+IRFS_VIRTIOFS = REPO / "target/guest/initramfs-virtiofs.cpio.gz"
 ENGINE = REPO / "target/release/engine"
 SOCKET = "/tmp/terra-sdk-e2e.sock"
+
+
+def _find_virtiofsd() -> str | None:
+    for c in (
+        os.environ.get("TERRA_VIRTIOFSD"),
+        shutil.which("virtiofsd"),
+        str(Path.home() / ".cargo/bin/virtiofsd"),
+        "/usr/lib/qemu/virtiofsd",
+    ):
+        if c and Path(c).exists():
+            return c
+    return None
 
 # ---------------------------------------------------------------------------
 # Module state (set up once for the whole suite)
@@ -84,6 +97,19 @@ def _is_ch_pid(pid: int) -> bool:
         return Path(f"/proc/{pid}/comm").read_text().strip() == "cloud-hyperviso"
     except OSError:
         return False
+
+
+def _find_fs_supervisor(vm_name: str) -> int | None:
+    """PID of the virtiofsd supervisor serving the given VM's fs socket."""
+    needle = f"terra-{vm_name}-fs.sock"
+    for p in Path("/proc").iterdir():
+        if p.name.isdigit():
+            try:
+                if needle in (p / "cmdline").read_bytes().decode(errors="ignore"):
+                    return int(p.name)
+            except (OSError, PermissionError):
+                pass
+    return None
 
 
 def _ch_cmdline(pid: int) -> list[str]:
@@ -127,6 +153,24 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
 
     state_dir = Path(tempfile.mkdtemp(prefix="terra-sdk-e2e-"))
 
+    # virtiofs layers for the layered-boot test (base + marker layer)
+    vfsd = _find_virtiofsd()
+    layer_dir = state_dir / "layers"
+    if vfsd:
+        (layer_dir / "base").mkdir(parents=True)
+        subprocess.run(
+            f"zcat {INITRAMFS} | cpio -idm --quiet",
+            shell=True, cwd=layer_dir / "base", check=True,
+        )
+        marker = layer_dir / "marker" / "usr" / "bin"
+        marker.mkdir(parents=True)
+        (marker / "hello.py").write_text('print("hello from marker layer")\n')
+        if not IRFS_VIRTIOFS.exists():
+            subprocess.run(
+                ["bash", "images/build-initramfs-virtiofs.sh"],
+                cwd=REPO, check=True,
+            )
+
     if Path(SOCKET).exists():
         Path(SOCKET).unlink()
     env = {
@@ -134,6 +178,9 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
         "TERRA_STATE_DIR": str(state_dir / "vms"),
         "TERRA_CH_BINARY": ch,
     }
+    if vfsd:
+        env["TERRA_VIRTIOFSD"] = vfsd
+        env["TERRA_LAYER_DIR"] = str(layer_dir)
     daemon_log = open(state_dir / "daemon.log", "w")
     daemon = subprocess.Popen(
         [str(ENGINE), "daemon", "--socket", SOCKET],
@@ -148,6 +195,8 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
         daemon_log=daemon_log,
         client=TerraClient(socket_path=SOCKET),
         state_dir=state_dir,
+        vfsd=vfsd,
+        fs_root=state_dir / "vms" / "fs",
         created=[],  # names to best-effort destroy in teardown
     )
     print(f"[setup] daemon pid={daemon.pid} state_dir={state_dir} ch={ch}")
@@ -329,6 +378,43 @@ def test_shutdown_and_kill() -> None:
     except TerraError as e:
         assert "not found" in str(e), e
     _state["created"].remove("sdk-k1")
+
+
+def test_layered_boot() -> None:
+    """virtiofs layered rootfs: compose layers -> boot -> copy-up -> teardown."""
+    client = _state["client"]
+    if not _state.get("vfsd"):
+        print("SKIP test_layered_boot: no virtiofsd binary found")
+        return
+    fs_root = _state["fs_root"]
+    vm = create(
+        "sdk-fs1", str(KERNEL),
+        initramfs=str(IRFS_VIRTIOFS),
+        cpus=1, memory_mb=256,
+        layers=["marker", "base"],
+        client=client,
+    )
+    _track("sdk-fs1")
+    assert vm.info()["state"] == "Running"
+    args = _ch_cmdline(vm.pid)
+    assert "--fs" in args, "CH missing --fs device"
+    assert any("shared=on" in a for a in args), "vhost-user needs shared memory"
+    # the overlayfs mount lives in the supervisor's private mount-ns —
+    # verify the composed tree through /proc/<sup>/root (host view of it)
+    sup = _find_fs_supervisor("sdk-fs1")
+    assert sup, "fs supervisor process not found"
+    ns_merged = Path(f"/proc/{sup}/root{fs_root}/sdk-fs1/merged")
+    assert (ns_merged / "usr/bin/hello.py").exists(), "marker layer missing"
+    assert (ns_merged / "bin/busybox").exists(), "base layer missing"
+    # writes through merged copy up into the VM's private upperdir,
+    # never into the shared layers
+    (ns_merged / "tmp/marker.txt").write_text("x")
+    assert (fs_root / "sdk-fs1" / "upper" / "tmp/marker.txt").exists()
+    assert not (Path(_state["state_dir"]) / "layers" / "base" / "tmp/marker.txt").exists()
+    # teardown: VM destroy tears down the fs stack
+    client.vm_destroy("sdk-fs1")
+    _state["created"].remove("sdk-fs1")
+    assert not (fs_root / "sdk-fs1").exists(), "fs work dir leaked"
 
 
 # ---------------------------------------------------------------------------
