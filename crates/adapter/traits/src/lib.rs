@@ -149,6 +149,14 @@ pub struct VmSpec {
     /// Base disk for qcow2 overlay (shared, read-only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_disk: Option<String>,
+    /// Backing files of overlays in `disks` (read-only to the VMM).
+    ///
+    /// The VMM opens these implicitly through each overlay's qcow2 header,
+    /// so they never appear in `--disk` args — but CH `--landlock` only
+    /// whitelists explicit paths, so adapters must grant read access to
+    /// every path listed here (e.g. via `--landlock-rules`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlay_backing: Vec<String>,
     /// Virtual disk size for overlay in GB.
     #[serde(default = "default_disk_size_gb")]
     pub disk_size_gb: u64,

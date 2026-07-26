@@ -48,6 +48,10 @@ impl VmManager {
             let overlay_path = overlay::OverlayManager::create_or_reuse(&overlay_spec)
                 .map_err(|e| AdapterError::internal(format!("overlay: {}", e)))?;
             spec.disks.push(overlay_path.clone());
+            // The VMM opens the backing file implicitly via the overlay's
+            // qcow2 header — record it so the adapter can whitelist it
+            // for CH --landlock.
+            spec.overlay_backing.push(base.clone());
             self.overlays.insert(name.clone(), overlay_path);
             // Clear base_disk so the adapter doesn't create a second overlay.
             spec.base_disk = None;

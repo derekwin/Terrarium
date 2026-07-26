@@ -91,7 +91,13 @@ impl ChVmHandle {
                 OverlaySpec::new(name.to_string(), base).disk_size_gb(spec.disk_size_gb);
             let overlay = OverlayManager::create_or_reuse(&overlay_spec)?;
             args.push("--disk".to_string());
-            args.push(format!("path={}", overlay));
+            args.push(format!(
+                "path={},backing_files=on,image_type=qcow2",
+                overlay
+            ));
+            // Whitelist the backing file for --landlock (see ch_args).
+            args.push("--landlock-rules".to_string());
+            args.push(format!("path={},access=r", base));
         }
 
         tracing::info!(name = %name, socket = %socket, "Spawning CH VM");
@@ -256,12 +262,21 @@ fn ch_args(spec: &VmSpec, socket: &str) -> Vec<String> {
     }
     for disk in &spec.disks {
         args.push("--disk".into());
-        args.push(format!("path={}", disk));
+        args.push(format!("path={},backing_files=on,image_type=qcow2", disk));
     }
     args.push("--serial".into());
     args.push("null".into());
     args.push("--console".into());
     args.push("off".into());
+    args.push("--landlock".into());
+    // Landlock whitelists only paths given on the command line. Overlay
+    // backing files are opened implicitly via qcow2 headers, so grant
+    // read access explicitly — otherwise boot fails with PermissionDenied
+    // (which is exactly the GHSA-jmr4-g2hv-mjj6 defense working).
+    for backing in &spec.overlay_backing {
+        args.push("--landlock-rules".into());
+        args.push(format!("path={},access=r", backing));
+    }
     args
 }
 

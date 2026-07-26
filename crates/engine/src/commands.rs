@@ -46,6 +46,7 @@ fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
         initramfs: cmd.initramfs.clone(),
         disks: cmd.disks.clone(),
         base_disk: cmd.base_disk.clone(),
+        overlay_backing: Vec::new(),
         disk_size_gb: cmd.disk_size_gb.unwrap_or(20),
         backend_config: None,
     })
@@ -61,7 +62,10 @@ async fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
     }
     let name = spec.name.to_string();
     match mgr.spawn(spec).await {
-        Ok(()) => Response::ok(serde_json::json!({"name": name, "status": "created"})),
+        Ok(()) => {
+            let pid = mgr.get(&name).map(|h| h.pid());
+            Response::ok(serde_json::json!({"name": name, "status": "created", "pid": pid}))
+        }
         Err(e) => Response::err(e.to_string()),
     }
 }
@@ -115,6 +119,11 @@ async fn cmd_resize(mgr: &VmManager, cmd: Command) -> Response {
     };
 
     let cpus: Option<u32> = cmd.cpus.map(|c| c as u32);
+    if cpus.is_none() && cmd.memory_bytes.is_none() {
+        return Response::err(
+            "At least one of 'cpus' or 'memory_bytes' must be specified for resize",
+        );
+    }
     if let Err(e) = vm.resize(cpus, cmd.memory_bytes).await {
         return Response::err(e.to_string());
     }
