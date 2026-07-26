@@ -210,11 +210,14 @@ def test_create_and_info() -> None:
 
 
 def test_create_with_disk_single_disk_and_landlock() -> None:
+    client = _state["client"]
+    # data layer first: create a managed disk, then attach it by name
+    client.disk_create("sdk-disk2", str(_state["base_disk"]), size_gb=1)
     vm = create(
         "sdk-t2", str(KERNEL),
         initramfs=str(INITRAMFS),
-        base_disk=str(_state["base_disk"]),
-        client=_state["client"],
+        disk="sdk-disk2",
+        client=client,
     )
     _track("sdk-t2")
     assert vm.info()["state"] == "Running"
@@ -223,11 +226,15 @@ def test_create_with_disk_single_disk_and_landlock() -> None:
     assert len(disks) == 1, f"expected exactly one --disk, got {disks}"
     assert "backing_files=on" in disks[0], disks
     assert "image_type=qcow2" in disks[0], disks
+    assert "sdk-disk2/overlay.qcow2" in disks[0], disks
     rules = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--landlock-rules"]
     assert any(str(_state["base_disk"]) in r for r in rules), (
         f"landlock rule for backing file missing: {rules}"
     )
     assert "--landlock" in args
+    # the disk is visible and reported in-use
+    info = client.disk_info("sdk-disk2")
+    assert info["in_use_by"] == "sdk-t2", info
 
 
 def test_resize_cpus() -> None:
@@ -252,22 +259,27 @@ def test_resize_memory() -> None:
 
 
 def test_concurrent_create_shared_base() -> None:
+    client = _state["client"]
+
     def mk(i: int) -> str:
+        dname = f"sdk-disk-c{i}"
+        client.disk_create(dname, str(_state["base_disk"]), size_gb=1)
         name = f"sdk-c{i}"
         create(
             name, str(KERNEL),
             initramfs=str(INITRAMFS),
             cpus=1, memory_mb=128,
-            base_disk=str(_state["base_disk"]),
-            client=_state["client"],
+            disk=dname,
+            client=client,
         )
         _track(name)
         return name
 
+    # concurrent disk_create + VM create over a shared base image
     with ThreadPoolExecutor(max_workers=3) as ex:
         names = list(ex.map(mk, range(3)))
     for n in names:
-        assert _state["client"].vm_info(n)["state"] == "Running", n
+        assert client.vm_info(n)["state"] == "Running", n
     out = subprocess.run(
         ["qemu-img", "check", str(_state["base_disk"])],
         capture_output=True, text=True,
@@ -312,29 +324,56 @@ def test_error_paths() -> None:
         raise AssertionError("no-param resize accepted")
     except TerraError as e:
         assert "cpus" in str(e) or "memory_bytes" in str(e), e
+    # attach a disk that does not exist
+    try:
+        create("sdk-x1", str(KERNEL), initramfs=str(INITRAMFS),
+               disk="no-such-disk", client=client)
+        raise AssertionError("unknown disk accepted")
+    except TerraError as e:
+        assert "no-such-disk" in str(e), e
+    # attach a disk that is already in use by another VM
+    try:
+        create("sdk-x2", str(KERNEL), initramfs=str(INITRAMFS),
+               disk="sdk-disk2", client=client)
+        raise AssertionError("in-use disk attached twice")
+    except TerraError as e:
+        assert "in use" in str(e) or "already attached" in str(e), e
+    # delete a disk while it is in use
+    try:
+        client.disk_delete("sdk-disk2")
+        raise AssertionError("in-use disk deleted")
+    except TerraError as e:
+        assert "in use" in str(e), e
 
 
-def test_destroy_cleans_up() -> None:
+def test_destroy_keeps_disk_and_disk_delete_works() -> None:
     client = _state["client"]
     state_dir = _state["state_dir"]
+    # VM destroy must never delete data
     client.vm_destroy("sdk-t2")
     _state["created"].remove("sdk-t2")
-    assert not (state_dir / "vms" / "sdk-t2").exists(), "overlay dir leaked"
+    assert (state_dir / "vms" / "sdk-disk2" / "overlay.qcow2").exists(), (
+        "destroy deleted the disk — lifecycle separation broken"
+    )
     assert not Path("/tmp/terra-sdk-t2.sock").exists(), "API socket leaked"
     try:
         client.vm_info("sdk-t2")
         raise AssertionError("destroyed VM still visible")
     except TerraError:
         pass
+    # disk layer: explicit delete is the only way to remove data
+    client.disk_delete("sdk-disk2")
+    assert not (state_dir / "vms" / "sdk-disk2").exists(), "overlay leaked"
 
 
 def test_shutdown_and_kill() -> None:
     client = _state["client"]
     state_dir = _state["state_dir"]
-    # shutdown contract: stop the VM AND deregister it; overlay disk kept.
+    # shutdown contract: stop + deregister; disk is kept and remains
+    # manageable through the data layer.
+    client.disk_create("sdk-disk-s1", str(_state["base_disk"]), size_gb=1)
     create("sdk-s1", str(KERNEL), initramfs=str(INITRAMFS),
-           cpus=1, memory_mb=128, base_disk=str(_state["base_disk"]),
-           client=client)
+           cpus=1, memory_mb=128, disk="sdk-disk-s1", client=client)
     _track("sdk-s1")
     pid = client.vm_info("sdk-s1")["pid"]
     client.vm_shutdown("sdk-s1")
@@ -344,12 +383,10 @@ def test_shutdown_and_kill() -> None:
         raise AssertionError("shut-down VM still registered")
     except TerraError as e:
         assert "not found" in str(e), e
-    # overlay kept after shutdown...
-    assert (state_dir / "vms" / "sdk-s1").exists(), "overlay lost on shutdown"
-    # ...and destroy must still clean it up (deregistered is not an error)
-    client.vm_destroy("sdk-s1")
-    _state["created"].remove("sdk-s1")
-    assert not (state_dir / "vms" / "sdk-s1").exists(), "overlay leaked"
+    # disk survived shutdown and can be deleted explicitly
+    assert (state_dir / "vms" / "sdk-disk-s1" / "overlay.qcow2").exists()
+    client.disk_delete("sdk-disk-s1")
+    assert not (state_dir / "vms" / "sdk-disk-s1").exists()
 
     # kill contract: same deregistration semantics as shutdown
     create("sdk-k1", str(KERNEL), initramfs=str(INITRAMFS),

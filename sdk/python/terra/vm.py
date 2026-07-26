@@ -46,7 +46,7 @@ class Vm:
         return self._client.vm_kill(self.name)
 
     def destroy(self) -> dict:
-        """Shut down and delete the overlay disk permanently."""
+        """Stop and deregister the VM. Disks are kept (see disk_delete)."""
         return self._client.vm_destroy(self.name)
 
     def __enter__(self) -> "Vm":
@@ -66,8 +66,7 @@ def create(
     max_cpus: int | None = 16,
     memory_mb: int = 512,
     max_memory_mb: int | None = None,
-    base_disk: str | None = None,
-    disk_size_gb: int = 20,
+    disk: str | None = None,
     client: TerraClient | None = None,
 ) -> Vm:
     """Create a new VM.
@@ -76,7 +75,9 @@ def create(
         name: Unique VM name.
         kernel: Path to kernel image (bzImage).
         initramfs: Path to initramfs cpio archive.
-        base_disk: Base qcow2 for overlay (shared read-only).
+        disk: Name of an existing managed disk to attach
+            (create it first with ``client.disk_create``). Disks have
+            their own lifecycle and outlive VMs.
 
     Raises:
         TerraError: If the engine returns an error.
@@ -92,8 +93,7 @@ def create(
         max_cpus=max_cpus,
         memory_mb=memory_mb,
         max_memory_mb=max_memory_mb,
-        base_disk=base_disk,
-        disk_size_gb=disk_size_gb,
+        disk=disk,
     )
     return Vm(name=name, client=client, pid=resp.get("pid"))
 

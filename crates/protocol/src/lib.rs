@@ -41,10 +41,17 @@ pub struct Command {
     // snapshot / restore
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_path: Option<String>,
+    // disk_create: base image path for the new overlay
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_disk: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_size_gb: Option<u64>,
+
+    // create: attach an existing disk by name (see disk_create/disk_list).
+    // Disks have their own lifecycle — VM commands never create or
+    // delete them (destroy only stops + deregisters the VM).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<String>,
 
     // resize
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,6 +76,7 @@ impl Command {
             snapshot_path: None,
             base_disk: None,
             disk_size_gb: None,
+            disk: None,
             memory_bytes: None,
         }
     }
@@ -128,6 +136,12 @@ impl Command {
     /// Builder: set base disk.
     pub fn with_base_disk(mut self, path: impl Into<String>) -> Self {
         self.base_disk = Some(path.into());
+        self
+    }
+
+    /// Builder: reference an existing disk by name (VM create only).
+    pub fn with_disk(mut self, name: impl Into<String>) -> Self {
+        self.disk = Some(name.into());
         self
     }
 

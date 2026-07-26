@@ -61,10 +61,14 @@ class TerraClient:
         max_cpus: int | None = 16,
         memory_mb: int = 512,
         max_memory_mb: int | None = None,
-        base_disk: str | None = None,
-        disk_size_gb: int = 20,
+        disk: str | None = None,
     ) -> dict:
-        """Create a new VM."""
+        """Create a new VM.
+
+        Args:
+            disk: name of an existing managed disk to attach
+                (see :meth:`disk_create`). Disks outlive VMs.
+        """
         cmd = {"command": "create", "name": name, "kernel": kernel}
         if initramfs:
             cmd["initramfs"] = initramfs
@@ -75,9 +79,8 @@ class TerraClient:
         cmd["memory_mb"] = memory_mb
         if max_memory_mb:
             cmd["max_memory_mb"] = max_memory_mb
-        if base_disk:
-            cmd["base_disk"] = base_disk
-        cmd["disk_size_gb"] = disk_size_gb
+        if disk:
+            cmd["disk"] = disk
         return self._send(cmd)
 
     def vm_list(self) -> dict:
@@ -104,13 +107,39 @@ class TerraClient:
         return self._send(cmd)
 
     def vm_shutdown(self, name: str) -> dict:
-        """Gracefully shut down a VM."""
+        """Gracefully shut down a VM. Disks are kept."""
         return self._send({"command": "shutdown", "name": name})
 
     def vm_kill(self, name: str) -> dict:
-        """Force-kill a VM."""
+        """Force-kill a VM. Disks are kept."""
         return self._send({"command": "kill", "name": name})
 
     def vm_destroy(self, name: str) -> dict:
-        """Destroy a VM and its overlay disk."""
+        """Stop and deregister a VM. Never deletes disks."""
         return self._send({"command": "destroy", "name": name})
+
+    # ------------------------------------------------------------------
+    # Managed disks (independent lifecycle from VMs)
+    # ------------------------------------------------------------------
+    def disk_create(self, name: str, base: str, *, size_gb: int = 20) -> dict:
+        """Create a managed disk (qcow2 overlay on a base image)."""
+        return self._send(
+            {
+                "command": "disk_create",
+                "name": name,
+                "base_disk": base,
+                "disk_size_gb": size_gb,
+            }
+        )
+
+    def disk_list(self) -> dict:
+        """List all managed disks."""
+        return self._send({"command": "disk_list"})
+
+    def disk_info(self, name: str) -> dict:
+        """Get info about a managed disk."""
+        return self._send({"command": "disk_info", "name": name})
+
+    def disk_delete(self, name: str) -> dict:
+        """Delete a managed disk (refused while a VM is using it)."""
+        return self._send({"command": "disk_delete", "name": name})

@@ -93,9 +93,9 @@ fn tools_list() -> Vec<serde_json::Value> {
                 ("cpus", "number", "vCPU count (default 2)"),
                 ("memory_mb", "number", "Memory in MB (default 512)"),
                 (
-                    "rootfs_disk",
+                    "disk",
                     "string",
-                    "Root filesystem qcow2 path (optional)",
+                    "Name of an existing managed disk to attach (see terra_disk_create)",
                 ),
             ],
         ),
@@ -120,18 +120,33 @@ fn tools_list() -> Vec<serde_json::Value> {
         ),
         tool(
             "terra_vm_kill",
-            "Force-kill a VM (keep disk).",
+            "Force-kill a VM (disks are kept).",
             vec![("name", "string", "VM name")],
         ),
         tool(
             "terra_vm_shutdown",
-            "Gracefully shut down a VM.",
+            "Gracefully shut down a VM (disks are kept).",
             vec![("name", "string", "VM name")],
         ),
         tool(
             "terra_vm_destroy",
-            "Shut down and delete VM disk.",
+            "Stop and deregister a VM. Never deletes disks.",
             vec![("name", "string", "VM name")],
+        ),
+        tool(
+            "terra_disk_create",
+            "Create a managed disk (qcow2 overlay on a base image).",
+            vec![
+                ("name", "string", "Disk name"),
+                ("base", "string", "Base image path (qcow2)"),
+                ("size_gb", "number", "Virtual size in GB (default 20)"),
+            ],
+        ),
+        tool("terra_disk_list", "List all managed disks.", vec![]),
+        tool(
+            "terra_disk_delete",
+            "Delete a managed disk (refused while a VM uses it).",
+            vec![("name", "string", "Disk name")],
         ),
     ]
 }
@@ -169,8 +184,8 @@ fn call_tool(name: &str, args: &serde_json::Value) -> String {
             if let Some(v) = args.get("initramfs").and_then(|a| a.as_str()) {
                 c = c.with_initramfs(v);
             }
-            if let Some(v) = args.get("rootfs_disk").and_then(|a| a.as_str()) {
-                c = c.with_base_disk(v);
+            if let Some(v) = args.get("disk").and_then(|a| a.as_str()) {
+                c = c.with_disk(v);
             }
             send_to_engine(&c)
         }
@@ -201,6 +216,22 @@ fn call_tool(name: &str, args: &serde_json::Value) -> String {
         "terra_vm_destroy" => {
             let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
             send_to_engine(&Command::new("destroy").with_name(name))
+        }
+        "terra_disk_create" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            let base = args.get("base").and_then(|a| a.as_str()).unwrap_or("");
+            let mut c = Command::new("disk_create")
+                .with_name(name)
+                .with_base_disk(base);
+            if let Some(v) = args.get("size_gb").and_then(|a| a.as_u64()) {
+                c = c.with_disk_size_gb(v);
+            }
+            send_to_engine(&c)
+        }
+        "terra_disk_list" => send_to_engine(&Command::new("disk_list")),
+        "terra_disk_delete" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            send_to_engine(&Command::new("disk_delete").with_name(name))
         }
         _ => r#"{"status":"error","error":"unknown tool"}"#.to_string(),
     };
