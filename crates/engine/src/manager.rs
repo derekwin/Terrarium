@@ -109,11 +109,16 @@ impl VmManager {
 
     /// Destroy a VM: shut down and delete persistent files (overlay disk, etc).
     pub async fn destroy(&mut self, name: &str) -> Result<(), AdapterError> {
-        let handle = self
-            .vms
-            .remove(name)
-            .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
-        handle.shutdown().await?;
+        // The VM may already be deregistered (e.g. after shutdown) — the
+        // overlay must still be cleaned up. Only report not-found when the
+        // name is unknown to both the registry and the overlay map.
+        let known = self.vms.contains_key(name) || self.overlays.contains_key(name);
+        if !known {
+            return Err(AdapterError::not_found(format!("VM '{}' not found", name)));
+        }
+        if let Some(handle) = self.vms.remove(name) {
+            handle.shutdown().await?;
+        }
 
         // Clean up overlay disk
         if let Some(disk) = self.overlays.remove(name) {

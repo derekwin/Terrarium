@@ -221,6 +221,9 @@ impl Drop for ChVmHandle {
         let _ = self.child.wait();
         let socket = format!("/tmp/terra-{}.sock", self.name);
         let _ = std::fs::remove_file(&socket);
+        // CH creates a lock file next to the API socket — remove it too,
+        // otherwise stale .sock.lock files accumulate across VM lifecycles.
+        let _ = std::fs::remove_file(format!("{}.lock", socket));
     }
 }
 
