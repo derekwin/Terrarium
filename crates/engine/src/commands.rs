@@ -20,11 +20,6 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "destroy" => cmd_destroy(mgr, cmd).await,
         "snapshot" => cmd_snapshot(mgr, cmd).await,
         "restore" => cmd_restore(mgr, cmd),
-        // Disk commands: data lifecycle, fully independent of VMs.
-        "disk_create" => cmd_disk_create(mgr, cmd),
-        "disk_list" => cmd_disk_list(mgr),
-        "disk_info" => cmd_disk_info(mgr, cmd),
-        "disk_delete" => cmd_disk_delete(mgr, cmd),
         _ => Response::err(format!("Unknown command: {}", cmd.command)),
     }
 }
@@ -50,22 +45,11 @@ fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
         memory_mb,
         max_memory_mb,
         initramfs: cmd.initramfs.clone(),
-        disks: cmd.disks.clone(),
-        // Disks are attached by name from the engine registry (cmd.disk);
-        // the spec must never trigger adapter-side overlay creation.
-        base_disk: None,
-        overlay_backing: Vec::new(),
-        disk_size_gb: cmd.disk_size_gb.unwrap_or(20),
         backend_config: None,
     })
 }
 
 async fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
-    if cmd.base_disk.is_some() {
-        return Response::err(
-            "'base_disk' is no longer accepted by create — use disk_create first, then create with 'disk'",
-        );
-    }
     let spec = match build_spec(&cmd) {
         Ok(s) => s,
         Err(e) => return Response::err(e),
@@ -74,7 +58,7 @@ async fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
         return Response::err(e);
     }
     let name = spec.name.to_string();
-    match mgr.spawn(spec, cmd.disk.as_deref()).await {
+    match mgr.spawn(spec).await {
         Ok(()) => {
             let pid = mgr.get(&name).map(|h| h.pid());
             Response::ok(serde_json::json!({"name": name, "status": "created", "pid": pid}))
@@ -171,73 +155,7 @@ async fn cmd_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
         None => return Response::err("Missing 'name' field"),
     };
     match mgr.destroy(&name).await {
-        Ok(()) => Response::ok_msg(&format!(
-            "VM '{}' destroyed (disks are kept — use disk_delete to remove data)",
-            name
-        )),
-        Err(e) => Response::err(e.to_string()),
-    }
-}
-
-fn cmd_disk_create(mgr: &mut VmManager, cmd: Command) -> Response {
-    let name = match cmd.name.as_deref() {
-        Some(n) => n,
-        None => return Response::err("Missing 'name' field"),
-    };
-    let base = match cmd.base_disk.as_deref() {
-        Some(b) => b,
-        None => return Response::err("Missing 'base_disk' field (path to base image)"),
-    };
-    let size_gb = cmd.disk_size_gb.unwrap_or(20);
-    match mgr.disk_create(name, base, size_gb) {
-        Ok(path) => Response::ok(serde_json::json!({
-            "name": name, "path": path, "backing": base, "size_gb": size_gb,
-        })),
-        Err(e) => Response::err(e.to_string()),
-    }
-}
-
-fn cmd_disk_list(mgr: &VmManager) -> Response {
-    let disks: Vec<_> = mgr
-        .disk_list()
-        .into_iter()
-        .map(|(name, info)| {
-            let in_use = mgr.disk_in_use_by(&name);
-            serde_json::json!({
-                "name": name,
-                "path": info.path,
-                "backing": info.backing,
-                "in_use_by": in_use,
-            })
-        })
-        .collect();
-    Response::ok(serde_json::json!({"disks": disks, "count": disks.len()}))
-}
-
-fn cmd_disk_info(mgr: &VmManager, cmd: Command) -> Response {
-    let name = match cmd.name.as_deref() {
-        Some(n) => n,
-        None => return Response::err("Missing 'name' field"),
-    };
-    match mgr.disk_info(name) {
-        Some(info) => Response::ok(serde_json::json!({
-            "name": name,
-            "path": info.path,
-            "backing": info.backing,
-            "size_gb": info.size_gb,
-            "in_use_by": mgr.disk_in_use_by(name),
-        })),
-        None => Response::err(format!("disk '{}' not found", name)),
-    }
-}
-
-fn cmd_disk_delete(mgr: &mut VmManager, cmd: Command) -> Response {
-    let name = match cmd.name.as_deref() {
-        Some(n) => n,
-        None => return Response::err("Missing 'name' field"),
-    };
-    match mgr.disk_delete(name) {
-        Ok(()) => Response::ok_msg(&format!("disk '{}' deleted", name)),
+        Ok(()) => Response::ok_msg(&format!("VM '{}' destroyed", name)),
         Err(e) => Response::err(e.to_string()),
     }
 }

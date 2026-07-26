@@ -35,9 +35,6 @@ enum Commands {
         max_memory: Option<u64>,
         #[arg(long, default_value = "512")]
         memory: u64,
-        /// Attach an existing managed disk by name (see disk-create).
-        #[arg(long)]
-        disk: Option<String>,
     },
     List,
     Info {
@@ -56,24 +53,8 @@ enum Commands {
     Kill {
         name: String,
     },
-    /// Stop and deregister a VM. Never deletes disks.
+    /// Stop and deregister a VM.
     Destroy {
-        name: String,
-    },
-    /// Create a managed disk (qcow2 overlay on a base image).
-    DiskCreate {
-        name: String,
-        #[arg(long)]
-        base: String,
-        #[arg(long, default_value = "20")]
-        size: u64,
-    },
-    DiskList,
-    DiskInfo {
-        name: String,
-    },
-    /// Delete a managed disk. Refused while a VM is using it.
-    DiskDelete {
         name: String,
     },
 }
@@ -89,7 +70,6 @@ fn main() {
             max_cpus,
             max_memory,
             memory,
-            disk,
         } => {
             let mut cmd = Command::create(&name, &kernel)
                 .with_cpus(cpus)
@@ -102,9 +82,6 @@ fn main() {
             }
             if let Some(m) = max_memory {
                 cmd = cmd.with_max_memory_mb(m);
-            }
-            if let Some(d) = disk {
-                cmd = cmd.with_disk(d);
             }
             print_response(send(&cli.socket, &cmd));
         }
@@ -136,28 +113,6 @@ fn main() {
         }
         Commands::Destroy { name } => {
             print_response(send(&cli.socket, &Command::new("destroy").with_name(name)));
-        }
-        Commands::DiskCreate { name, base, size } => {
-            let cmd = Command::new("disk_create")
-                .with_name(name)
-                .with_base_disk(base)
-                .with_disk_size_gb(size);
-            print_response(send(&cli.socket, &cmd));
-        }
-        Commands::DiskList => {
-            print_response(send(&cli.socket, &Command::new("disk_list")));
-        }
-        Commands::DiskInfo { name } => {
-            print_response(send(
-                &cli.socket,
-                &Command::new("disk_info").with_name(name),
-            ));
-        }
-        Commands::DiskDelete { name } => {
-            print_response(send(
-                &cli.socket,
-                &Command::new("disk_delete").with_name(name),
-            ));
         }
     }
 }

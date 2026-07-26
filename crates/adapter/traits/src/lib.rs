@@ -143,24 +143,11 @@ pub struct VmSpec {
     /// Path to initramfs (cpio archive).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initramfs: Option<String>,
-    /// Disk images to attach.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub disks: Vec<String>,
-    /// Base disk for qcow2 overlay (shared, read-only).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_disk: Option<String>,
-    /// Backing files of overlays in `disks` (read-only to the VMM).
-    ///
-    /// The VMM opens these implicitly through each overlay's qcow2 header,
-    /// so they never appear in `--disk` args — but CH `--landlock` only
-    /// whitelists explicit paths, so adapters must grant read access to
-    /// every path listed here (e.g. via `--landlock-rules`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overlay_backing: Vec<String>,
-    /// Virtual disk size for overlay in GB.
-    #[serde(default = "default_disk_size_gb")]
-    pub disk_size_gb: u64,
     /// Backend-specific configuration (JSON blob, adapter-defined).
+    ///
+    /// Storage/filesystem configuration (e.g. virtiofs layer sets) is
+    /// carried here until it graduates to first-class fields — see
+    /// docs/plans/ for the filesystem design.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_config: Option<serde_json::Value>,
 }
@@ -176,14 +163,10 @@ pub struct VmCapabilities {
     pub pause_resume: bool,
     #[serde(default)]
     pub network_qos: bool,
-    /// Whether this VMM supports qcow2 backing chains (COW at block level).
-    /// If false, the overlay crate falls back to raw disk conversion.
-    #[serde(default = "default_true")]
-    pub qcow2: bool,
-}
-
-fn default_true() -> bool {
-    true
+    /// Whether this VMM can share a host directory tree with the guest
+    /// (virtiofs or equivalent). False for block-only backends.
+    #[serde(default)]
+    pub virtio_fs: bool,
 }
 
 /// Network QoS configuration for a VM.
@@ -243,10 +226,6 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
-}
-
-fn default_disk_size_gb() -> u64 {
-    20
 }
 
 impl VmSpec {

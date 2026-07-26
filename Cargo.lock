@@ -8,7 +8,6 @@ version = "0.1.0"
 dependencies = [
  "adapter-traits",
  "async-trait",
- "overlay",
  "serde",
  "serde_json",
  "tempfile",
@@ -17,19 +16,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uds-http",
-]
-
-[[package]]
-name = "adapter-firecracker"
-version = "0.1.0"
-dependencies = [
- "adapter-traits",
- "async-trait",
- "overlay",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -197,7 +183,6 @@ version = "0.1.0"
 dependencies = [
  "adapter-cloud-hypervisor",
  "adapter-traits",
- "overlay",
  "serde",
  "serde_json",
  "terrarium-protocol",
@@ -332,16 +317,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "overlay"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
-]
 
 [[package]]
 name = "parking_lot"

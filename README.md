@@ -2,7 +2,7 @@
 
 **Production-grade agent sandboxing — deploy secure, isolated execution environments with high single-node density.**
 
-Terrarium Engine is a scheduling and control layer that decouples agent sandboxing from specific VM and sandbox technologies. Think of it as the control plane that turns any Linux host into a multi-tenant agent runtime — with hardware-level VM isolation, pluggable sandbox backends, and qcow2 overlay filesystem.
+Terrarium Engine is a scheduling and control layer that decouples agent sandboxing from specific VM and sandbox technologies. Think of it as the control plane that turns any Linux host into a multi-tenant agent runtime — with hardware-level VM isolation, pluggable sandbox backends, and a layered virtiofs filesystem (EROFS + OverlayFS, see docs/plans).
 
 ## Why Terrarium
 
@@ -13,7 +13,7 @@ Running AI agents in production means running untrusted code at scale. Container
 | Isolation | Weak (shared kernel) | Strong (KVM) | **Strong (KVM + sandbox)** |
 | Density | High | Low | **High** |
 | Provisioning | Fast | Slow (~1s) | **Fast (~1s via CH)** |
-| File persistence | Ephemeral | Disk image | **Portable qcow2 overlay** |
+| File persistence | Ephemeral | Disk image | **Layered virtiofs (shared page cache)** |
 | Resource control | cgroup | VM config | **Network QoS via tc** |
 | Sandbox backends | N/A | N/A | **Pluggable (Sandlock, OpenShell)** |
 
@@ -42,7 +42,7 @@ Running AI agents in production means running untrusted code at scale. Container
 │  │  │  sandlock CLI / openshell CLI         │  │            │
 │  │  │  Agent process ◄── Sandbox isolation  │  │            │
 │  │  └───────────────────────────────────────┘  │            │
-│  │  每 VM: 独立 qcow2 overlay · network QoS    │            │
+│  │  每 VM: virtiofs rootfs（EROFS 层 + 独立 upperdir）· QoS    │            │
 │  └─────────────────────────────────────────────┘            │
 │                                                              │
 │  Adapter trait 解耦，支持多后端                                │
@@ -53,7 +53,7 @@ Running AI agents in production means running untrusted code at scale. Container
 
 | Trait | What it does | Implementations |
 |---|---|---|
-| `VmAdapter` | Spawn, resize, snapshot VMs | Cloud Hypervisor, Firecracker |
+| `VmAdapter` | Spawn, resize, snapshot VMs | Cloud Hypervisor (Firecracker dropped — no virtiofs) |
 | `SandboxAdapter` | Create, exec, destroy sandboxes | Sandlock, OpenShell |
 
 ## Key Capabilities
@@ -61,17 +61,18 @@ Running AI agents in production means running untrusted code at scale. Container
 ### Adapter Trait Architecture
 
 - Engine completely decoupled from VM implementations via `VmAdapter` / `VmHandle` traits
-- Pluggable backends: Cloud Hypervisor, Firecracker, Sandlock, OpenShell
+- Pluggable backends: Cloud Hypervisor, Sandlock, OpenShell (Firecracker removed — no virtiofs support)
 - Unified error type (`AdapterError`) across all adapters
 - Async runtime (tokio) for concurrent VM operations
 
-### Qcow2 Overlay Filesystem
+### Layered Filesystem (virtiofs)
 
 ```
-  user-data.qcow2    (读写，per-user，可迁移)     ← 用户数据层
-  rootfs.qcow2        (只读，共享)                  ← 系统层
+  upperdir (可写，per-VM 宿主目录)     ← 用户数据层
+  tool layers (EROFS，只读，按需组合)  ← 工具层
+  base layer  (EROFS，只读，共享)      ← 系统层
 ```
-qcow2 backing chain：写操作落到用户层，读操作逐层回退。可 `scp` 用户层到任意机器，继续工作。
+宿主侧 OverlayFS 星型组合只读层（任意搭配、page cache 共享），经 virtiofs + DAX 暴露给 VM；写操作 copy-up 进独立 upperdir。计算与数据生命周期分离：VM 命令永不删除数据。设计见 docs/plans。
 
 ### Pluggable Sandbox Backends
 
@@ -102,8 +103,8 @@ export TERRA_CH_BINARY=/usr/local/bin/cloud-hypervisor
 export TERRA_STATE_DIR=/var/lib/terra/vms
 cargo run -p engine --release -- daemon
 
-# Create VM with overlay
-terra create agent-1 --kernel target/guest/vmlinux.bin --rootfs-disk /data/full.qcow2
+# Create VM (initramfs-based; layered rootfs lands with the virtiofs backend)
+terra create agent-1 --kernel target/guest/vmlinux.bin --initramfs target/guest/alpine.cpio
 
 # List VMs
 terra list
@@ -136,12 +137,10 @@ crates/
 ├── adapter/
 │   ├── traits/      VmAdapter + SandboxAdapter trait definitions
 │   ├── cloud-hypervisor/  CH adapter (tokio async client)
-│   ├── firecracker/       FC adapter (sync client)
-│   ├── sandlock/    Sandlock adapter (SandboxAdapter)
+│   ├── sandlock/    Sandlock adapter (SandboxAdapter, capability-gated)
 │   └── openshell/   OpenShell adapter (SandboxAdapter)
 ├── protocol/        Shared Command/Response types (JSON protocol)
 ├── guest-proxy/     Host↔guest command relay daemon
-├── overlay/         Qcow2 overlay filesystem management
 ├── network/         Per-VM tc-based network QoS
 ├── cli/             terra CLI (uses protocol crate)
 └── mcp/             MCP Server (stdio JSON-RPC)
@@ -155,9 +154,9 @@ images/              Guest kernel + rootfs build
 ## Roadmap
 
 - **M0** ✅ CH base, guest images, baseline measurements
-- **M1** ✅ Engine daemon, CLI, VM lifecycle, qcow2 overlay
+- **M1** ✅ Engine daemon, CLI, VM lifecycle
 - **M2** ✅ Adapter layer, Sandlock/OpenShell, async tokio runtime, Python SDK
-- **M3** 🔲 Warm pool, scheduler re-design, multi-node placement, observability
+- **M3** 🔲 virtiofs filesystem (EROFS layers + OverlayFS + DAX), warm pool, observability
 - **M4** 🔲 Snapshot fault tolerance, density benchmarks, full production hardening
 
 ## License

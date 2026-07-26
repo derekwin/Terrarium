@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 adapter-cloud-hypervisor = { path = "../adapter/cloud-hypervisor" }
 adapter-traits = { path = "../adapter/traits" }
-overlay = { path = "../overlay" }
 terrarium-protocol = { path = "../protocol" }
 serde = { workspace = true }
 serde_json = { workspace = true }

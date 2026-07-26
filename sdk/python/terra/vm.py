@@ -38,15 +38,15 @@ class Vm:
         )
 
     def shutdown(self) -> dict:
-        """Gracefully shut down the VM. Overlay disk is kept."""
+        """Gracefully shut down and deregister the VM."""
         return self._client.vm_shutdown(self.name)
 
     def kill(self) -> dict:
-        """Force-kill the VM. Overlay disk is kept."""
+        """Force-kill and deregister the VM."""
         return self._client.vm_kill(self.name)
 
     def destroy(self) -> dict:
-        """Stop and deregister the VM. Disks are kept (see disk_delete)."""
+        """Stop and deregister the VM."""
         return self._client.vm_destroy(self.name)
 
     def __enter__(self) -> "Vm":
@@ -75,9 +75,6 @@ def create(
         name: Unique VM name.
         kernel: Path to kernel image (bzImage).
         initramfs: Path to initramfs cpio archive.
-        disk: Name of an existing managed disk to attach
-            (create it first with ``client.disk_create``). Disks have
-            their own lifecycle and outlive VMs.
 
     Raises:
         TerraError: If the engine returns an error.
@@ -93,7 +90,6 @@ def create(
         max_cpus=max_cpus,
         memory_mb=memory_mb,
         max_memory_mb=max_memory_mb,
-        disk=disk,
     )
     return Vm(name=name, client=client, pid=resp.get("pid"))
 

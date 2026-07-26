@@ -1,0 +1,39 @@
+# ADR: 文件系统转向 EROFS+OverlayFS+virtiofs，收缩仓库（2026-07-26）
+
+## 决策
+
+1. **放弃 qcow2 链式镜像与 raw 格式**，删除 `crates/overlay`。文件系统改走 EROFS 只读层 + OverlayFS 组合 + virtiofs 暴露（设计见下文）。
+2. **删除 Firecracker adapter**（`crates/adapter/firecracker`）：FC 不支持 virtiofs，无法共享 page cache，与新文件系统方向不兼容。
+3. **保留抽象**：`VmAdapter`/`SandboxAdapter` trait、`VmSpec.backend_config`（承载未来的层配置）、`VmCapabilities.virtio_fs` 能力位。VM 生命周期语义维持「计算与数据分离」：VM 命令永不删除数据。
+4. qcow2 时代的 disk_* 命令族同步移除——未来数据层 API 围绕「层 + upperdir」重新设计，形状不同，不留半截抽象。
+
+历史代码可从 git 历史恢复（qcow2 overlay 最后形态：见本 ADR 前一个 commit）。
+
+## 文件系统设计（已批准）
+
+- **三层**：系统层（EROFS+LZ4，共享）/ 工具层（EROFS+LZ4，按需组合）/ 用户层（宿主普通目录，per-VM 独立 upperdir）。
+- **组合**：宿主侧 OverlayFS `lowerdir=layerN:...:python:base`（右侧优先），星型组合，非链式。
+- **暴露**：virtiofsd（per-VM 进程，seccomp+landlock）+ CH `--fs` + DAX；guest initramfs mount virtiofs 后 switch_root。
+- **动机**：100 VM 共享一份 Python 层，host page cache 只有一份——qcow2 链式给不了的密度。
+- **快照语义**：快照只含内存状态；文件状态在 upperdir，与 VM 生命周期解耦。
+- **数据策略**：临时模式（用完删 upperdir）/ 保留模式（持久复用）/ 快照模式（upperdir 打包为新 EROFS 层）。
+
+## 三个已识别的硬问题（评审结论，实施时必读）
+
+1. **挂载权限**：`mount -t erofs/overlayfs` 需要 CAP_SYS_ADMIN。MVP 决策：daemon 以 root/特权运行（tc/cgroup 本来也需要）；user-namespace 沙箱化留作后续加固。
+2. **热启动需要 host→guest 通道**：预热池热插 virtiofs 设备后，guest 内需 agent 执行 mount——走 vsock（guest 内核已有 `CONFIG_VIRTIO_VSOCKETS`），guest-proxy 需扩展 vsock 监听与 mount 协议。这是 FS-M4 的实质工作量。
+3. **guest 内核缺口**：需补 `CONFIG_VIRTIO_FS`（M1）、`CONFIG_FUSE_DAX`（M2）、`CONFIG_HOTPLUG_PCI_ACPI`（M4）。每次改配置后必须核对 `.config` 生效（VIRTIO_MEM 被 olddefconfig 静默丢弃的教训）。
+
+## 简化决策
+
+- **EROFS 后置到 M3**：OverlayFS lowerdir 用普通目录即可，层先做裸目录（`$TERRA_LAYER_DIR/{base,python,...}/`），EROFS 仅作打包/分发优化。不可变语义用版本目录命名守住。
+- **upperdir 用宿主普通目录**，不做 ext4 镜像；tmpfs upper 作为 ephemeral 模式候选。
+
+## 里程碑
+
+| 阶段 | 内容 | 验收 |
+|---|---|---|
+| FS-M1 冷启动 | 裸目录层 + OverlayFS + virtiofsd + CH --fs + switch_root init；内核 VIRTIO_FS | VM 以组合层为 rootfs 启动 |
+| FS-M2 基准裁决 | DAX + cache=always；对比 qcow2 历史数据：启动时间、pip install 耗时、内存密度。**数据不赢不换默认** | docs/ 实测报告 |
+| FS-M3 EROFS 打包 | mkfs.erofs 工具链 + 层注册表（名称/版本/镜像） | 层镜像可构建可组合 |
+| FS-M4 预热池热启动 | vsock 通道 + guest-proxy mount 协议 + CH add-fs/remove-device + 内核 HOTPLUG_PCI_ACPI | 热分配任务层 < 100ms |

@@ -126,11 +126,6 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
         )
 
     state_dir = Path(tempfile.mkdtemp(prefix="terra-sdk-e2e-"))
-    base_disk = state_dir / "base.qcow2"
-    subprocess.run(
-        ["qemu-img", "create", "-f", "qcow2", str(base_disk), "128M"],
-        check=True, capture_output=True,
-    )
 
     if Path(SOCKET).exists():
         Path(SOCKET).unlink()
@@ -153,7 +148,6 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
         daemon_log=daemon_log,
         client=TerraClient(socket_path=SOCKET),
         state_dir=state_dir,
-        base_disk=base_disk,
         created=[],  # names to best-effort destroy in teardown
     )
     print(f"[setup] daemon pid={daemon.pid} state_dir={state_dir} ch={ch}")
@@ -209,33 +203,6 @@ def test_create_and_info() -> None:
     assert mode == "0o600", mode
 
 
-def test_create_with_disk_single_disk_and_landlock() -> None:
-    client = _state["client"]
-    # data layer first: create a managed disk, then attach it by name
-    client.disk_create("sdk-disk2", str(_state["base_disk"]), size_gb=1)
-    vm = create(
-        "sdk-t2", str(KERNEL),
-        initramfs=str(INITRAMFS),
-        disk="sdk-disk2",
-        client=client,
-    )
-    _track("sdk-t2")
-    assert vm.info()["state"] == "Running"
-    args = _ch_cmdline(vm.pid)
-    disks = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--disk"]
-    assert len(disks) == 1, f"expected exactly one --disk, got {disks}"
-    assert "backing_files=on" in disks[0], disks
-    assert "image_type=qcow2" in disks[0], disks
-    assert "sdk-disk2/overlay.qcow2" in disks[0], disks
-    rules = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--landlock-rules"]
-    assert any(str(_state["base_disk"]) in r for r in rules), (
-        f"landlock rule for backing file missing: {rules}"
-    )
-    assert "--landlock" in args
-    # the disk is visible and reported in-use
-    info = client.disk_info("sdk-disk2")
-    assert info["in_use_by"] == "sdk-t2", info
-
 
 def test_resize_cpus() -> None:
     client = _state["client"]
@@ -258,33 +225,23 @@ def test_resize_memory() -> None:
         )
 
 
-def test_concurrent_create_shared_base() -> None:
-    client = _state["client"]
-
+def test_concurrent_create() -> None:
     def mk(i: int) -> str:
-        dname = f"sdk-disk-c{i}"
-        client.disk_create(dname, str(_state["base_disk"]), size_gb=1)
         name = f"sdk-c{i}"
         create(
             name, str(KERNEL),
             initramfs=str(INITRAMFS),
             cpus=1, memory_mb=128,
-            disk=dname,
-            client=client,
+            client=_state["client"],
         )
         _track(name)
         return name
 
-    # concurrent disk_create + VM create over a shared base image
     with ThreadPoolExecutor(max_workers=3) as ex:
         names = list(ex.map(mk, range(3)))
     for n in names:
-        assert client.vm_info(n)["state"] == "Running", n
-    out = subprocess.run(
-        ["qemu-img", "check", str(_state["base_disk"])],
-        capture_output=True, text=True,
-    )
-    assert "No errors were found" in out.stdout, out.stdout + out.stderr
+        assert _state["client"].vm_info(n)["state"] == "Running", n
+
 
 
 def test_list_vms() -> None:
@@ -324,56 +281,30 @@ def test_error_paths() -> None:
         raise AssertionError("no-param resize accepted")
     except TerraError as e:
         assert "cpus" in str(e) or "memory_bytes" in str(e), e
-    # attach a disk that does not exist
-    try:
-        create("sdk-x1", str(KERNEL), initramfs=str(INITRAMFS),
-               disk="no-such-disk", client=client)
-        raise AssertionError("unknown disk accepted")
-    except TerraError as e:
-        assert "no-such-disk" in str(e), e
-    # attach a disk that is already in use by another VM
-    try:
-        create("sdk-x2", str(KERNEL), initramfs=str(INITRAMFS),
-               disk="sdk-disk2", client=client)
-        raise AssertionError("in-use disk attached twice")
-    except TerraError as e:
-        assert "in use" in str(e) or "already attached" in str(e), e
-    # delete a disk while it is in use
-    try:
-        client.disk_delete("sdk-disk2")
-        raise AssertionError("in-use disk deleted")
-    except TerraError as e:
-        assert "in use" in str(e), e
 
 
-def test_destroy_keeps_disk_and_disk_delete_works() -> None:
+
+def test_destroy_cleans_up() -> None:
     client = _state["client"]
-    state_dir = _state["state_dir"]
-    # VM destroy must never delete data
+    create("sdk-t2", str(KERNEL), initramfs=str(INITRAMFS),
+           cpus=1, memory_mb=128, client=client)
+    _track("sdk-t2")
     client.vm_destroy("sdk-t2")
     _state["created"].remove("sdk-t2")
-    assert (state_dir / "vms" / "sdk-disk2" / "overlay.qcow2").exists(), (
-        "destroy deleted the disk — lifecycle separation broken"
-    )
     assert not Path("/tmp/terra-sdk-t2.sock").exists(), "API socket leaked"
     try:
         client.vm_info("sdk-t2")
         raise AssertionError("destroyed VM still visible")
     except TerraError:
         pass
-    # disk layer: explicit delete is the only way to remove data
-    client.disk_delete("sdk-disk2")
-    assert not (state_dir / "vms" / "sdk-disk2").exists(), "overlay leaked"
+
 
 
 def test_shutdown_and_kill() -> None:
     client = _state["client"]
-    state_dir = _state["state_dir"]
-    # shutdown contract: stop + deregister; disk is kept and remains
-    # manageable through the data layer.
-    client.disk_create("sdk-disk-s1", str(_state["base_disk"]), size_gb=1)
+    # shutdown contract: stop + deregister
     create("sdk-s1", str(KERNEL), initramfs=str(INITRAMFS),
-           cpus=1, memory_mb=128, disk="sdk-disk-s1", client=client)
+           cpus=1, memory_mb=128, client=client)
     _track("sdk-s1")
     pid = client.vm_info("sdk-s1")["pid"]
     client.vm_shutdown("sdk-s1")
@@ -383,10 +314,7 @@ def test_shutdown_and_kill() -> None:
         raise AssertionError("shut-down VM still registered")
     except TerraError as e:
         assert "not found" in str(e), e
-    # disk survived shutdown and can be deleted explicitly
-    assert (state_dir / "vms" / "sdk-disk-s1" / "overlay.qcow2").exists()
-    client.disk_delete("sdk-disk-s1")
-    assert not (state_dir / "vms" / "sdk-disk-s1").exists()
+    _state["created"].remove("sdk-s1")
 
     # kill contract: same deregistration semantics as shutdown
     create("sdk-k1", str(KERNEL), initramfs=str(INITRAMFS),
