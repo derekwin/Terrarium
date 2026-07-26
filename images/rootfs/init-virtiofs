@@ -1,0 +1,20 @@
+#!/bin/sh
+# Terrarium virtiofs boot init (FS-M1)
+#
+# Runs as PID 1 from initramfs. Mounts the host-composed rootfs
+# (EROFS/plain layers + OverlayFS, served by virtiofsd as tag "rootfs")
+# and switch_roots into it.
+
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /newroot
+
+echo "init: mounting virtiofs tag=rootfs"
+if ! mount -t virtiofs rootfs /newroot; then
+    echo "init: virtiofs mount FAILED, dropping to initramfs shell"
+    exec /bin/sh
+fi
+
+echo "init: switch_root to layered rootfs"
+exec switch_root /newroot /init

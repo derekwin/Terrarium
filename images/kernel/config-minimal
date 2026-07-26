@@ -94,6 +94,9 @@ CONFIG_CONTIG_ALLOC=y
 CONFIG_EXCLUSIVE_SYSTEM_RAM=y
 # acpid receives ACPI power-button events via evdev (CH vm.shutdown)
 CONFIG_INPUT_EVDEV=y
+# virtiofs rootfs (FS-M1): guest mounts host-shared layers via virtiofs
+CONFIG_FUSE_FS=y
+CONFIG_VIRTIO_FS=y
 CONFIG_VIRTIO_MEM=y
 CONFIG_VIRTIO_BALLOON=y
 
