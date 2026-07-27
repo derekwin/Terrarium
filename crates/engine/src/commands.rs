@@ -229,7 +229,8 @@ async fn cmd_exec(mgr: &VmManager, cmd: Command) -> Response {
     if cmd.args.is_empty() {
         return Response::err("Missing 'args' field");
     }
-    match mgr.exec(name, &cmd.args).await {
+    let timeout = cmd.timeout_secs.unwrap_or(60).min(3600);
+    match mgr.exec(name, &cmd.args, timeout).await {
         Ok(r) => Response::ok(serde_json::json!({
             "stdout": r.stdout,
             "stderr": r.stderr,

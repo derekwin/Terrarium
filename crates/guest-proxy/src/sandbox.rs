@@ -13,11 +13,24 @@ pub struct ExecResult {
     pub exit_code: i32,
 }
 
-const EXEC_TIMEOUT_SECS: u64 = 60;
 const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 
-pub fn exec_isolated(program: &str, args: &[String], work_dir: &str) -> Result<ExecResult, String> {
-    let mut child = Command::new(program)
+pub fn exec_isolated(
+    program: &str,
+    args: &[String],
+    work_dir: &str,
+    timeout_secs: u64,
+) -> Result<ExecResult, String> {
+    let mut child = Command::new(program);
+    // Agents inherit an almost-empty environment from init; give commands
+    // a sane default PATH so /sbin tools (ip, apk, ...) resolve.
+    child.env(
+        "PATH",
+        std::env::var("PATH").unwrap_or_else(|_| {
+            "/sbin:/usr/sbin:/bin:/usr/bin".into()
+        }),
+    );
+    let mut child = child
         .args(&args[1..])
         .current_dir(work_dir)
         .stdin(Stdio::null())
@@ -59,7 +72,7 @@ pub fn exec_isolated(program: &str, args: &[String], work_dir: &str) -> Result<E
         let _ = tx.send(child.wait());
     });
 
-    let exit_status = match rx.recv_timeout(Duration::from_secs(EXEC_TIMEOUT_SECS)) {
+    let exit_status = match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => return Err(format!("wait failed: {}", e)),
         Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -67,7 +80,7 @@ pub fn exec_isolated(program: &str, args: &[String], work_dir: &str) -> Result<E
             // killpg(-pid, SIGKILL) kills the entire process group,
             // preventing orphaned grandchild processes.
             unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-            return Err(format!("command timed out after {}s", EXEC_TIMEOUT_SECS));
+            return Err(format!("command timed out after {}s", timeout_secs));
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             return Err("process wait thread panicked".into());

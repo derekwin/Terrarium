@@ -64,6 +64,10 @@ pub struct Command {
     // pool_create: number of idle VMs to maintain
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_size: Option<u32>,
+
+    // exec: per-command timeout in seconds (default 60, capped at 3600)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 impl Command {
@@ -87,6 +91,7 @@ impl Command {
             snapshot_path: None,
             memory_bytes: None,
             pool_size: None,
+            timeout_secs: None,
         }
     }
 
@@ -169,6 +174,12 @@ impl Command {
     /// Builder: set initramfs.
     pub fn with_initramfs(mut self, path: impl Into<String>) -> Self {
         self.initramfs = Some(path.into());
+        self
+    }
+
+    /// Builder: set exec timeout in seconds.
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout_secs = Some(secs);
         self
     }
 

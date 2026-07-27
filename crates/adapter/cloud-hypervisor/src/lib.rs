@@ -452,9 +452,15 @@ impl VmHandle for ChVmHandle {
             .map_err(|e| AdapterError::internal(format!("vm.add-disk: {}", e)))
     }
 
-    async fn exec(&self, args: &[String]) -> Result<adapter_traits::ExecResult, AdapterError> {
+    async fn exec(
+        &self,
+        args: &[String],
+        timeout_secs: u64,
+    ) -> Result<adapter_traits::ExecResult, AdapterError> {
         let resp = self
-            .guest_cmd(&serde_json::json!({"command": "exec", "args": args}))
+            .guest_cmd(&serde_json::json!({
+                "command": "exec", "args": args, "timeout_secs": timeout_secs,
+            }))
             .await?;
         if resp["status"].as_str() != Some("ok") {
             return Err(AdapterError::internal(format!(

@@ -177,8 +177,70 @@ pub fn ensure_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), 
             "-j", "MASQUERADE",
         ])?;
     }
+    // DHCP for guests: dnsmasq bound to the bridge (idempotent).
+    ensure_dhcp(bridge, gateway)?;
+
     tracing::info!(%bridge, %gateway, "NAT bridge ready");
     Ok(())
+}
+
+/// Ensure a dnsmasq DHCP server is running on the bridge.
+///
+/// Resolution: $TERRA_DNSMASQ, PATH, /usr/sbin/dnsmasq. dnsmasq is a host
+/// dependency (like cloud-hypervisor); a clear error is returned when
+/// missing rather than silently leaving guests without DHCP.
+pub fn ensure_dhcp(bridge: &str, gateway: &str) -> Result<(), String> {
+    // Already serving this bridge?
+    if let Ok(status) = Command::new("pgrep").args(["-f", "dnsmasq.*", bridge]).output() {
+        if status.status.success() && !status.stdout.is_empty() {
+            return Ok(());
+        }
+    }
+    let bin = std::env::var("TERRA_DNSMASQ")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "dnsmasq".into());
+    // stdio must be null: dnsmasq daemonizes and the background child
+    // would hold our pipes open forever otherwise (output() never EOFs).
+    let out = Command::new(&bin)
+        .args([
+            &format!("--interface={}", bridge),
+            "--bind-interfaces",
+            "--except-interface=lo",
+            &format!("--dhcp-range={},12h", dhcp_range_of(gateway)),
+            "--dhcp-option=option:dns-server,8.8.8.8,223.5.5.5",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            format!(
+                "dnsmasq not found (apt install dnsmasq, or set TERRA_DNSMASQ): {}",
+                e
+            )
+        })?;
+    if !out.status.success() {
+        return Err(format!(
+            "dnsmasq: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    tracing::info!(%bridge, "dnsmasq DHCP started");
+    Ok(())
+}
+
+/// "10.200.0.100,10.200.0.250" style range derived from the gateway.
+fn dhcp_range_of(gateway: &str) -> String {
+    let parts: Vec<&str> = gateway.split('.').collect();
+    if parts.len() == 4 {
+        format!(
+            "{}.{}.{}.100,{}.{}.{}.250",
+            parts[0], parts[1], parts[2], parts[0], parts[1], parts[2]
+        )
+    } else {
+        gateway.to_string()
+    }
 }
 
 /// /24-style subnet string from a gateway address (last octet zeroed).

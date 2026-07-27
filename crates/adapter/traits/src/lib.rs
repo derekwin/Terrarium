@@ -341,7 +341,11 @@ pub trait VmHandle: Send + Sync {
 
     /// Execute a command inside the VM (via the guest agent, e.g.
     /// guest-proxy over vsock). Default: not supported by this backend.
-    async fn exec(&self, _args: &[String]) -> Result<ExecResult, AdapterError> {
+    async fn exec(
+        &self,
+        _args: &[String],
+        _timeout_secs: u64,
+    ) -> Result<ExecResult, AdapterError> {
         Err(AdapterError::not_supported(
             "exec not supported by this backend",
         ))

@@ -2,7 +2,6 @@
 #
 # Baseline: make allnoconfig, then enable only what we need.
 # Target bzImage: ≤ 30MB.
-#
 # Sections:
 # 1. Architecture & boot
 # 2. CH runtime required
@@ -18,7 +17,6 @@ CONFIG_X86_X2APIC=y
 CONFIG_HYPERVISOR_GUEST=y
 CONFIG_PARAVIRT=y
 CONFIG_KVM_GUEST=y
-
 # Basic kernel features
 CONFIG_PRINTK=y
 CONFIG_BUG=y
@@ -33,28 +31,23 @@ CONFIG_SHMEM=y
 CONFIG_AIO=y
 CONFIG_IO_URING=y
 CONFIG_ADVISE_SYSCALLS=y
-
 # Process & scheduling
 CONFIG_TICK_CPUIDLE=y
 CONFIG_NO_HZ_IDLE=y
 CONFIG_HIGH_RES_TIMERS=y
 CONFIG_PREEMPT_NONE=y
-
 # Filesystem support
 CONFIG_PROC_FS=y
 CONFIG_PROC_SYSCTL=y
 CONFIG_SYSFS=y
 CONFIG_TMPFS=y
 CONFIG_DEVTMPFS=y
-
 # Executable formats
 CONFIG_BINFMT_ELF=y
 CONFIG_BINFMT_SCRIPT=y
-
 # Block layer
 CONFIG_BLOCK=y
 CONFIG_BLK_DEV_INITRD=y
-
 # Networking
 CONFIG_NET=y
 CONFIG_PACKET=y
@@ -63,7 +56,6 @@ CONFIG_INET=y
 CONFIG_TCP_CONG_CUBIC=y
 CONFIG_DEFAULT_CUBIC=y
 CONFIG_IPV6=y
-
 # --- 2. CH runtime required ---
 CONFIG_VIRTUALIZATION=y
 CONFIG_KVM=y
@@ -78,11 +70,9 @@ CONFIG_VIRTIO_VSOCKETS=y
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_CONSOLE=y
 CONFIG_TTY=y
-
 # PCI
 CONFIG_PCI=y
 CONFIG_PCI_MSI=y
-
 # --- 3. Dynamic resource (M0) ---
 CONFIG_ACPI=y
 CONFIG_ACPI_HOTPLUG_CPU=y
@@ -92,6 +82,9 @@ CONFIG_MEMORY_HOTPLUG_DEFAULT_ONLINE=y
 CONFIG_MEMORY_HOTREMOVE=y
 CONFIG_CONTIG_ALLOC=y
 CONFIG_EXCLUSIVE_SYSTEM_RAM=y
+# virtio-net: guest networking (VM --net via host tap+NAT)
+CONFIG_NETDEVICES=y
+CONFIG_NET_CORE=y
 # acpid receives ACPI power-button events via evdev (CH vm.shutdown)
 CONFIG_INPUT_EVDEV=y
 # PCI hotplug for warm-pool virtiofs attach (FS-M4, CH vm.add-fs)
@@ -107,7 +100,6 @@ CONFIG_FS_DAX=y
 CONFIG_FUSE_DAX=y
 CONFIG_VIRTIO_MEM=y
 CONFIG_VIRTIO_BALLOON=y
-
 # --- 4. Sandbox & observability (pre-embedded for M2) ---
 CONFIG_SECURITY=y
 CONFIG_SECURITY_LANDLOCK=y
@@ -134,5 +126,4 @@ CONFIG_BPF=y
 CONFIG_BPF_SYSCALL=y
 CONFIG_CGROUP_BPF=y
 CONFIG_CHECKPOINT_RESTORE=y
-
 # CONFIG_USERFAULTFD is not directly configurable; enabled via KVM/MMU

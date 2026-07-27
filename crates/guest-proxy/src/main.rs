@@ -157,8 +157,9 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
     }
 
     let work_dir = cmd["work_dir"].as_str().unwrap_or("/tmp");
+    let timeout = cmd["timeout_secs"].as_u64().unwrap_or(60).min(3600);
 
-    match sandbox::exec_isolated(&args[0], &args, work_dir) {
+    match sandbox::exec_isolated(&args[0], &args, work_dir, timeout) {
         Ok(o) => {
             let resp = serde_json::json!({
                 "status": "ok",

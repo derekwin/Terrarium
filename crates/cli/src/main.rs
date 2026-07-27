@@ -98,6 +98,9 @@ enum Commands {
     /// Execute a command inside a VM (via the guest agent).
     Exec {
         name: String,
+        /// Per-command timeout in seconds (default 60, max 3600).
+        #[arg(long, default_value = "60")]
+        timeout: u64,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         args: Vec<String>,
     },
@@ -250,8 +253,15 @@ fn main() {
         Commands::NetList => {
             print_response(send(&cli.socket, &Command::new("net_list")));
         }
-        Commands::Exec { name, args } => {
-            let cmd = Command::new("exec").with_name(name).with_args(args);
+        Commands::Exec {
+            name,
+            timeout,
+            args,
+        } => {
+            let cmd = Command::new("exec")
+                .with_name(name)
+                .with_args(args)
+                .with_timeout_secs(timeout);
             print_response(send(&cli.socket, &cmd));
         }
         Commands::Image(img) => match img {

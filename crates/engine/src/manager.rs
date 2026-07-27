@@ -74,11 +74,12 @@ impl VmManager {
         &self,
         name: &str,
         args: &[String],
+        timeout_secs: u64,
     ) -> Result<adapter_traits::ExecResult, AdapterError> {
         self.vms
             .get(name)
             .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?
-            .exec(args)
+            .exec(args, timeout_secs)
             .await
     }
 

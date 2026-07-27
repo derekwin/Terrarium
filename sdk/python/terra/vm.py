@@ -37,9 +37,9 @@ class Vm:
             self.name, cpus=cpus, memory_bytes=memory_bytes
         )
 
-    def exec(self, args: list[str]) -> dict:
+    def exec(self, args: list[str], timeout_secs: int = 60) -> dict:
         """Execute a command inside the VM via the guest agent."""
-        return self._client.vm_exec(self.name, args)
+        return self._client.vm_exec(self.name, args, timeout_secs)
 
     def shutdown(self) -> dict:
         """Gracefully shut down and deregister the VM."""
