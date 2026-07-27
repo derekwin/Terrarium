@@ -42,10 +42,10 @@ Running AI agents in production means running untrusted code at scale. Container
 │  │  │  sandlock CLI / openshell CLI         │  │            │
 │  │  │  Agent process ◄── Sandbox isolation  │  │            │
 │  │  └───────────────────────────────────────┘  │            │
-│  │  每 VM: virtiofs rootfs（EROFS 层 + 独立 upperdir）· QoS    │            │
+│  │  per VM: virtiofs rootfs (EROFS layers + private upperdir)   │            │
 │  └─────────────────────────────────────────────┘            │
 │                                                              │
-│  Adapter trait 解耦，支持多后端                                │
+│  Multi-backend via Adapter traits                              │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -68,11 +68,16 @@ Running AI agents in production means running untrusted code at scale. Container
 ### Layered Filesystem (virtiofs)
 
 ```
-  upperdir (可写，per-VM 宿主目录)     ← 用户数据层
-  tool layers (EROFS，只读，按需组合)  ← 工具层
-  base layer  (EROFS，只读，共享)      ← 系统层
+  upperdir   (writable, per-VM host dir)      <- user data
+  tool layers (read-only EROFS, composable)   <- tools/runtime
+  base layer  (read-only EROFS, shared)       <- system
 ```
-宿主侧 OverlayFS 星型组合只读层（任意搭配、page cache 共享），经 virtiofs + DAX 暴露给 VM；写操作 copy-up 进独立 upperdir。计算与数据生命周期分离：VM 命令永不删除数据。设计见 docs/plans。
+Read-only layers are star-composed on the host with OverlayFS (arbitrary
+combinations, shared page cache) and exposed to the VM via virtiofs with
+`cache=always` (note: DAX was removed from Cloud Hypervisor — see
+docs/fs-m2-benchmark.md). Writes copy-up into the per-VM upperdir.
+Compute and data lifecycles are separate: VM commands never delete data.
+Design: docs/plans.
 
 ### Pluggable Sandbox Backends
 
@@ -88,19 +93,22 @@ Running AI agents in production means running untrusted code at scale. Container
 - Dynamic resize: CPU, memory online adjustment without reboot
 - Exec timeout + output cap: all sandbox commands limited to 60s + 10MB output
 
-## Quick Start（Python SDK / MCP 用户视角）
+## Quick Start (Python SDK / MCP)
 
-安装 SDK：
+Install the SDK:
 
 ```bash
 pip install -e sdk/python
 ```
 
-**你唯一需要知道的概念是 `layers`**：环境层的名字列表，如 `["python312", "base"]`（前面是工具层，最后是系统层）。其余一切（daemon、二进制、目录）都是自动的。
+**The only concept you need is `layers`**: names of environment layers,
+e.g. `["python312", "base"]` (tool layers first, the base system last).
+Everything else — daemon, binaries, directories — is automatic.
 
-### 方式 A：单用户，SDK 全自动
+### Mode A: single user, fully managed by the SDK
 
-零准备——SDK 自动解决引擎、二进制和目录，用完自动清理：
+Zero setup — the SDK resolves the engine, binaries, and directories,
+and cleans up when done:
 
 ```python
 from terra.daemon import Daemon
@@ -109,54 +117,54 @@ from terra.client import TerraClient
 with Daemon():
     c = TerraClient()
 
-    # 从预热池拿一台 VM（层自动挂载）
+    # Grab a VM from the warm pool (layers are hot-plugged)
     claim = c.pool_claim(["python312", "base"])
     name = claim["name"]
 
-    # 在 VM 里跑命令
+    # Run commands inside the VM
     print(c.vm_exec(name, ["python3", "-c", "import numpy; print(numpy.__version__)"]))
 
-    # 归还池
+    # Return it to the pool
     c.pool_release(name)
 ```
 
-### 方式 B：服务器已有 daemon（客户端使用）
+### Mode B: client against an existing server daemon
 
-管理员在服务器上跑着 daemon 时，你只连它用：
+When an admin already runs the daemon on a server, you just connect:
 
 ```python
 from terra.client import TerraClient
 from terra.vm import create
 
-c = TerraClient()          # 默认 socket；远程可用 TerraClient("/path/forwarded.sock")
+c = TerraClient()          # default socket; remote: TerraClient("/path/forwarded.sock")
 
-# 创建一台带环境的 VM
+# Create a VM with an environment
 vm = create("dev", "target/guest/vmlinux.bin",
             initramfs="target/guest/initramfs-virtiofs.cpio.gz",
             layers=["python312", "base"], cpus=2, memory_mb=512, net=True)
 
 print(vm.info())                                # state / cpus / memory_mb
-print(vm.exec(["python3", "--version"]))        # 在 VM 里执行
-vm.resize(cpus=4)                               # 在线扩容
+print(vm.exec(["python3", "--version"]))        # run inside the VM
+vm.resize(cpus=4)                               # scale up online
 vm.destroy()
 
-# 或用预热池（更快的路径）
+# Or use the warm pool (faster path)
 claim = c.pool_claim(["python312", "base"])
 print(c.vm_exec(claim["name"], ["python3", "-c", "print(2**10)"]))
 c.pool_release(claim["name"])
 ```
 
-API 速查（`TerraClient` / `Vm`）：
+API cheat sheet (`TerraClient` / `Vm`):
 
-| 类别 | 方法 |
+| Area | Methods |
 |---|---|
 | VM | `vm_create / vm_list / vm_info / vm_resize / vm_shutdown / vm_kill / vm_destroy` |
-| 执行 | `vm_exec(name, args, timeout_secs=60)` |
-| 池 | `pool_claim / pool_list / pool_release` |
+| Exec | `vm_exec(name, args, timeout_secs=60)` |
+| Pool | `pool_claim / pool_list / pool_release` |
 
-### MCP（给 AI Agent 用）
+### MCP (for AI agents)
 
-MCP Server 以 stdio 运行，直接配进你的 agent（Claude Code / Desktop 等）：
+The MCP server runs over stdio — point your agent (Claude Code / Desktop, etc.) at it:
 
 ```json
 {
@@ -169,7 +177,7 @@ MCP Server 以 stdio 运行，直接配进你的 agent（Claude Code / Desktop �
 }
 ```
 
-Agent 侧可见的用户面工具：`terra_vm_create/list/info/resize/shutdown/kill/destroy`、`terra_exec`、`terra_pool_claim/list/release`、`terra_attach_fs/detach_fs`。典型调用流：
+User-surface tools visible to the agent: `terra_vm_create/list/info/resize/shutdown/kill/destroy`, `terra_exec`, `terra_pool_claim/list/release`, `terra_attach_fs/detach_fs`. Canonical flow:
 
 ```
 terra_pool_claim(layers=["python312","base"])
@@ -177,7 +185,7 @@ terra_pool_claim(layers=["python312","base"])
   → terra_pool_release(name)
 ```
 
-> 管理员操作（daemon 启停、镜像构建、网络拆除、建池）不属于用户面——见 `terra` CLI 与 `AGENTS.md`。
+> Admin operations (daemon lifecycle, image building, network teardown, pool creation) are out of the user surface — see the `terra` CLI and `AGENTS.md`.
 
 ## Repository
 
@@ -206,8 +214,8 @@ images/              Guest kernel + rootfs build
 - **M0** ✅ CH base, guest images, baseline measurements
 - **M1** ✅ Engine daemon, CLI, VM lifecycle
 - **M2** ✅ Adapter layer, Sandlock/OpenShell, async tokio runtime, Python SDK
-- **M3** 🔲 virtiofs filesystem (EROFS layers + OverlayFS + DAX), warm pool, observability
-- **M4** 🔲 Snapshot fault tolerance, density benchmarks, full production hardening
+- **M3** ✅ virtiofs filesystem (EROFS layers + OverlayFS), warm pool, networking (tap/NAT/DHCP), layer build-by-doing
+- **M4** 🔲 Pool auto-scaling, snapshot fault tolerance, density benchmarks, observability
 
 ## License
 
