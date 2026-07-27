@@ -1,21 +1,18 @@
 # Terrarium Engine
 
-**Production-grade agent sandboxing — deploy secure, isolated execution environments with high single-node density.**
+**Production-grade agent sandboxing — secure, isolated execution environments with high single-node density.**
 
-Terrarium Engine is a scheduling and control layer for agent runtime execution environments, decoupled from specific VM and sandbox technologies — hardware-level VM isolation, pluggable sandbox backends, and a layered virtiofs filesystem.
+Terrarium is a scheduling and control layer for agent execution environments. It pairs hardware-level VM isolation (Cloud Hypervisor) with a composable layered filesystem (EROFS + OverlayFS + virtiofs) and a warm pool, so untrusted agent code runs in real VMs that start in well under a second and share read-only environment layers across the host.
 
 ## Why Terrarium
 
-Running AI agents in production means running untrusted code at scale. Containers share a kernel. MicroVMs are slow to provision. Terrarium sits in the sweet spot:
-
-| | Container | VM-only | Terrarium |
+| | Container | MicroVM | Terrarium |
 |---|---|---|---|
-| Isolation | Weak (shared kernel) | Strong (KVM) | **Strong (KVM + sandbox)** |
-| Density | High | Low | **High** |
-| Provisioning | Fast | Slow (~1s) | **Fast (warm-pool quick start)** |
-| File persistence | Ephemeral | Disk image | **Layered virtiofs** |
-| Resource control | cgroup | VM config | **tc QoS** |
-| Sandbox backends | N/A | N/A | **Pluggable (Sandlock, OpenShell)** |
+| Isolation | Shared kernel | KVM | **KVM + sandbox** |
+| Density | High | Low | **High (shared page-cache layers)** |
+| Provisioning | Fast | ~1s | **Warm pool (pre-booted VMs)** |
+| Environments | OCI image | Disk image | **Composable named layers** |
+| Backends | — | — | **Pluggable (CH, Sandlock, OpenShell)** |
 
 ## Architecture
 
@@ -36,93 +33,37 @@ Running AI agents in production means running untrusted code at scale. Container
 │  │          Cloud Hypervisor VM × N            │            │
 │  │  ┌───────────────────────────────────────┐  │            │
 │  │  │  guest-proxy ← host→guest relay       │  │            │
-│  │  │  sandlock CLI / openshell CLI         │  │            │
-│  │  │  Agent process ◄── Sandbox isolation  │  │            │
+│  │  │  Agent process ◄── sandbox isolation  │  │            │
 │  │  └───────────────────────────────────────┘  │            │
-│  │  per VM: virtiofs rootfs (EROFS layers + private upperdir) ││
+│  │  per VM: virtiofs rootfs (layers + /workdir)│            │
 │  └─────────────────────────────────────────────┘            │
-│  Multi-backend via Adapter traits                            │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**Two adapter layers, trait-based:**
+The engine is decoupled from backends via two trait families:
+`VmAdapter` (Cloud Hypervisor) and `SandboxAdapter` (Sandlock, OpenShell).
 
-| Trait | What it does | Implementations |
-|---|---|---|
-| `VmAdapter` | Spawn, resize, snapshot VMs | Cloud Hypervisor |
-| `SandboxAdapter` | Create, exec, destroy sandboxes | Sandlock, OpenShell |
+## Quick Start
 
-## Key Capabilities
-
-### Adapter Trait Architecture
-
-- Engine completely decoupled from VM implementations via `VmAdapter` / `VmHandle` traits
-- Pluggable backends: Cloud Hypervisor, Sandlock, OpenShell
-- Unified error type (`AdapterError`) across all adapters
-- Async runtime (tokio) for concurrent VM operations
-
-### Layered Filesystem (virtiofs)
-
-```
-  upperdir   (writable, per-VM host dir)      <- user data
-  tool layers (read-only EROFS, composable)   <- tools/runtime
-  base layer  (read-only EROFS, shared)       <- system
-```
-
-Read-only layers are star-composed on the host with OverlayFS (arbitrary combinations, shared page cache) and exposed to the VM via virtiofs with `cache=always`. Writes copy-up into the per-VM upperdir. Compute and data lifecycles are separate: VM commands never delete data.
-
-### Pluggable Sandbox Backends
-
-| Backend | Isolation | Unique |
-|---|---|---|
-| **Sandlock** | Landlock + seccomp-bpf + seccomp notif | No root needed, COW FS, HTTP ACL, ~5ms startup (requires host Landlock ABI ≥ v5) |
-| **OpenShell** (NVIDIA) | Container + Landlock + OPA proxy | Inference routing, credential injection, GPU |
-| **guest-proxy** | Relay | Host↔guest command forwarding (vsock) |
-
-### Resource Control
-
-- Network QoS: per-VM egress/ingress rate limiting and priority (Linux tc)
-- Dynamic resize: CPU and memory online adjustment without reboot (verified: 100% effective for both)
-- Networking: tap + host NAT + dnsmasq DHCP — ready with `create --net`, managed via `net-list` / `net-down`
-- Exec timeout + output cap: 60s default per command (up to 3600s) + 10MB output cap
-
-## Quick Start — Three Ways to Use Terrarium
-
-### 1. `terra` CLI — the admin tool (docker-style)
-
-For host administrators, organized as resource groups with uniform
-`ls / create / remove [-n name]` verbs (no binaries to place, no sudo
-for everyday use — `pip install -e sdk/python` gives you `python -m
-terra` and a `terra` command):
-
-```bash
-terra daemon start [--tcp 0.0.0.0:19099]   # lifecycle: ls / stop / destroy
-terra kernel ls                            # ls / create -n k612 --version 6.12 / remove -n
-terra rootfs ls                            # ls / create -n alpine321 --type alpine / remove -n
-terra layer  ls                            # ls / create -n python312 --script setup.sh / remove -n
-terra pool   ls                            # ls / create --size 3 / remove -n pool-0 / claim / release
-terra net    ls                            # ls / create / remove (NAT bridge lifecycle)
-terra vm     ls                            # ls / create / remove / info / exec / resize / shutdown / kill
-```
-
-Layer creation has three styles:
-`terra layer create -n foo --from-dir ./dir` (pack a directory),
-`... -n foo --script setup.sh` (build-by-doing inside a builder VM,
-see images/examples/), `... -n base --from-image` (base layer from
-the guest rootfs).
-
-Older flat commands (`list`, `create`, `exec`, `destroy`, `pool-list`,
-`daemon-start`, `image ...`) keep working as aliases.
-
-### 2. Python direct mode — throwaway VMs, nothing to manage
-
-Zero setup and zero concepts: no daemon, no session, no pool to think
-about. The SDK lazily starts a managed engine on first use and cleans
-it up at process exit. For scripts, notebooks, and local agents.
+Install the CLI and SDK:
 
 ```bash
 pip install -e sdk/python
 ```
+
+**CLI** — resource groups with uniform `ls / create / remove` verbs:
+
+```bash
+terra daemon start                              # engine daemon
+terra kernel create -n k612 --version 6.12      # build a guest kernel
+terra layer create -n python312 --script images/examples/python312.sh
+terra pool create --size 3                      # warm pool
+terra vm create dev --kernel ... --initramfs ... --layers python312,base --net
+terra vm exec dev -- python3 --version
+terra vm remove dev
+```
+
+**Python** — direct mode for throwaway VMs:
 
 ```python
 import terra
@@ -132,125 +73,45 @@ print(vm.exec(["python3", "-c", "import numpy; print(numpy.__version__)"]))
 vm.destroy()
 ```
 
-Want control without writing daemon code? Configure the host once —
-images, layers, pool size, VM defaults, token — and your Python script
-*is* the daemon program:
-
-```python
-from terra import HostConfig, create
-
-terra.configure(HostConfig(kernel="~/img/vmlinux.bin",
-                           layer_dir="~/layers",
-                           pool_size=4,
-                           default_net=True))
-vm = create(layers=["python312", "base"])
-```
-
-### 3. Client–server mode — use a remote daemon's VM pool
-
-An admin runs the daemon on a server; you connect and use it.
-
-Server (admin) — a Python script is the daemon program; the engine
-runtime is fetched automatically, no binary handling:
-
-```python
-from terra.daemon import Daemon
-from terra.config import HostConfig
-
-cfg = HostConfig(
-    kernel="target/guest/vmlinux.bin",
-    agent_initramfs="target/guest/initramfs-agent.cpio.gz",
-    layer_dir="/var/lib/terra/layers",
-    pool_size=4,
-    default_net=True,
-    token="secret",
-)
-Daemon(config=cfg, tcp="0.0.0.0:19099").start()   # serve forever
-```
-
-One-time, on any machine with the repo:
-`python3 -c "from terra.assets import publish_engine; publish_engine()"`
-
-Client (you) — **the code is identical to local mode**, one connect
-line up front. Creation is fulfilled by the server's warm pool; exec
-and destroy (which releases it back) work exactly the same:
+**Client–server** — same code, one connect line, fulfilled by the server's warm pool:
 
 ```python
 import terra
 
-terra.connect("tcp://server-ip:19099", token="secret")
+terra.connect("tcp://server:19099", token="secret")
 
-vm = terra.create(layers=["python312", "base"])  # pool_claim underneath
+vm = terra.create(layers=["python312", "base"])
 print(vm.exec(["python3", "--version"]))
-vm.destroy()                                    # pool_release underneath
+vm.destroy()
 ```
 
-Low-level client API is still there when you want it
-(`TerraClient`, `pool_claim`, `vm_create`, ...). CLI equivalent:
-`TERRA_TOKEN=secret terra --socket tcp://server-ip:19099 list`
-
-> TCP is plaintext with a shared token as basic access control — use it
-> on trusted networks only. For untrusted networks, tunnel the unix
-> socket over SSH instead: `ssh -N -L /tmp/terra.sock:/tmp/terra.sock user@server`.
-
-> Admin operations (daemon lifecycle, image building, network teardown,
-> pool creation) live in the `terra` CLI. MCP (agent integration) is
-> unchanged.
-
-### MCP (for AI agents)
-
-The MCP server runs over stdio — point your agent (Claude Code / Desktop, etc.) at it:
+**MCP** — point your agent at the stdio server:
 
 ```json
-{
-  "mcpServers": {
-    "terrarium": {
-      "command": "/path/to/target/release/terra-mcp",
-      "env": { "TERRA_SOCKET": "/tmp/terra.sock" }
-    }
-  }
-}
+{"mcpServers": {"terrarium": {"command": "terra-mcp", "env": {"TERRA_SOCKET": "/tmp/terra.sock"}}}}
 ```
 
-User-surface tools: `terra_vm_create/list/info/resize/shutdown/kill/destroy`,
-`terra_exec`, `terra_pool_claim/list/release`, `terra_attach_fs/detach_fs`.
-Canonical flow:
+## Features
 
-```
-terra_pool_claim(layers=["python312","base"])
-  → terra_exec(name, args=["python3","-c","print(2**10)"])
-  → terra_pool_release(name)
-```
+- **Layered filesystem** — read-only EROFS layers star-composed on the host (arbitrary combinations, shared page cache), exposed via virtiofs. Tool layers are built by configuring a real VM and packing the delta, so environments are runnable by construction.
+- **Warm pool** — pre-booted idle VMs; claiming hot-plugs the requested layers and returns a ready VM. Pool VMs release back to idle for reuse.
+- **In-guest exec** — command execution inside VMs through the guest agent, with per-command timeouts.
+- **Networking** — one-flag NAT networking (`--net`) with DHCP; lifecycle managed via `terra net`.
+- **Dynamic resize** — CPU and memory online adjustment without reboot.
+- **Zero-config Python SDK** — managed directories, automatic binary and image resolution, programmable host configuration (`HostConfig`).
 
-## Repository
+## Documentation
 
-```
-crates/
-├── engine/          Engine daemon + VM lifecycle + pool management
-├── adapter/
-│   ├── traits/      VmAdapter + SandboxAdapter trait definitions
-│   ├── cloud-hypervisor/  CH adapter (async client + virtiofs composition)
-│   ├── sandlock/    Sandlock adapter (capability-gated)
-│   └── openshell/   OpenShell adapter
-├── protocol/        Shared Command/Response types (JSON protocol)
-├── guest-proxy/     Host↔guest command relay (vsock + unix socket)
-├── network/         tap/NAT/DHCP + tc QoS
-├── cli/             terra CLI (incl. image build commands)
-└── mcp/             MCP Server (stdio JSON-RPC)
-
-sdk/python/          Python SDK (zero-config management: daemon/assets/images/paths)
-
-thirdparty/          Third-party deps + patch registry
-images/              Guest kernel + rootfs + initramfs build scripts
-```
+- [docs/protocol.md](docs/protocol.md) — engine wire protocol (commands, transports, semantics)
+- [docs/sdk.md](docs/sdk.md) — Python SDK and CLI reference
+- [docs/mcp.md](docs/mcp.md) — MCP server tools
+- [docs/plans/](docs/plans/) — design ADRs
 
 ## Roadmap
 
-- **M0** ✅ CH base, guest images, baseline measurements
-- **M1** ✅ Engine daemon, CLI, VM lifecycle
-- **M2** ✅ Adapter layer, async runtime, Python SDK
-- **M3** ✅ virtiofs filesystem (EROFS layers + OverlayFS), warm pool, networking (tap/NAT/DHCP), layer build-by-doing
-- **M4** 🔲 Pool auto-scaling, snapshot fault tolerance, density benchmarks, observability
+- ✅ CH base, engine daemon, adapter layer, Python SDK
+- ✅ virtiofs layered filesystem, warm pool, NAT networking, layer build-by-doing
+- 🔲 Pool auto-scaling, snapshot fault tolerance, density benchmarks, observability
 
 ## License
 

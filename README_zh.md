@@ -1,21 +1,18 @@
 # Terrarium Engine
 
-**生产级 Agent 沙箱 — 高单机密度部署安全隔离的执行环境。**
+**生产级 Agent 沙箱——高单机密度部署安全隔离的执行环境。**
 
-Terrarium Engine 是一个Agent运行时执行环境的调度控制层，与具体 VM/沙箱技术解耦 —— 硬件级 VM 隔离、可插拔沙箱后端、分层 virtiofs 文件系统。
+Terrarium 是 Agent 执行环境的调度控制层。它将硬件级 VM 隔离（Cloud Hypervisor）与可组合的分层文件系统（EROFS + OverlayFS + virtiofs）和预热池结合：不受信的 Agent 代码运行在真实 VM 中，秒级就绪，并在宿主机上共享只读环境层。
 
 ## 为什么选择 Terrarium
 
-生产环境运行 AI Agent = 大规模运行不受信代码。容器共享内核，传统 VM 启动慢。Terrarium 取两者之长：
-
-| | 容器 | 纯 VM | Terrarium |
+| | 容器 | 微 VM | Terrarium |
 |---|---|---|---|
-| 隔离性 | 弱（共享内核） | 强（KVM） | **强（KVM + 沙箱）** |
-| 密度 | 高 | 低 | **高** |
-| 启动速度 | 快 | 慢（~1s） | **快（预热池快速启动）** |
-| 文件持久化 | 临时 | 磁盘镜像 | **分层 virtiofs ** |
-| 资源控制 | cgroup | VM 配置 | **tc QoS** |
-| 沙箱后端 | — | — | **可插拔（Sandlock、OpenShell）** |
+| 隔离性 | 共享内核 | KVM | **KVM + 沙箱** |
+| 密度 | 高 | 低 | **高（页缓存共享的层）** |
+| 供给 | 快 | ~1s | **预热池（预启动 VM）** |
+| 环境 | OCI 镜像 | 磁盘镜像 | **可组合的命名层** |
+| 后端 | — | — | **可插拔（CH、Sandlock、OpenShell）** |
 
 ## 架构
 
@@ -36,90 +33,37 @@ Terrarium Engine 是一个Agent运行时执行环境的调度控制层，与具�
 │  │          Cloud Hypervisor VM × N            │            │
 │  │  ┌───────────────────────────────────────┐  │            │
 │  │  │  guest-proxy ← host→guest 中继        │  │            │
-│  │  │  sandlock CLI / openshell CLI         │  │            │
 │  │  │  Agent 进程 ◄── 沙箱隔离              │  │            │
 │  │  └───────────────────────────────────────┘  │            │
-│  │  每 VM: virtiofs rootfs（EROFS 层 + 独立 upperdir）        │            │
+│  │  每 VM: virtiofs rootfs（层 + /workdir）     │            │
 │  └─────────────────────────────────────────────┘            │
-│  Adapter trait 解耦，多后端                                    │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**两层 Adapter（trait 定义）：**
+引擎通过两组 trait 与后端解耦：`VmAdapter`（Cloud Hypervisor）与
+`SandboxAdapter`（Sandlock、OpenShell）。
 
-| Trait | 职责 | 实现 |
-|---|---|---|
-| `VmAdapter` | VM 创建、扩缩、快照 | Cloud Hypervisor |
-| `SandboxAdapter` | 沙箱创建、执行、销毁 | Sandlock、OpenShell |
+## 快速上手
 
-## 核心能力
-
-### Adapter trait 架构
-
-- Engine 经 `VmAdapter` / `VmHandle` trait 与 VMM 实现完全解耦
-- 可插拔后端：Cloud Hypervisor、Sandlock、OpenShell
-- 全 adapter 统一错误类型（`AdapterError`）
-- tokio 异步运行时支撑并发 VM 操作
-
-### 分层文件系统（virtiofs）
-
-```
-  upperdir   （可写，per-VM 宿主目录）      ← 用户数据
-  tool layers（只读 EROFS，按需组合）       ← 工具/运行时
-  base layer （只读 EROFS，共享）           ← 系统层
-```
-
-只读层在宿主侧经 OverlayFS 星型组合（任意搭配、page cache 共享），经 virtiofs + `cache=always` 暴露给 VM；写操作 copy-up 进独立 upperdir。计算与数据生命周期分离：VM 命令永不删除数据。
-
-### 可插拔沙箱后端
-
-| 后端 | 隔离 | 特点 |
-|---|---|---|
-| **Sandlock** | Landlock + seccomp-bpf + seccomp notif | 免 root、COW FS、HTTP ACL、~5ms 启动（需要宿主 Landlock ABI ≥ v5） |
-| **OpenShell** (NVIDIA) | Container + Landlock + OPA proxy | 推理路由、凭据注入、GPU |
-| **guest-proxy** | 中继 | host↔guest 命令转发（vsock） |
-
-### 资源控制
-
-- 网络 QoS：per-VM 出/入向限速与优先级（Linux tc）
-- 动态扩缩：CPU、内存免重启在线调整（实测 CPU 100%、内存 100% 生效）
-- 网络：tap + 宿主 NAT + dnsmasq DHCP，`create --net` 即用，`net-list`/`net-down` 管理
-- 执行超时 + 输出上限：每条命令默认 60s（可调至 3600s）+ 10MB 输出上限
-
-## 快速上手 — 三种使用方式
-
-### 1. `terra` CLI — 管理员工具（docker 风格）
-
-面向宿主管理员，按资源分组、动词统一为 `ls / create / remove [-n 名字]`
-（`pip install -e sdk/python` 后 `python -m terra` 或 `terra` 命令，
-不放二进制、不用 sudo）：
-
-```bash
-terra daemon start [--tcp 0.0.0.0:19099]   # 生命周期：ls / stop / destroy
-terra kernel ls                            # ls / create -n k612 --version 6.12 / remove -n
-terra rootfs ls                            # ls / create -n alpine321 --type alpine / remove -n
-terra layer  ls                            # ls / create -n python312 --script setup.sh / remove -n
-terra pool   ls                            # ls / create --size 3 / remove -n pool-0 / claim / release
-terra net    ls                            # ls / create / remove（NAT 网桥生命周期）
-terra vm     ls                            # ls / create / remove / info / exec / resize / shutdown / kill
-```
-
-建层三种姿势：
-`terra layer create -n foo --from-dir ./dir`（目录打包）、
-`... -n foo --script setup.sh`（builder VM 做中建，见 images/examples/）、
-`... -n base --from-image`（从 guest rootfs 铺 base 层）。
-
-旧的扁平命令（`list`、`create`、`exec`、`destroy`、`pool-list`、
-`daemon-start`、`image ...`）作为别名继续可用。
-
-### 2. Python 直连模式 — 随手开临时 VM，无需任何概念
-
-零准备零概念：不用关心 daemon、session、pool。SDK 首次调用时惰性
-启动托管引擎，进程退出自动清理。适合脚本、notebook、本地 agent。
+安装 CLI 与 SDK：
 
 ```bash
 pip install -e sdk/python
 ```
+
+**CLI**——资源分组，动词统一为 `ls / create / remove`：
+
+```bash
+terra daemon start                              # 引擎 daemon
+terra kernel create -n k612 --version 6.12      # 构建 guest 内核
+terra layer create -n python312 --script images/examples/python312.sh
+terra pool create --size 3                      # 预热池
+terra vm create dev --kernel ... --initramfs ... --layers python312,base --net
+terra vm exec dev -- python3 --version
+terra vm remove dev
+```
+
+**Python**——直连模式，随手开临时 VM：
 
 ```python
 import terra
@@ -129,120 +73,45 @@ print(vm.exec(["python3", "-c", "import numpy; print(numpy.__version__)"]))
 vm.destroy()
 ```
 
-想控制但不写 daemon 代码？用 HostConfig 声明一次——镜像、层、池
-大小、VM 默认值、token——你的 Python 脚本就是 daemon 程序：
-
-```python
-from terra import HostConfig, create
-
-terra.configure(HostConfig(kernel="~/img/vmlinux.bin",
-                           layer_dir="~/layers",
-                           pool_size=4,
-                           default_net=True))
-vm = create(layers=["python312", "base"])
-```
-
-### 3. 客户端-服务器模式 — 使用远程 daemon 的 VM 池
-
-管理员在服务器上跑 daemon，你只连它用。
-
-服务器（管理员）——一个 Python 脚本就是 daemon 程序；引擎运行时
-自动获取，无需处理二进制：
-
-```python
-from terra.daemon import Daemon
-from terra.config import HostConfig
-
-cfg = HostConfig(
-    kernel="target/guest/vmlinux.bin",
-    agent_initramfs="target/guest/initramfs-agent.cpio.gz",
-    layer_dir="/var/lib/terra/layers",
-    pool_size=4,
-    default_net=True,
-    token="secret",
-)
-Daemon(config=cfg, tcp="0.0.0.0:19099").start()   # 常驻服务
-```
-
-一次性准备（任何有仓库的机器上跑一次）：
-`python3 -c "from terra.assets import publish_engine; publish_engine()"`
-
-客户端（你）——**代码与本地模式完全一致**，只在开头多一行 connect。
-创建由服务器的预热池兑现，exec 与 destroy（自动归还池）写法不变：
+**客户端-服务器**——代码不变，一行 connect，由服务器预热池兑现：
 
 ```python
 import terra
 
-terra.connect("tcp://server-ip:19099", token="secret")
+terra.connect("tcp://server:19099", token="secret")
 
-vm = terra.create(layers=["python312", "base"])  # 底层走 pool_claim
+vm = terra.create(layers=["python312", "base"])
 print(vm.exec(["python3", "--version"]))
-vm.destroy()                                    # 底层走 pool_release
+vm.destroy()
 ```
 
-需要底层控制时仍有完整 client API（`TerraClient`、`pool_claim`、
-`vm_create` 等）。CLI 等价：
-`TERRA_TOKEN=secret terra --socket tcp://server-ip:19099 list`
-
-> TCP 是明文 + 共享 token 基础访问控制——仅限可信网络。不可信网络
-> 请用 SSH 隧道转发 unix socket：
-> `ssh -N -L /tmp/terra.sock:/tmp/terra.sock user@server`。
-
-> 管理员操作（daemon 启停、镜像构建、网络拆除、建池）在 `terra` CLI。
-> MCP 集成：
-
-### MCP（给 AI Agent 用）
-
-MCP Server 以 stdio 运行，直接配进你的 agent（Claude Code / Desktop 等）：
+**MCP**——将 agent 指向 stdio server：
 
 ```json
-{
-  "mcpServers": {
-    "terrarium": {
-      "command": "/path/to/target/release/terra-mcp",
-      "env": { "TERRA_SOCKET": "/tmp/terra.sock" }
-    }
-  }
-}
+{"mcpServers": {"terrarium": {"command": "terra-mcp", "env": {"TERRA_SOCKET": "/tmp/terra.sock"}}}}
 ```
 
-用户面工具：`terra_vm_create/list/info/resize/shutdown/kill/destroy`、`terra_exec`、`terra_pool_claim/list/release`、`terra_attach_fs/detach_fs`。典型调用流：
+## 特性
 
-```
-terra_pool_claim(layers=["python312","base"])
-  → terra_exec(name, args=["python3","-c","print(2**10)"])
-  → terra_pool_release(name)
-```
+- **分层文件系统**——只读 EROFS 层在宿主侧星型组合（任意搭配、页缓存共享），经 virtiofs 暴露。工具层通过在真实 VM 中配置环境、打包增量来构建——环境自证可用。
+- **预热池**——预启动的空转 VM；认领时热插所需层并返回就绪 VM，任务结束归还复用。
+- **guest 内执行**——经 guest agent 在 VM 内执行命令，支持单命令超时。
+- **网络**——`--net` 一键 NAT 联网（DHCP 即用），生命周期经 `terra net` 管理。
+- **动态扩缩**——CPU、内存免重启在线调整。
+- **零配置 Python SDK**——托管目录、二进制与镜像自动解析、可编程宿主配置（`HostConfig`）。
 
-## 仓库结构
+## 文档
 
-```
-crates/
-├── engine/          引擎 daemon + VM 生命周期 + 池管理
-├── adapter/
-│   ├── traits/      VmAdapter + SandboxAdapter trait 定义
-│   ├── cloud-hypervisor/  CH adapter（异步 client + virtiofs 组合栈）
-│   ├── sandlock/    Sandlock adapter（能力门控）
-│   └── openshell/   OpenShell adapter
-├── protocol/        共享 Command/Response 类型（JSON 协议）
-├── guest-proxy/     host↔guest 命令中继（vsock + unix socket）
-├── network/         tap/NAT/DHCP + tc QoS
-├── cli/             terra CLI（含 image 构建命令）
-└── mcp/             MCP Server（stdio JSON-RPC）
-
-sdk/python/          Python SDK（零配置托管：daemon/assets/images/paths）
-
-thirdparty/          第三方依赖 + 补丁登记
-images/              guest 内核 + rootfs + initramfs 构建脚本
-```
+- [docs/protocol.md](docs/protocol.md)——引擎线协议（命令、传输、语义）
+- [docs/sdk.md](docs/sdk.md)——Python SDK 与 CLI 参考
+- [docs/mcp.md](docs/mcp.md)——MCP 工具面
+- [docs/plans/](docs/plans/)——设计 ADR
 
 ## 路线图
 
-- **M0** ✅ CH 基座、guest 镜像、基线实测
-- **M1** ✅ 引擎 daemon、CLI、VM 生命周期
-- **M2** ✅ Adapter 层、异步运行时、Python SDK
-- **M3** ✅ virtiofs 文件系统（EROFS 层 + OverlayFS）、预热池、网络（tap/NAT/DHCP）、工具层「做中建」
-- **M4** 🔲 池自动扩缩、快照容错、密度基准、可观测性
+- ✅ CH 基座、引擎 daemon、Adapter 层、Python SDK
+- ✅ virtiofs 分层文件系统、预热池、NAT 网络、工具层「做中建」
+- 🔲 池自动扩缩、快照容错、密度基准、可观测性
 
 ## 许可证
 
