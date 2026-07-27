@@ -267,7 +267,7 @@ def cmd_image_layer_build(args):
         return _err(
             "this build uses a networked builder VM (downloads), which needs "
             "CAP_NET_ADMIN.\n"
-            "  either: sudo env "PATH=$PATH" terra daemon start   (then retry)\n"
+            '  either: sudo env "PATH=$PATH" terra daemon start   (then retry)\n'
             "  or:     add --no-net for an offline build"
         )
     client = _client(args)
