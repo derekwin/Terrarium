@@ -121,12 +121,7 @@ fn mount_erofs(image: &str, mnt: &str) -> Result<(), AdapterError> {
     let out = Command::new(&fuse_bin)
         .args([image, mnt])
         .output()
-        .map_err(|e| {
-            format!(
-                "mount failed (need root) and erofsfuse not found: {}",
-                e
-            )
-        })?;
+        .map_err(|e| format!("mount failed (need root) and erofsfuse not found: {}", e))?;
     if !out.status.success() {
         return Err(format!(
             "erofsfuse {}: {}",
@@ -583,7 +578,9 @@ fn teardown_fs(fs: &mut FsStack) {
     if !fs.persistent {
         // overlayfs creates its internal work/work dir with mode 0000 —
         // restore owner permissions before removing.
-        let _ = Command::new("chmod").args(["-R", "u+rwX", &fs.dir]).output();
+        let _ = Command::new("chmod")
+            .args(["-R", "u+rwX", &fs.dir])
+            .output();
         if let Err(e) = std::fs::remove_dir_all(&fs.dir) {
             tracing::warn!(dir = %fs.dir, error = %e, "fs work dir cleanup failed");
         }

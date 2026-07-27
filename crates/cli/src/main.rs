@@ -137,7 +137,10 @@ fn main() {
             print_response(send(&cli.socket, &cmd));
         }
         Commands::DetachFs { name } => {
-            print_response(send(&cli.socket, &Command::new("detach_fs").with_name(name)));
+            print_response(send(
+                &cli.socket,
+                &Command::new("detach_fs").with_name(name),
+            ));
         }
     }
 }

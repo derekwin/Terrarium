@@ -109,9 +109,7 @@ fn mount_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value, umount: b
     };
 
     let result = if umount {
-        std::process::Command::new("umount")
-            .arg(target)
-            .output()
+        std::process::Command::new("umount").arg(target).output()
     } else {
         let tag = cmd["tag"].as_str().unwrap_or("rootfs");
         let _ = std::fs::create_dir_all(target);
@@ -133,7 +131,8 @@ fn mount_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value, umount: b
             let _ = writeln!(stream, "{}", resp);
         }
         Err(e) => {
-            let resp = serde_json::json!({"status": "error", "message": format!("spawn mount: {}", e)});
+            let resp =
+                serde_json::json!({"status": "error", "message": format!("spawn mount: {}", e)});
             let _ = writeln!(stream, "{}", resp);
         }
     }
