@@ -448,6 +448,15 @@ def cmd_layer_create(args):
     if args.from_image:
         args2 = argparse.Namespace(name=args.name, force=True)
         return cmd_image_base(args2)
+    if args.from_distro:
+        import subprocess
+
+        conf = Path("images/distro") / f"{args.name}.conf"
+        if not conf.exists():
+            return _err(f"no distro config {conf}")
+        return subprocess.run(
+            ["bash", "images/build-layer-distro.sh", args.name]
+        ).returncode
     return cmd_image_layer_build(args)  # --script path (build-by-doing)
 
 
@@ -623,6 +632,8 @@ def main() -> int:
     src.add_argument("--from-dir", help="pack an existing directory")
     src.add_argument("--script", help="build-by-doing: run setup in a builder VM")
     src.add_argument("--from-image", action="store_true", help="base layer from guest rootfs")
+    src.add_argument("--from-distro", action="store_true",
+                     help="build a distro system layer (images/distro/<name>.conf)")
     c.add_argument("--base", default="base")
     c.add_argument("--kernel", default="target/guest/vmlinux.bin")
     c.add_argument("--initramfs", default="target/guest/initramfs-virtiofs.cpio.gz")

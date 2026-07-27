@@ -56,7 +56,7 @@ pip install -e sdk/python
 ```bash
 sudo env "PATH=$PATH" terra daemon start                       # 引擎 daemon（root 才有 NAT 网络）
 terra kernel create -n k612 --version 6.12      # 构建 guest 内核
-bash images/build-layer-distro.sh ubuntu        # …或一个发行版系统层
+terra layer create -n ubuntu --from-distro        # 构建发行版系统层
 terra layer create -n python312 --script images/examples/python312.sh
 terra pool create --size 3                      # 预热池（大小实时可调）
 terra daemon config                             # 引擎/池/网络/层一览
