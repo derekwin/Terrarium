@@ -164,6 +164,10 @@ enum ImageCommands {
         /// networking requires a privileged daemon).
         #[arg(long)]
         no_net: bool,
+        /// Setup script timeout in seconds (default 600 — package
+        /// installs don't fit in 60s).
+        #[arg(long, default_value = "600")]
+        timeout: u64,
     },
 }
 
@@ -298,6 +302,7 @@ fn main() {
                 kernel,
                 initramfs,
                 no_net,
+                timeout,
             } => layer_build(
                 &cli.socket,
                 &name,
@@ -306,6 +311,7 @@ fn main() {
                 &kernel,
                 &initramfs,
                 !no_net,
+                timeout,
             ),
             ImageCommands::Layers => {
                 let layer_dir = std::env::var("TERRA_LAYER_DIR")
@@ -335,6 +341,7 @@ fn main() {
 }
 
 /// Build a tool layer by doing: builder VM -> setup script -> pack delta.
+#[allow(clippy::too_many_arguments)]
 fn layer_build(
     socket: &str,
     name: &str,
@@ -343,6 +350,7 @@ fn layer_build(
     kernel: &str,
     irfs: &str,
     net: bool,
+    timeout: u64,
 ) {
     let builder = format!("lb-{}", name);
     let upper = builder.clone();
@@ -372,11 +380,10 @@ fn layer_build(
     let mut resp = String::new();
     let mut ok = false;
     for _ in 0..30 {
-        let exec = Command::new("exec").with_name(&builder).with_args(vec![
-            "sh".into(),
-            "-c".into(),
-            content.clone(),
-        ]);
+        let exec = Command::new("exec")
+            .with_name(&builder)
+            .with_args(vec!["sh".into(), "-c".into(), content.clone()])
+            .with_timeout_secs(timeout);
         resp = send(socket, &exec);
         // protocol ok AND script exit code 0 — packing on a failed
         // script would silently produce an empty/garbage layer.

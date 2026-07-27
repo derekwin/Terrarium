@@ -101,9 +101,10 @@ target/release/engine daemon
 TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
 
 terra image kernel --version 6.12     # build the guest kernel
-terra image layer-build python312 --script setup.sh   # build a tool
-                                        # layer by configuring inside a
-                                        # builder VM (env is proven)
+terra image layer-build python312 \
+    --script images/examples/python312.sh   # build a tool layer by
+                                        # configuring inside a builder VM
+                                        # (examples: images/examples/)
 terra image layers                    # list available layers
 terra pool-create --size 3            # warm pool
 terra create dev --kernel ... --initramfs ... --layers python312,base --net

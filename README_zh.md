@@ -100,8 +100,10 @@ target/release/engine daemon
 TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
 
 terra image kernel --version 6.12     # 构建 guest 内核
-terra image layer-build python312 --script setup.sh   # 工具层「做中建」：
+terra image layer-build python312 \
+    --script images/examples/python312.sh   # 工具层「做中建」：
                                         # builder VM 里配环境，改动即层
+                                        # （案例见 images/examples/）
 terra image layers                    # 列出可用层
 terra pool-create --size 3            # 预热池
 terra create dev --kernel ... --initramfs ... --layers python312,base --net
