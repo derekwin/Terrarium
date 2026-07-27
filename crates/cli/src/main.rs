@@ -267,11 +267,21 @@ fn main() {
             timeout,
             args,
         } => {
-            let cmd = Command::new("exec")
-                .with_name(name)
-                .with_args(args)
-                .with_timeout_secs(timeout);
-            print_response(send(&cli.socket, &cmd));
+            // The guest agent takes a moment after create (layer mount,
+            // init, dhcp) — retry transient agent-unreachable errors.
+            let mut resp = String::new();
+            for _ in 0..8 {
+                let cmd = Command::new("exec")
+                    .with_name(&name)
+                    .with_args(args.clone())
+                    .with_timeout_secs(timeout);
+                resp = send(&cli.socket, &cmd);
+                if !resp.contains("handshake") && !resp.contains("connect guest vsock") {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            print_response(resp);
         }
         Commands::Image(img) => match img {
             ImageCommands::LayerBuild {
