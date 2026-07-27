@@ -1,26 +1,31 @@
 """Terrarium Engine Python SDK.
 
-Usage:
-    import terra
+Quickstart (zero setup — assets and daemon are managed automatically):
 
-    # Create a VM
-    vm = terra.vm.create("demo", kernel="target/guest/vmlinux.bin",
-                         initramfs="target/guest/alpine-python.cpio")
+    from terra.daemon import Daemon
+    from terra.client import TerraClient
+    from terra.vm import create
 
-    # Query VM info
-    info = vm.info()
-
-    # Resize VM
-    vm.resize(cpus=4)
-
-    # Cleanup
-    vm.shutdown()
-
-    # List all VMs
-    vms = terra.vm.list_vms()
+    with Daemon():
+        client = TerraClient()
+        client.pool_create(1)
+        claim = client.pool_claim(["base"])
+        print(client.vm_exec(claim["name"], ["ls", "/newroot"]))
 """
 
-from .client import TerraClient
+from .client import TerraClient, TerraError
 from . import vm
+from . import paths
+from . import assets
+from . import images
+from . import daemon
 
-__all__ = ["TerraClient", "vm"]
+__all__ = [
+    "TerraClient",
+    "TerraError",
+    "vm",
+    "paths",
+    "assets",
+    "images",
+    "daemon",
+]

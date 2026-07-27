@@ -20,7 +20,11 @@ class TerraError(Exception):
 class TerraClient:
     """Client for the terrarium engine daemon."""
 
-    def __init__(self, socket_path: str = "/tmp/terra.sock"):
+    def __init__(self, socket_path: str | None = None):
+        if socket_path is None:
+            from . import paths
+
+            socket_path = paths.default_socket()
         self.socket_path = socket_path
 
     def _send(self, cmd: dict) -> dict:

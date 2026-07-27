@@ -6,7 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "terra-sdk"
 version = "0.1.0"
 description = "Terrarium Engine Python SDK — agent sandbox orchestration"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "Apache-2.0" }
 
+# Backend extras. They are markers for which host backend(s) you plan to
+# use — heavy host binaries (cloud-hypervisor, virtiofsd, erofs-utils)
+# are NOT pip packages, so the SDK downloads them into ~/.local/share/terra
+# on first use (see terra.assets). Extras only pull pip-side companions.
 [project.optional-dependencies]
-async = ["aiofiles"]
+ch = []
+sandlock = ["sandlock>=0.8"]
+
+[tool.setuptools.packages.find]
+include = ["terra*"]
