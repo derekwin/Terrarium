@@ -110,6 +110,8 @@ terra image layer-build python312 \
     --script images/examples/python312.sh          # build a tool layer by
                                                    # configuring inside a
                                                    # builder VM (proven env)
+terra image base                                   # base layer into the
+                                                   # managed layers dir
 terra image layers                                 # list available layers
 terra pool-create --size 3                         # warm pool
 terra create dev --kernel ... --initramfs ... --layers python312,base --net

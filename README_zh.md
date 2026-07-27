@@ -102,6 +102,7 @@ terra image kernel --version 6.12                   # 构建 guest 内核
 terra image layer-build python312 \
     --script images/examples/python312.sh           # 工具层「做中建」：
                                                     # builder VM 里配环境
+terra image base                                    # base 层铺进托管层目录
 terra image layers                                  # 列出可用层
 terra pool-create --size 3                          # 预热池
 terra create dev --kernel ... --initramfs ... --layers python312,base --net

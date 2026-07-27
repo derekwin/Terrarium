@@ -84,7 +84,10 @@ attach-fs / detach-fs / net-list / net-down`
 `image layers / layer / layer-build / kernel / rootfs / initramfs /
 agent-initramfs`
 
-命名变体：`image kernel --version 6.12 --name k612` 与
+层与镜像统一为「托管目录命名工件」：`image base [--name base]
+[--force]` 把 guest rootfs 铺成 `layers/<name>/`（层名直接可用，
+无需任何环境变量）；`image layer-build <name>` 把做中建的层打进
+同一目录（`<name>.erofs`）；`image layers` 列出全部。命名变体：`image kernel --version 6.12 --name k612` 与
 `image rootfs --name alpine321` 将产物放进托管镜像目录
 （`~/.local/share/terra/images/<name>/`），与默认 `base` 共存；
 使用时显式给路径（`create --kernel .../images/k612/vmlinux.bin`）。

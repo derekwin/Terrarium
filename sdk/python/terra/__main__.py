@@ -144,6 +144,34 @@ def cmd_daemon_start(args):
     return 0
 
 
+def cmd_image_base(args):
+    """Build/refresh the base layer in the managed layers dir.
+
+    Extracts the managed alpine rootfs into layers/<name> (default:
+    "base") so `layers=["base"]` resolves with zero env setup.
+    """
+    import shutil
+    import subprocess
+
+    name = args.name
+    dest = paths.layers_dir() / name
+    if dest.exists() and not args.force:
+        print(f"{dest} exists (use --force to rebuild)")
+        return 0
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True)
+    cpio = images.ensure("alpine.cpio")
+    r = subprocess.run(
+        f"zcat {cpio} | cpio -idm --quiet",
+        shell=True,
+        cwd=dest,
+    )
+    if r.returncode:
+        return r.returncode
+    print(f"base layer ready: {dest}")
+    return 0
+
+
 def cmd_image_layers(args):
     layer_dir = os.environ.get("TERRA_LAYER_DIR") or str(paths.layers_dir())
     try:
@@ -366,6 +394,13 @@ def main() -> int:
 
     img = sub.add_parser("image")
     isub = img.add_subparsers(dest="image_cmd", required=True)
+
+    sp = isub.add_parser(
+        "base", help="build the base layer into the managed layers dir"
+    )
+    sp.add_argument("--name", default="base")
+    sp.add_argument("--force", action="store_true")
+    sp.set_defaults(f=cmd_image_base)
 
     isub.add_parser("layers").set_defaults(f=cmd_image_layers)
 
