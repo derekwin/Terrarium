@@ -61,6 +61,16 @@ enum Commands {
     Destroy {
         name: String,
     },
+    /// Hot-plug a layered filesystem into a running VM.
+    AttachFs {
+        name: String,
+        #[arg(long, value_delimiter = ',')]
+        layers: Vec<String>,
+    },
+    /// Detach a previously attached layered filesystem.
+    DetachFs {
+        name: String,
+    },
 }
 
 fn main() {
@@ -119,6 +129,15 @@ fn main() {
         }
         Commands::Destroy { name } => {
             print_response(send(&cli.socket, &Command::new("destroy").with_name(name)));
+        }
+        Commands::AttachFs { name, layers } => {
+            let cmd = Command::new("attach_fs")
+                .with_name(name)
+                .with_layers(layers);
+            print_response(send(&cli.socket, &cmd));
+        }
+        Commands::DetachFs { name } => {
+            print_response(send(&cli.socket, &Command::new("detach_fs").with_name(name)));
         }
     }
 }

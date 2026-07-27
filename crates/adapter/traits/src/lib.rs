@@ -335,6 +335,24 @@ pub trait VmHandle: Send + Sync {
     /// Apply network QoS (rate limiting + priority). Implemented via tc on TAP.
     async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), AdapterError>;
 
+    /// Hot-plug a layered filesystem into a running VM (warm-pool attach:
+    /// compose layers on the host, hot-add the virtiofs device, and mount
+    /// it inside the guest via the guest-proxy vsock channel).
+    /// Default: not supported by this backend.
+    async fn attach_fs(&self, _fs: &FsSpec) -> Result<(), AdapterError> {
+        Err(AdapterError::not_supported(
+            "attach_fs not supported by this backend",
+        ))
+    }
+
+    /// Detach a previously attached layered filesystem (guest umount +
+    /// device removal + host-side teardown).
+    async fn detach_fs(&self) -> Result<(), AdapterError> {
+        Err(AdapterError::not_supported(
+            "detach_fs not supported by this backend",
+        ))
+    }
+
     /// Take a VM snapshot. Not supported by all backends.
     async fn snapshot(&self) -> Result<Snapshot, AdapterError>;
 

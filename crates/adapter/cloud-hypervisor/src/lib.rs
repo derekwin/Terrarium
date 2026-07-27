@@ -180,8 +180,15 @@ struct ChVmHandle {
     name: VmName,
     child: std::process::Child,
     client: ChClient,
-    fs: Option<FsStack>,
+    fs: std::sync::Mutex<Option<FsStack>>,
+    /// Device id of a hot-plugged fs device (needed for remove-device).
+    fs_device_id: std::sync::Mutex<Option<String>>,
+    /// Fs composition config cloned from the adapter (for hot-plug).
+    fs_config: ChAdapter,
 }
+
+/// Next free vsock CID (0/1/2 reserved: hypervisor/host/local).
+static NEXT_VSOCK_CID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(3);
 
 /// A composed layered rootfs: overlayfs mount + virtiofsd, running inside
 /// a private user/mount namespace so the whole stack (including the
@@ -209,7 +216,9 @@ impl ChVmHandle {
         };
         let fs_socket = fs.as_ref().map(|f| f.socket.as_str());
 
-        let args = ch_args(spec, &socket, fs_socket);
+        let vsock = format!("/tmp/terra-{}-vsock.sock", name);
+        let _ = std::fs::remove_file(&vsock);
+        let args = ch_args(spec, &socket, fs_socket, &vsock);
 
         tracing::info!(name = %name, socket = %socket, layered = fs.is_some(), "Spawning CH VM");
 
@@ -241,7 +250,15 @@ impl ChVmHandle {
             name,
             child,
             client,
-            fs,
+            fs: std::sync::Mutex::new(fs),
+            fs_device_id: std::sync::Mutex::new(None),
+            fs_config: ChAdapter {
+                ch_binary: adapter.ch_binary.clone(),
+                virtiofsd_binary: adapter.virtiofsd_binary.clone(),
+                layer_dir: adapter.layer_dir.clone(),
+                fs_root: adapter.fs_root.clone(),
+                mounted_layers: std::sync::Mutex::new(std::collections::HashSet::new()),
+            },
         })
     }
 }
@@ -302,6 +319,9 @@ async fn compose_fs(
 
     let socket = format!("/tmp/terra-{}-fs.sock", name);
     let _ = std::fs::remove_file(&socket);
+    // qemu virtiofsd creates a locked pid file next to the socket —
+    // clear leftovers from previous (possibly crashed) stacks.
+    let _ = std::fs::remove_file(format!("{}.pid", socket));
 
     let script = format!(
         "set -e; mount -t overlay overlay -o lowerdir={},upperdir={},workdir={} {}; \
@@ -388,6 +408,86 @@ impl VmHandle for ChVmHandle {
             .map_err(|e| AdapterError::internal(format!("vm.add-disk: {}", e)))
     }
 
+    async fn attach_fs(&self, fs_spec: &FsSpec) -> Result<(), AdapterError> {
+        if self.fs.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            return Err(AdapterError::internal(
+                "an fs stack is already attached to this VM".to_string(),
+            ));
+        }
+        // 1) compose layers + start virtiofsd on the host
+        let stack = compose_fs(fs_spec, self.name.as_ref(), &self.fs_config).await?;
+        // 2) hot-plug the virtiofs device
+        let device_id = self
+            .client
+            .vm_add_fs("rootfs", &stack.socket)
+            .await
+            .map_err(|e| AdapterError::internal(format!("vm.add-fs: {}", e)))?;
+        // 3) mount inside the guest via guest-proxy vsock. The guest
+        // agent may still be booting — retry briefly.
+        let mut resp = serde_json::Value::Null;
+        #[allow(unused_assignments)]
+        let mut last_err = String::new();
+        for attempt in 0..20 {
+            match self
+                .guest_cmd(&serde_json::json!({
+                    "command": "mount", "tag": "rootfs", "target": "/newroot",
+                }))
+                .await
+            {
+                Ok(r) => {
+                    resp = r;
+                    break;
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                    if attempt == 19 {
+                        return Err(AdapterError::internal(format!(
+                            "guest mount unreachable after retries: {}",
+                            last_err
+                        )));
+                    }
+                    sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+        if resp["status"].as_str() != Some("ok") {
+            return Err(AdapterError::internal(format!(
+                "guest mount failed: {}",
+                resp["message"].as_str().unwrap_or("unknown")
+            )));
+        }
+        *self.fs_device_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(device_id);
+        *self.fs.lock().unwrap_or_else(|e| e.into_inner()) = Some(stack);
+        tracing::info!(name = %self.name, "fs attached (hot-plug)");
+        Ok(())
+    }
+
+    async fn detach_fs(&self) -> Result<(), AdapterError> {
+        // 1) best-effort guest umount
+        let _ = self
+            .guest_cmd(&serde_json::json!({"command": "umount", "target": "/newroot"}))
+            .await;
+        // 2) remove the device (take the lock guard before any await)
+        let device_id = self
+            .fs_device_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(id) = device_id {
+            self.client
+                .vm_remove_disk(&id)
+                .await
+                .map_err(|e| AdapterError::internal(format!("vm.remove-device: {}", e)))?;
+        }
+        // 3) tear down the host-side stack
+        let stack = self.fs.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(mut fs) = stack {
+            teardown_fs(&mut fs);
+        }
+        tracing::info!(name = %self.name, "fs detached");
+        Ok(())
+    }
+
     async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), AdapterError> {
         let tap = format!("tap-{}", self.name);
         terrarium_network::apply_tc_qos(&tap, qos).map_err(AdapterError::internal)
@@ -432,6 +532,64 @@ impl VmHandle for ChVmHandle {
     }
 }
 
+impl ChVmHandle {
+    /// Send one JSON command to guest-proxy over the CH vhost-vsock
+    /// socket (text handshake "CONNECT <port>", then line-JSON).
+    async fn guest_cmd(&self, cmd: &serde_json::Value) -> Result<serde_json::Value, AdapterError> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let path = format!("/tmp/terra-{}-vsock.sock", self.name);
+        let stream = tokio::net::UnixStream::connect(&path)
+            .await
+            .map_err(|e| format!("connect guest vsock: {}", e))?;
+        let (reader, mut writer) = stream.into_split();
+        writer
+            .write_all(b"CONNECT 1024\n")
+            .await
+            .map_err(|e| format!("vsock CONNECT: {}", e))?;
+        let mut lines = BufReader::new(reader).lines();
+        let handshake = lines
+            .next_line()
+            .await
+            .map_err(|e| format!("vsock handshake: {}", e))?
+            .unwrap_or_default();
+        if !handshake.starts_with("OK") {
+            return Err(format!("vsock handshake rejected: {}", handshake).into());
+        }
+        let mut payload = serde_json::to_string(cmd)
+            .map_err(|e| AdapterError::internal(format!("serialize: {}", e)))?;
+        payload.push('\n');
+        writer
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| format!("vsock write: {}", e))?;
+        let resp = lines
+            .next_line()
+            .await
+            .map_err(|e| format!("vsock read: {}", e))?
+            .unwrap_or_default();
+        serde_json::from_str(&resp).map_err(|e| {
+            AdapterError::internal(format!("guest-proxy response parse: {} ({})", e, resp))
+        })
+    }
+}
+
+/// Tear down a composed fs stack: kill the supervisor (the overlayfs
+/// mount and virtiofsd die with its namespace) and clean work dirs.
+fn teardown_fs(fs: &mut FsStack) {
+    let _ = fs.supervisor.kill();
+    let _ = fs.supervisor.wait();
+    let _ = std::fs::remove_file(&fs.socket);
+    let _ = std::fs::remove_file(format!("{}.pid", fs.socket));
+    if !fs.persistent {
+        // overlayfs creates its internal work/work dir with mode 0000 —
+        // restore owner permissions before removing.
+        let _ = Command::new("chmod").args(["-R", "u+rwX", &fs.dir]).output();
+        if let Err(e) = std::fs::remove_dir_all(&fs.dir) {
+            tracing::warn!(dir = %fs.dir, error = %e, "fs work dir cleanup failed");
+        }
+    }
+}
+
 impl Drop for ChVmHandle {
     fn drop(&mut self) {
         // Can't call async methods in Drop. Best-effort kill.
@@ -442,22 +600,10 @@ impl Drop for ChVmHandle {
         // CH creates a lock file next to the API socket — remove it too,
         // otherwise stale .sock.lock files accumulate across VM lifecycles.
         let _ = std::fs::remove_file(format!("{}.lock", socket));
-        if let Some(mut fs) = self.fs.take() {
+        if let Some(mut fs) = self.fs.lock().unwrap_or_else(|e| e.into_inner()).take() {
             // Killing the supervisor tears down the whole namespace:
             // virtiofsd dies and the overlayfs mount evaporates with it.
-            let _ = fs.supervisor.kill();
-            let _ = fs.supervisor.wait();
-            let _ = std::fs::remove_file(&fs.socket);
-            if !fs.persistent {
-                // overlayfs creates its internal work/work dir with mode
-                // 0000 — restore owner permissions before removing.
-                let _ = Command::new("chmod")
-                    .args(["-R", "u+rwX", &fs.dir])
-                    .output();
-                if let Err(e) = std::fs::remove_dir_all(&fs.dir) {
-                    tracing::warn!(dir = %fs.dir, error = %e, "fs work dir cleanup failed");
-                }
-            }
+            teardown_fs(&mut fs);
         }
     }
 }
@@ -466,7 +612,7 @@ impl Drop for ChVmHandle {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn ch_args(spec: &VmSpec, socket: &str, fs_socket: Option<&str>) -> Vec<String> {
+fn ch_args(spec: &VmSpec, socket: &str, fs_socket: Option<&str>, vsock: &str) -> Vec<String> {
     let mut args = vec![
         "--api-socket".into(),
         socket.into(),
@@ -487,12 +633,10 @@ fn ch_args(spec: &VmSpec, socket: &str, fs_socket: Option<&str>) -> Vec<String> 
         args.push("--initramfs".into());
         args.push(i.clone());
     }
-    // vhost-user devices (virtiofs) require shared guest memory.
-    let shared = if fs_socket.is_some() {
-        ",shared=on"
-    } else {
-        ""
-    };
+    // vhost-user devices (virtiofs) require shared guest memory. Always
+    // on: any VM may receive a hot-plugged fs later (warm pool), and
+    // shared memory is also the DAX/zero-copy path — no downside.
+    let shared = ",shared=on";
     if let Some(max_mem) = spec.max_memory_mb {
         args.push("--memory".into());
         args.push(format!(
@@ -509,6 +653,10 @@ fn ch_args(spec: &VmSpec, socket: &str, fs_socket: Option<&str>) -> Vec<String> 
         args.push("--fs".into());
         args.push(format!("tag=rootfs,socket={},num_queues=1", fs_sock));
     }
+    // vsock for host→guest control (guest-proxy); unique CID per VM.
+    let cid = NEXT_VSOCK_CID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    args.push("--vsock".into());
+    args.push(format!("cid={},socket={}", cid, vsock));
     args.push("--serial".into());
     args.push("null".into());
     args.push("--console".into());

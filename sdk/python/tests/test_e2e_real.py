@@ -99,6 +99,37 @@ def _is_ch_pid(pid: int) -> bool:
         return False
 
 
+def _guest_exec(vm_name: str, args: list[str], timeout: float = 10.0) -> str:
+    """Send an exec command to guest-proxy over the CH vsock socket."""
+    import socket as _sock
+
+    path = f"/tmp/terra-{vm_name}-vsock.sock"
+    deadline = time.time() + timeout
+    last_err: Exception | None = None
+    while time.time() < deadline:
+        try:
+            s = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
+            s.settimeout(3)
+            s.connect(path)
+            s.sendall(b"CONNECT 1024\n")
+            f = s.makefile("rw")
+            handshake = f.readline()
+            assert handshake.startswith("OK"), handshake
+            import json as _json
+
+            f.write(_json.dumps({"command": "exec", "args": args}) + "\n")
+            f.flush()
+            resp = _json.loads(f.readline())
+            s.close()
+            if resp.get("status") == "ok":
+                return resp["data"]["stdout"]
+            raise RuntimeError(resp.get("message"))
+        except (OSError, AssertionError) as e:
+            last_err = e
+            time.sleep(0.3)
+    raise RuntimeError(f"guest exec failed: {last_err}")
+
+
 def _find_fs_supervisor(vm_name: str) -> int | None:
     """PID of the virtiofsd supervisor serving the given VM's fs socket."""
     needle = f"terra-{vm_name}-fs.sock"
@@ -415,6 +446,40 @@ def test_layered_boot() -> None:
     client.vm_destroy("sdk-fs1")
     _state["created"].remove("sdk-fs1")
     assert not (fs_root / "sdk-fs1").exists(), "fs work dir leaked"
+
+
+def test_warm_attach_detach() -> None:
+    """FS-M4 warm path: idle VM -> hot-plug layers -> guest mounts -> detach."""
+    client = _state["client"]
+    if not _state.get("vfsd"):
+        print("SKIP test_warm_attach_detach: no virtiofsd binary found")
+        return
+    agent_irfs = REPO / "target/guest/initramfs-agent.cpio.gz"
+    if not agent_irfs.exists():
+        subprocess.run(["bash", "images/build-initramfs-agent.sh"], cwd=REPO, check=True)
+    vm = create(
+        "sdk-w1", str(KERNEL),
+        initramfs=str(agent_irfs),
+        cpus=1, memory_mb=256,
+        client=client,
+    )
+    _track("sdk-w1")
+    assert vm.info()["state"] == "Running"
+
+    # hot-plug the layered fs and verify FROM INSIDE THE GUEST
+    client.vm_attach_fs("sdk-w1", ["marker", "base"])
+    out = _guest_exec("sdk-w1", ["ls", "/newroot"])
+    assert "bin" in out and "usr" in out, out
+    out = _guest_exec("sdk-w1", ["cat", "/newroot/usr/bin/hello.py"])
+    assert "marker layer" in out, out
+
+    # detach: guest umount + device removal + host stack teardown
+    client.vm_detach_fs("sdk-w1")
+    out = _guest_exec("sdk-w1", ["ls", "/newroot"])
+    assert "bin" not in out, f"mount still present after detach: {out!r}"
+
+    client.vm_destroy("sdk-w1")
+    _state["created"].remove("sdk-w1")
 
 
 def test_layered_boot_erofs() -> None:

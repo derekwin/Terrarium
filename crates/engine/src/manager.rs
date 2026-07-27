@@ -40,6 +40,28 @@ impl VmManager {
         Ok(())
     }
 
+    /// Hot-plug a layered filesystem into a running VM (warm-pool attach).
+    pub async fn attach_fs(
+        &self,
+        name: &str,
+        fs: &adapter_traits::FsSpec,
+    ) -> Result<(), AdapterError> {
+        self.vms
+            .get(name)
+            .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?
+            .attach_fs(fs)
+            .await
+    }
+
+    /// Detach a previously attached layered filesystem.
+    pub async fn detach_fs(&self, name: &str) -> Result<(), AdapterError> {
+        self.vms
+            .get(name)
+            .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?
+            .detach_fs()
+            .await
+    }
+
     /// Get a reference to a running VM by name.
     pub fn get(&self, name: &str) -> Option<&dyn VmHandle> {
         self.vms.get(name).map(|v| v.as_ref())

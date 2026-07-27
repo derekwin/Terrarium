@@ -1,0 +1,17 @@
+#!/bin/sh
+# Terrarium warm-pool idle image init (FS-M4).
+#
+# Boots to an idle shell with guest-proxy listening on vsock :1024 —
+# no rootfs layers. The host hot-plugs a layered fs later (vm.add-fs)
+# and asks guest-proxy to mount it.
+
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /tmp
+
+echo "init: starting guest-proxy (vsock :1024)"
+/bin/guest-proxy &
+
+echo "Terrarium idle VM ready."
+exec /bin/sh

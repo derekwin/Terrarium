@@ -114,6 +114,14 @@ class TerraClient:
         """Force-kill and deregister a VM."""
         return self._send({"command": "kill", "name": name})
 
+    def vm_attach_fs(self, name: str, layers: list[str]) -> dict:
+        """Hot-plug a layered filesystem into a running VM (warm pool)."""
+        return self._send({"command": "attach_fs", "name": name, "layers": list(layers)})
+
+    def vm_detach_fs(self, name: str) -> dict:
+        """Detach a previously attached layered filesystem."""
+        return self._send({"command": "detach_fs", "name": name})
+
     def vm_destroy(self, name: str) -> dict:
         """Stop and deregister a VM."""
         return self._send({"command": "destroy", "name": name})

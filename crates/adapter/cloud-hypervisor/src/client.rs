@@ -206,6 +206,24 @@ impl ChClient {
         Ok(())
     }
 
+    /// Hot-plug a virtiofs device backed by an already-running virtiofsd.
+    /// Returns the device id reported by CH (needed for remove-device).
+    pub async fn vm_add_fs(&self, tag: &str, socket: &str) -> Result<String> {
+        let body = serde_json::json!({
+            "tag": tag,
+            "socket": socket,
+        });
+        let (_status, resp) = self
+            .request("PUT", "/api/v1/vm.add-fs", Some(&body.to_string()))
+            .await?;
+        // CH returns PciDeviceInfo{"id": "..."} on success.
+        let id = serde_json::from_str::<serde_json::Value>(&resp)
+            .ok()
+            .and_then(|v| v["id"].as_str().map(String::from))
+            .unwrap_or_else(|| format!("_fs{}", tag));
+        Ok(id)
+    }
+
     pub async fn vm_remove_disk(&self, disk_id: &str) -> Result<()> {
         let body = serde_json::json!({
             "id": disk_id,
