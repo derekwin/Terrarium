@@ -71,6 +71,7 @@ def create(
     memory_mb: int = 512,
     max_memory_mb: int | None = None,
     layers: list[str] | None = None,
+    upper: str | None = None,
     client: TerraClient | None = None,
 ) -> Vm:
     """Create a new VM.
@@ -81,6 +82,7 @@ def create(
         initramfs: Path to initramfs cpio archive (use
             target/guest/initramfs-virtiofs.cpio.gz when layers are set).
         layers: virtiofs layer names, highest priority first, base last.
+        upper: persistent upperdir name (user data survives destruction).
 
     Raises:
         TerraError: If the engine returns an error.
@@ -97,6 +99,7 @@ def create(
         memory_mb=memory_mb,
         max_memory_mb=max_memory_mb,
         layers=layers,
+        upper=upper,
     )
     return Vm(name=name, client=client, pid=resp.get("pid"))
 

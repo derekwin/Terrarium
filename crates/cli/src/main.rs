@@ -39,6 +39,9 @@ enum Commands {
         /// (e.g. --layers python,base). Empty = initramfs boot.
         #[arg(long, value_delimiter = ',')]
         layers: Vec<String>,
+        /// Persistent upperdir name (user data survives VM destruction).
+        #[arg(long)]
+        upper: Option<String>,
     },
     List,
     Info {
@@ -87,6 +90,12 @@ enum Commands {
     PoolRelease {
         name: String,
     },
+    /// Execute a command inside a VM (via the guest agent).
+    Exec {
+        name: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
     /// Host-side image preparation (admin operations, run once per host).
     #[command(subcommand)]
     Image(ImageCommands),
@@ -94,10 +103,18 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ImageCommands {
-    /// Build the guest kernel (images/build-kernel.sh).
-    Kernel,
-    /// Build the guest rootfs cpio (images/build-rootfs.sh).
-    Rootfs,
+    /// Build the guest kernel.
+    Kernel {
+        /// Kernel version, e.g. 6.12 (default per images/build-kernel.sh).
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Build the guest rootfs cpio.
+    Rootfs {
+        /// System type: busybox | alpine (needs ROOTFS_SRC for alpine).
+        #[arg(long, default_value = "busybox")]
+        r#type: String,
+    },
     /// Build the virtiofs boot initramfs.
     Initramfs,
     /// Build the warm-pool idle initramfs.
@@ -108,6 +125,25 @@ enum ImageCommands {
         src: String,
         /// Layer name (referenced by `layers` at VM create/claim).
         name: String,
+    },
+    /// Build a tool layer by configuring inside a builder VM: boot a VM
+    /// from the base layer, run a setup script inside it, then pack the
+    /// filesystem changes (copy-up delta) as the new layer.
+    LayerBuild {
+        /// New layer name.
+        name: String,
+        /// Setup script executed inside the builder VM (sh).
+        #[arg(long)]
+        script: String,
+        /// Base layer to build on.
+        #[arg(long, default_value = "base")]
+        base: String,
+        /// Kernel image path.
+        #[arg(long, default_value = "target/guest/vmlinux.bin")]
+        kernel: String,
+        /// virtiofs boot initramfs path.
+        #[arg(long, default_value = "target/guest/initramfs-virtiofs.cpio.gz")]
+        initramfs: String,
     },
 }
 
@@ -123,11 +159,15 @@ fn main() {
             max_memory,
             memory,
             layers,
+            upper,
         } => {
             let mut cmd = Command::create(&name, &kernel)
                 .with_cpus(cpus)
                 .with_memory_mb(memory)
                 .with_layers(layers);
+            if let Some(u) = upper {
+                cmd = cmd.with_upper(u);
+            }
             if let Some(i) = initramfs {
                 cmd = cmd.with_initramfs(i);
             }
@@ -200,19 +240,127 @@ fn main() {
                 &Command::new("pool_release").with_name(name),
             ));
         }
-        Commands::Image(img) => run_image(img),
+        Commands::Exec { name, args } => {
+            let cmd = Command::new("exec").with_name(name).with_args(args);
+            print_response(send(&cli.socket, &cmd));
+        }
+        Commands::Image(img) => match img {
+            ImageCommands::LayerBuild {
+                name,
+                script,
+                base,
+                kernel,
+                initramfs,
+            } => layer_build(&cli.socket, &name, &script, &base, &kernel, &initramfs),
+            other => run_image(other),
+        },
     }
+}
+
+/// Build a tool layer by doing: builder VM -> setup script -> pack delta.
+fn layer_build(socket: &str, name: &str, script: &str, base: &str, kernel: &str, irfs: &str) {
+    let builder = format!("lb-{}", name);
+    let upper = builder.clone();
+
+    // 1) boot the builder VM from the base layer with a persistent upper
+    let create = Command::create(&builder, kernel)
+        .with_initramfs(irfs)
+        .with_cpus(1)
+        .with_memory_mb(512)
+        .with_layers(vec![base.to_string()])
+        .with_upper(&upper);
+    let resp = send(socket, &create);
+    if !resp.contains("\"ok\"") && !resp.contains("\"status\":\"ok\"") {
+        eprintln!("ERROR: builder VM create failed: {}", resp);
+        std::process::exit(1);
+    }
+    println!("builder VM {} running", builder);
+
+    // 2) run the setup script inside the VM. The guest agent takes a
+    // moment to come up after create returns — retry, and fail hard if
+    // the script never succeeds (never pack an empty/garbage layer).
+    let content = std::fs::read_to_string(script).unwrap_or_else(|e| {
+        eprintln!("ERROR: read script {}: {}", script, e);
+        std::process::exit(1);
+    });
+    let mut resp = String::new();
+    let mut ok = false;
+    for _ in 0..30 {
+        let exec = Command::new("exec").with_name(&builder).with_args(vec![
+            "sh".into(),
+            "-c".into(),
+            content.clone(),
+        ]);
+        resp = send(socket, &exec);
+        if resp.contains("\"status\":\"ok\"") {
+            ok = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if !ok {
+        let _ = send(socket, &Command::new("destroy").with_name(&builder));
+        eprintln!("ERROR: setup script failed in builder VM: {}", resp);
+        std::process::exit(1);
+    }
+    println!("setup output: {}", resp);
+
+    // 3) clean runtime noise from the delta (not part of the environment)
+    let cleanup = Command::new("exec").with_name(&builder).with_args(vec![
+        "sh".into(),
+        "-c".into(),
+        "rm -rf /tmp/* /run/* /var/log/* /etc/resolv.conf 2>/dev/null; sync".into(),
+    ]);
+    let _ = send(socket, &cleanup);
+
+    // 4) destroy the builder VM
+    let destroy = Command::new("destroy").with_name(&builder);
+    let _ = send(socket, &destroy);
+    println!("builder VM destroyed");
+
+    // 5) pack the upperdir (copy-up delta) as the new layer
+    let fs_root = std::env::var("TERRA_STATE_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/tmp/terra-disks".into());
+    let upper_dir = format!("{}/fs/uppers/{}", fs_root, upper);
+    if !std::path::Path::new(&upper_dir).is_dir() {
+        eprintln!(
+            "ERROR: upperdir {} not found — is TERRA_STATE_DIR correct?",
+            upper_dir
+        );
+        std::process::exit(1);
+    }
+    run_image(ImageCommands::Layer {
+        src: upper_dir,
+        name: name.to_string(),
+    });
+    println!("layer '{}' built and ready to use in layers=[...]", name);
 }
 
 /// Image commands are host-side build operations, not daemon protocol.
 fn run_image(img: ImageCommands) {
     let (script, args): (&str, Vec<String>) = match img {
-        ImageCommands::Kernel => ("images/build-kernel.sh", vec![]),
-        ImageCommands::Rootfs => ("images/build-rootfs.sh", vec![]),
+        ImageCommands::Kernel { version } => {
+            ("images/build-kernel.sh", version.into_iter().collect())
+        }
+        ImageCommands::Rootfs { r#type } => ("images/build-rootfs.sh", vec![r#type]),
         ImageCommands::Initramfs => ("images/build-initramfs-virtiofs.sh", vec![]),
         ImageCommands::AgentInitramfs => ("images/build-initramfs-agent.sh", vec![]),
         ImageCommands::Layer { src, name } => {
-            ("images/build-layer.sh", vec![src, name])
+            let layer_dir = std::env::var("TERRA_LAYER_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}/.local/share/terra/layers",
+                        std::env::var("HOME").unwrap_or_default()
+                    )
+                });
+            ("images/build-layer.sh", vec![src, name, layer_dir])
+        }
+        ImageCommands::LayerBuild { .. } => {
+            unreachable!("LayerBuild is handled before run_image")
         }
     };
     if !std::path::Path::new(script).exists() {

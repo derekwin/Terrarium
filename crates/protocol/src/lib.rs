@@ -29,6 +29,11 @@ pub struct Command {
     // exec: command argv (exec runs it inside the VM via the guest agent)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+
+    // create: persistent upperdir name for the layered fs (user data
+    // survives VM destruction; default is ephemeral per-VM)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initramfs: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,6 +72,7 @@ impl Command {
             initramfs: None,
             layers: Vec::new(),
             args: Vec::new(),
+            upper: None,
             cmdline: None,
             cpus: None,
             max_cpus: None,
@@ -140,6 +146,12 @@ impl Command {
     /// Builder: set exec argv.
     pub fn with_args(mut self, args: Vec<String>) -> Self {
         self.args = args;
+        self
+    }
+
+    /// Builder: set persistent upperdir name.
+    pub fn with_upper(mut self, name: impl Into<String>) -> Self {
+        self.upper = Some(name.into());
         self
     }
 

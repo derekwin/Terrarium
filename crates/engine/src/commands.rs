@@ -57,7 +57,10 @@ fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
         } else {
             Some(adapter_traits::FsSpec {
                 layers: cmd.layers.clone(),
-                upper: adapter_traits::UpperPolicy::Ephemeral,
+                upper: match cmd.upper.as_deref() {
+                    Some(u) => adapter_traits::UpperPolicy::Persistent(u.to_string()),
+                    None => adapter_traits::UpperPolicy::Ephemeral,
+                },
             })
         },
         backend_config: None,

@@ -113,11 +113,25 @@ fn mount_erofs(image: &str, mnt: &str) -> Result<(), AdapterError> {
             return Ok(());
         }
     }
-    // Unprivileged fallback: erofsfuse.
+    // Unprivileged fallback: erofsfuse (env, PATH, managed bin, system).
     let fuse_bin = std::env::var("TERRA_EROFSFUSE")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "erofsfuse".into());
+        .unwrap_or_else(|| {
+            for c in [
+                "erofsfuse".to_string(),
+                format!(
+                    "{}/.local/share/terra/bin/erofsfuse",
+                    std::env::var("HOME").unwrap_or_default()
+                ),
+                "/usr/bin/erofsfuse".to_string(),
+            ] {
+                if std::path::Path::new(&c).exists() || c == "erofsfuse" {
+                    return c;
+                }
+            }
+            "erofsfuse".into()
+        });
     let out = Command::new(&fuse_bin)
         .args([image, mnt])
         .output()

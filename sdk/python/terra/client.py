@@ -66,12 +66,15 @@ class TerraClient:
         memory_mb: int = 512,
         max_memory_mb: int | None = None,
         layers: list[str] | None = None,
+        upper: str | None = None,
     ) -> dict:
         """Create a new VM.
 
         Args:
             layers: virtiofs layer names, highest priority first, base
                 layer last. None = plain initramfs boot.
+            upper: persistent upperdir name — user data survives VM
+                destruction and is reused by later VMs with the same name.
         """
         cmd = {"command": "create", "name": name, "kernel": kernel}
         if initramfs:
@@ -85,6 +88,8 @@ class TerraClient:
             cmd["max_memory_mb"] = max_memory_mb
         if layers:
             cmd["layers"] = list(layers)
+        if upper:
+            cmd["upper"] = upper
         return self._send(cmd)
 
     def vm_list(self) -> dict:
