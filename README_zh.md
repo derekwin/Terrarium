@@ -60,7 +60,7 @@ terra layer create -n ubuntu --from-distro        # 构建发行版系统层
 terra layer create -n python312 --script images/examples/python312.sh
 terra pool create --size 3                      # 预热池（大小实时可调）
 terra daemon config                             # 引擎/池/网络/层一览
-terra vm create dev --kernel k612 --rootfs alpine --layers python312,base --net
+terra vm create dev --kernel k612 --layers python312 --net
 terra vm exec dev -- python3 --version
 terra vm remove dev
 ```

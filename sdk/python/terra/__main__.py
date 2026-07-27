@@ -75,6 +75,7 @@ def cmd_create(args):
         memory_mb=args.memory,
         max_memory_mb=args.max_memory,
         layers=args.layers or None,
+        system=args.system,
         upper=args.upper,
         net=args.net,
     )
@@ -214,11 +215,19 @@ def cmd_image_base(args):
     return 0
 
 
+# Names that are system bases, not add-on layers — they belong to the
+# rootfs namespace and are hidden from `layer ls`.
+_SYSTEM_LAYER_NAMES = {"base", "ubuntu", ".system"}
+
+
 def cmd_image_layers(args):
     layer_dir = os.environ.get("TERRA_LAYER_DIR") or str(paths.layers_dir())
     try:
         for e in sorted(Path(layer_dir).iterdir()):
-            print(e.name)
+            name = e.name
+            if name in _SYSTEM_LAYER_NAMES:
+                continue
+            print(name[:-6] if name.endswith(".erofs") else name)
         return 0
     except OSError as e:
         return _err(f"read {layer_dir}: {e}")
@@ -597,6 +606,7 @@ def main() -> int:
     sp.add_argument("--memory", type=int, default=512)
     sp.add_argument("--max-memory", type=int)
     sp.add_argument("--layers", nargs="*", default=[])
+    sp.add_argument("--system", help="system base layer (default: base)")
     sp.add_argument("--upper")
     sp.add_argument("--net", action="store_true")
     sp.set_defaults(f=cmd_create)

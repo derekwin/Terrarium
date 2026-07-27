@@ -24,7 +24,7 @@ TCP + token 时，客户端先发送一行 token，再发送命令行。
 
 | command | 字段 | 说明 |
 |---|---|---|
-| `create` | `name`, `kernel`, `initramfs?`, `cmdline?`, `cpus?`, `max_cpus?`, `memory_mb?`, `max_memory_mb?`, `layers?`, `upper?`, `net?` | 创建 VM。`layers` 为 virtiofs 层名列表（优先级从高到低，base 最后）；`upper` 为 Persistent upperdir 名 |
+| `create` | `name`, `kernel`, `initramfs?`, `cmdline?`, `cpus?`, `max_cpus?`, `memory_mb?`, `max_memory_mb?`, `layers?`, `system?`, `upper?`, `net?` | 创建 VM。`layers` 为**附加层**（工具层，高优先级在前）；系统底座自动补 `system`（默认 `base`），已带系统层结尾则不补。`upper` 为 Persistent upperdir 名 |
 | `list` | — | 所有运行中 VM |
 | `info` | `name` | state / cpus / memory_mb / pid |
 | `resize` | `name`, `cpus?`, `memory_bytes?` | 在线扩缩（至少一项，否则报错） |
@@ -68,6 +68,7 @@ TCP + token 时，客户端先发送一行 token，再发送命令行。
 ## 语义约定
 
 - `shutdown`/`kill`/`destroy` 均为「停止 + 注销」；**VM 命令永不删除数据**
+- **语义模型**：rootfs = 系统（可启动镜像），layer = 系统之上的附加层。`layer ls` 只列附加层；`rootfs ls` 只列系统镜像
 - 热插的层挂载于 guest 内 `/workdir`，exec 默认 cwd 也是 `/workdir`
 - 池 VM 被 destroy 时自动从池移除；异常死亡由 reap 自动清理
 - 错误响应统一 `{"status":"error","error":"<可读信息>"}`，不会静默成功

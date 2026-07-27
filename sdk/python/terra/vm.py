@@ -84,6 +84,7 @@ def create(
     memory_mb: int = 512,
     max_memory_mb: int | None = None,
     layers: list[str] | None = None,
+    system: str | None = None,
     upper: str | None = None,
     net: bool = False,
     client: TerraClient | None = None,
@@ -114,6 +115,7 @@ def create(
         memory_mb=memory_mb,
         max_memory_mb=max_memory_mb,
         layers=layers,
+        system=system,
         upper=upper,
         net=net,
     )

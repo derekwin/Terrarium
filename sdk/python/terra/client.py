@@ -88,6 +88,7 @@ class TerraClient:
         memory_mb: int = 512,
         max_memory_mb: int | None = None,
         layers: list[str] | None = None,
+        system: str | None = None,
         upper: str | None = None,
         net: bool = False,
     ) -> dict:
@@ -112,6 +113,8 @@ class TerraClient:
             cmd["max_memory_mb"] = max_memory_mb
         if layers:
             cmd["layers"] = list(layers)
+        if system:
+            cmd["system"] = system
         if upper:
             cmd["upper"] = upper
         if net:

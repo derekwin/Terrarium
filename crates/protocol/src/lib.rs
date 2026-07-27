@@ -21,10 +21,15 @@ pub struct Command {
     // create
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel: Option<String>,
-    // create: layer names for a virtiofs rootfs (highest priority first,
-    // base layer last). Empty = plain initramfs boot.
+    // create: add-on (tool) layer names, highest priority first.
+    // The system base is appended automatically (see `system`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<String>,
+
+    // create: system base layer name (default "base"). Appended as the
+    // bottom lowerdir when `layers` doesn't already end with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
 
     // exec: command argv (exec runs it inside the VM via the guest agent)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -79,6 +84,7 @@ impl Command {
             kernel: None,
             initramfs: None,
             layers: Vec::new(),
+            system: None,
             args: Vec::new(),
             upper: None,
             net: false,
@@ -144,6 +150,12 @@ impl Command {
     /// Builder: set memory resize bytes.
     pub fn with_memory_bytes(mut self, bytes: u64) -> Self {
         self.memory_bytes = Some(bytes);
+        self
+    }
+
+    /// Builder: set the system base layer (default "base").
+    pub fn with_system(mut self, name: impl Into<String>) -> Self {
+        self.system = Some(name.into());
         self
     }
 

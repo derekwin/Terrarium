@@ -60,7 +60,7 @@ terra layer create -n ubuntu --from-distro        # build a distro base layer
 terra layer create -n python312 --script images/examples/python312.sh
 terra pool create --size 3                      # warm pool (grow/shrink live)
 terra daemon config                             # engine, pool, net, layers at a glance
-terra vm create dev --kernel k612 --rootfs alpine --layers python312,base --net
+terra vm create dev --kernel k612 --layers python312 --net
 terra vm exec dev -- python3 --version
 terra vm remove dev
 ```

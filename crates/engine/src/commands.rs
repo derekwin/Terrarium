@@ -71,7 +71,19 @@ fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
     })
 }
 
+const SYSTEM_BASES: [&str; 2] = ["base", "ubuntu"];
+
 async fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
+    // The system base is implicit: tool layers stack on top of it.
+    // Append it unless the caller already ended the list with one.
+    let mut cmd = cmd;
+    if !cmd.layers.is_empty() {
+        let last = cmd.layers.last().map(|s| s.as_str()).unwrap_or("");
+        if !SYSTEM_BASES.contains(&last) {
+            let system = cmd.system.clone().unwrap_or_else(|| "base".into());
+            cmd.layers.push(system);
+        }
+    }
     let spec = match build_spec(&cmd) {
         Ok(s) => s,
         Err(e) => return Response::err(e),
