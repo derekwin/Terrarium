@@ -8,7 +8,12 @@ use std::os::unix::net::UnixStream;
 
 use terrarium_protocol::Command;
 
-const ENGINE_SOCKET: &str = "/tmp/terra.sock";
+fn engine_socket() -> String {
+    std::env::var("TERRA_SOCKET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/tmp/terra.sock".into())
+}
 const SERVER_NAME: &str = "terrarium-mcp";
 const SERVER_VERSION: &str = "0.1.0";
 
@@ -133,6 +138,51 @@ fn tools_list() -> Vec<serde_json::Value> {
             "Stop and deregister a VM.",
             vec![("name", "string", "VM name")],
         ),
+        tool(
+            "terra_exec",
+            "Execute a command inside a VM via the guest agent.",
+            vec![
+                ("name", "string", "VM name"),
+                (
+                    "args",
+                    "array",
+                    "Command argv (e.g. [\"python3\",\"-c\",\"print(1)\"])",
+                ),
+                (
+                    "timeout_secs",
+                    "number",
+                    "Timeout seconds (default 60, max 3600)",
+                ),
+            ],
+        ),
+        tool(
+            "terra_pool_claim",
+            "Claim an idle warm-pool VM and hot-plug the given layers.",
+            vec![("layers", "array", "Layer names, highest priority first")],
+        ),
+        tool(
+            "terra_pool_list",
+            "List warm-pool slots and claim state.",
+            vec![],
+        ),
+        tool(
+            "terra_pool_release",
+            "Release a claimed pool VM back to idle.",
+            vec![("name", "string", "VM name")],
+        ),
+        tool(
+            "terra_attach_fs",
+            "Hot-plug a layered filesystem into a running VM.",
+            vec![
+                ("name", "string", "VM name"),
+                ("layers", "array", "Layer names, highest priority first"),
+            ],
+        ),
+        tool(
+            "terra_detach_fs",
+            "Detach a previously attached layered filesystem.",
+            vec![("name", "string", "VM name")],
+        ),
     ]
 }
 
@@ -208,13 +258,77 @@ fn call_tool(name: &str, args: &serde_json::Value) -> String {
             let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
             send_to_engine(&Command::new("destroy").with_name(name))
         }
+        "terra_exec" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            let argv: Vec<String> = args
+                .get("args")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut c = Command::new("exec").with_name(name).with_args(argv);
+            if let Some(t) = args.get("timeout_secs").and_then(|a| a.as_u64()) {
+                c = c.with_timeout_secs(t);
+            }
+            // Retry while the guest agent is still booting.
+            let mut resp = String::new();
+            for _ in 0..8 {
+                resp = send_to_engine(&c);
+                if !resp.contains("handshake") && !resp.contains("connect guest vsock") {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            resp
+        }
+        "terra_pool_claim" => {
+            let layers: Vec<String> = args
+                .get("layers")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            send_to_engine(&Command::new("pool_claim").with_layers(layers))
+        }
+        "terra_pool_list" => send_to_engine(&Command::new("pool_list")),
+        "terra_pool_release" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            send_to_engine(&Command::new("pool_release").with_name(name))
+        }
+        "terra_attach_fs" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            let layers: Vec<String> = args
+                .get("layers")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            send_to_engine(
+                &Command::new("attach_fs")
+                    .with_name(name)
+                    .with_layers(layers),
+            )
+        }
+        "terra_detach_fs" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            send_to_engine(&Command::new("detach_fs").with_name(name))
+        }
         _ => r#"{"status":"error","error":"unknown tool"}"#.to_string(),
     };
     cmd
 }
 
 fn send_to_engine(cmd: &Command) -> String {
-    match UnixStream::connect(ENGINE_SOCKET) {
+    match UnixStream::connect(engine_socket()) {
         Ok(mut stream) => {
             let json = serde_json::to_string(cmd).unwrap_or_default();
             let _ = writeln!(stream, "{}", json);
