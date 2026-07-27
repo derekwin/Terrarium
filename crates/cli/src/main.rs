@@ -98,6 +98,8 @@ enum Commands {
     },
     /// Show NAT bridge and per-VM network attachments.
     NetList,
+    /// Tear down the NAT bridge/DHCP/masquerade (refused while VMs use it).
+    NetDown,
     /// Execute a command inside a VM (via the guest agent).
     Exec {
         name: String,
@@ -261,6 +263,9 @@ fn main() {
         }
         Commands::NetList => {
             print_response(send(&cli.socket, &Command::new("net_list")));
+        }
+        Commands::NetDown => {
+            print_response(send(&cli.socket, &Command::new("net_down")));
         }
         Commands::Exec {
             name,

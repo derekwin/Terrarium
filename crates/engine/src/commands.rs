@@ -24,6 +24,7 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "detach_fs" => cmd_detach_fs(mgr, cmd).await,
         "exec" => cmd_exec(mgr, cmd).await,
         "net_list" => cmd_net_list(mgr),
+        "net_down" => cmd_net_down(mgr),
         "pool_create" => cmd_pool_create(mgr, cmd).await,
         "pool_list" => cmd_pool_list(mgr),
         "pool_claim" => cmd_pool_claim(mgr, cmd).await,
@@ -175,7 +176,19 @@ async fn cmd_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
         None => return Response::err("Missing 'name' field"),
     };
     match mgr.destroy(&name).await {
-        Ok(()) => Response::ok_msg(&format!("VM '{}' destroyed", name)),
+        Ok(()) => {
+            // Snapshot artifacts of this VM are garbage until restore
+            // lands (then this becomes opt-in). Best-effort cleanup.
+            for p in [
+                format!("/tmp/terra-snap-{}.bin", name),
+                format!("/tmp/terra-snap-{}.mem", name),
+            ] {
+                if std::fs::remove_file(&p).is_ok() {
+                    tracing::info!(path = %p, "removed snapshot artifact");
+                }
+            }
+            Response::ok_msg(&format!("VM '{}' destroyed", name))
+        }
         Err(e) => Response::err(e.to_string()),
     }
 }
@@ -237,6 +250,24 @@ async fn cmd_exec(mgr: &VmManager, cmd: Command) -> Response {
             "exit_code": r.exit_code,
         })),
         Err(e) => Response::err(e.to_string()),
+    }
+}
+
+fn cmd_net_down(mgr: &VmManager) -> Response {
+    let in_use = mgr.net_in_use();
+    if in_use > 0 {
+        return Response::err(format!(
+            "{} VM(s) still using the bridge — destroy them first",
+            in_use
+        ));
+    }
+    match terrarium_network::teardown_nat_bridge(
+        terrarium_network::DEFAULT_BRIDGE,
+        terrarium_network::DEFAULT_GATEWAY,
+        terrarium_network::DEFAULT_PREFIX,
+    ) {
+        Ok(()) => Response::ok_msg("NAT bridge, DHCP, and masquerade removed"),
+        Err(e) => Response::err(e),
     }
 }
 

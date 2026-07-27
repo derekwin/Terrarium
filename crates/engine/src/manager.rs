@@ -50,6 +50,11 @@ impl VmManager {
         self.net_vms.contains(name)
     }
 
+    /// Number of VMs currently using the NAT bridge.
+    pub fn net_in_use(&self) -> usize {
+        self.net_vms.len()
+    }
+
     /// Spawn a new VM from the given spec.
     /// Returns an error if a VM with the same name already exists.
     pub async fn spawn(&mut self, spec: VmSpec) -> Result<(), AdapterError> {

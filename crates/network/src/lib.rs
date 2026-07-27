@@ -288,6 +288,42 @@ pub fn ensure_tap(tap: &str, bridge: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Stop the dnsmasq DHCP server bound to the bridge (best-effort).
+pub fn stop_dhcp(bridge: &str) {
+    let pattern = format!("dnsmasq.*{}", bridge);
+    if let Ok(out) = Command::new("pgrep").args(["-f", &pattern]).output() {
+        for pid in String::from_utf8_lossy(&out.stdout).lines() {
+            let _ = Command::new("kill").arg(pid.trim()).output();
+        }
+    }
+}
+
+/// Tear down the NAT bridge, masquerade rule, and DHCP server.
+/// Caller must guarantee no VM is using the bridge anymore.
+pub fn teardown_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), String> {
+    stop_dhcp(bridge);
+    let _ = run_iptables(&[
+        "-t",
+        "nat",
+        "-D",
+        "POSTROUTING",
+        "-s",
+        &format!("{}/{}", subnet_of(gateway), prefix),
+        "-j",
+        "MASQUERADE",
+    ]);
+    let exists = Command::new("ip")
+        .args(["link", "show", bridge])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if exists {
+        run_ip(&["link", "del", bridge])?;
+    }
+    tracing::info!(%bridge, "NAT bridge torn down");
+    Ok(())
+}
+
 /// Remove a tap device (best-effort on missing).
 pub fn remove_tap(tap: &str) -> Result<(), String> {
     let exists = Command::new("ip")
