@@ -267,7 +267,7 @@ def cmd_image_layer_build(args):
         return _err(
             "this build uses a networked builder VM (downloads), which needs "
             "CAP_NET_ADMIN.\n"
-            "  either: sudo python -m terra daemon-start   (then retry)\n"
+            "  either: sudo terra daemon start   (then retry)\n"
             "  or:     add --no-net for an offline build"
         )
     client = _client(args)
@@ -601,7 +601,7 @@ def main() -> int:
     except (FileNotFoundError, ConnectionRefusedError):
         hint = (
             "no engine daemon found — start one first:\n"
-            "  python -m terra daemon-start\n"
+            "  terra daemon start\n"
             "  (or: python -c 'from terra.daemon import Daemon; Daemon().start()')\n"
             "  or point at an existing one: --socket <path|tcp://host:port> or TERRA_SOCKET"
         )
@@ -609,7 +609,7 @@ def main() -> int:
     except PermissionError:
         return _err(
             "socket exists but is not usable by this user (owned by root?) — "
-            "you should never need sudo; use your own daemon (python -m terra daemon-start)"
+            "socket unusable by this user — start your own daemon: terra daemon start"
         )
     except KeyboardInterrupt:
         return 130

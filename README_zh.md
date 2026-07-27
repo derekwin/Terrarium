@@ -54,7 +54,7 @@ pip install -e sdk/python
 **CLI**——资源分组，动词统一为 `ls / create / remove`：
 
 ```bash
-terra daemon start                              # 引擎 daemon
+sudo terra daemon start                       # 引擎 daemon（root 才有 NAT 网络）
 terra kernel create -n k612 --version 6.12      # 构建 guest 内核
 terra layer create -n python312 --script images/examples/python312.sh
 terra pool create --size 3                      # 预热池
