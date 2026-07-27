@@ -67,7 +67,10 @@ async fn main() {
     // "daemon" subcommand starts the server
     if args[1] == "daemon" {
         let socket = parse_socket_flag(&args);
-        daemon::run(&socket).await.expect("Daemon failed");
+        let tcp = parse_flag(&args, "--tcp");
+        daemon::run(&socket, tcp.as_deref())
+            .await
+            .expect("Daemon failed");
         return;
     }
 
@@ -86,12 +89,16 @@ async fn main() {
 }
 
 fn parse_socket_flag(args: &[String]) -> String {
+    parse_flag(args, "--socket").unwrap_or_else(|| DEFAULT_SOCKET.to_string())
+}
+
+fn parse_flag(args: &[String], name: &str) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--socket" && i + 1 < args.len() {
-            return args[i + 1].clone();
+        if args[i] == name && i + 1 < args.len() {
+            return Some(args[i + 1].clone());
         }
         i += 1;
     }
-    DEFAULT_SOCKET.to_string()
+    None
 }

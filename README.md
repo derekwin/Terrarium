@@ -86,71 +86,80 @@ Read-only layers are star-composed on the host with OverlayFS (arbitrary combina
 - Networking: tap + host NAT + dnsmasq DHCP — ready with `create --net`, managed via `net-list` / `net-down`
 - Exec timeout + output cap: 60s default per command (up to 3600s) + 10MB output cap
 
-## Quick Start (Python SDK / MCP)
+## Quick Start — Three Ways to Use Terrarium
 
-Install the SDK:
+### 1. `terra` CLI — the admin tool (docker-style)
+
+For host administrators: manage the daemon, images, network, pools,
+and inspect everything.
+
+```bash
+# daemon (local use doesn't need root; networking does)
+target/release/engine daemon
+
+# remote-capable daemon (token-gated TCP)
+TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
+
+terra image kernel --version 6.12     # build the guest kernel
+terra image layer python312 ./dir     # pack an EROFS layer
+terra pool-create --size 3            # warm pool
+terra create dev --kernel ... --initramfs ... --layers python312,base --net
+terra list / info dev / resize dev --cpus 4
+terra net-list / net-down             # networking
+terra destroy dev
+```
+
+### 2. Python direct mode — a throwaway VM, no daemon to manage
+
+Zero setup: the SDK spins up a private engine behind the scenes and
+tears it down on exit. For scripts, notebooks, and local agents.
 
 ```bash
 pip install -e sdk/python
 ```
 
-**The layering concept: `layers`** — a list of environment layer names, e.g. `["python312", "base"]` (tool layers first, the base system last).
-
-### Mode A: single user, fully managed by the SDK
-
-Zero setup — the SDK resolves the engine, binaries, and directories, and cleans up when done:
-
 ```python
-from terra.daemon import Daemon
-from terra.client import TerraClient
+import terra
 
-with Daemon():
-    c = TerraClient()
-
-    # Grab a VM from the warm pool (layers are hot-plugged)
-    claim = c.pool_claim(["python312", "base"])
-    name = claim["name"]
-
-    # Run commands inside the VM
-    print(c.vm_exec(name, ["python3", "-c", "import numpy; print(numpy.__version__)"]))
-
-    # Return it to the pool
-    c.pool_release(name)
+with terra.session() as c:                       # temp daemon, auto-cleaned
+    claim = c.pool_claim(["python312", "base"])  # grab a warm VM
+    print(c.vm_exec(claim["name"],
+                    ["python3", "-c", "import numpy; print(numpy.__version__)"]))
+    c.pool_release(claim["name"])
 ```
 
-### Mode B: client against an existing server daemon
+### 3. Client–server mode — use a remote daemon's VM pool
 
-When an admin already runs the daemon on a server, you just connect:
+An admin runs the daemon on a server; you connect and use it.
+
+Server (admin):
+
+```bash
+sudo env TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
+```
+
+Client (you):
 
 ```python
 from terra.client import TerraClient
-from terra.vm import create
 
-c = TerraClient()          # default socket; remote: TerraClient("/path/forwarded.sock")
+c = TerraClient("tcp://server-ip:19099", token="secret")
+print(c.vm_list())
 
-# Create a VM with an environment
-vm = create("dev", "target/guest/vmlinux.bin",
-            initramfs="target/guest/initramfs-virtiofs.cpio.gz",
-            layers=["python312", "base"], cpus=2, memory_mb=512, net=True)
-
-print(vm.info())                                # state / cpus / memory_mb
-print(vm.exec(["python3", "--version"]))        # run inside the VM
-vm.resize(cpus=4)                               # scale up online
-vm.destroy()
-
-# Or use the warm pool (faster path)
-claim = c.pool_claim(["python312", "base"])
-print(c.vm_exec(claim["name"], ["python3", "-c", "print(2**10)"]))
+claim = c.pool_claim(["python312", "base"])      # use the server's pool
+print(c.vm_exec(claim["name"], ["python3", "--version"]))
 c.pool_release(claim["name"])
 ```
 
-API cheat sheet (`TerraClient` / `Vm`):
+Or with the CLI: `TERRA_TOKEN=secret terra --socket tcp://server-ip:19099 list`
 
-| Area | Methods |
-|---|---|
-| VM | `vm_create / vm_list / vm_info / vm_resize / vm_shutdown / vm_kill / vm_destroy` |
-| Exec | `vm_exec(name, args, timeout_secs=60)` |
-| Pool | `pool_claim / pool_list / pool_release` |
+> TCP is plaintext with a shared token as basic access control — use it
+> on trusted networks only. For untrusted networks, tunnel the unix
+> socket over SSH instead: `ssh -N -L /tmp/terra.sock:/tmp/terra.sock user@server`.
+
+> Admin operations (daemon lifecycle, image building, network teardown,
+> pool creation) live in the `terra` CLI. MCP (agent integration) is
+> unchanged.
 
 ### MCP (for AI agents)
 
@@ -167,14 +176,15 @@ The MCP server runs over stdio — point your agent (Claude Code / Desktop, etc.
 }
 ```
 
-User-surface tools visible to the agent: `terra_vm_create/list/info/resize/shutdown/kill/destroy`, `terra_exec`, `terra_pool_claim/list/release`, `terra_attach_fs/detach_fs`. Canonical flow:
+User-surface tools: `terra_vm_create/list/info/resize/shutdown/kill/destroy`,
+`terra_exec`, `terra_pool_claim/list/release`, `terra_attach_fs/detach_fs`.
+Canonical flow:
 
 ```
 terra_pool_claim(layers=["python312","base"])
   → terra_exec(name, args=["python3","-c","print(2**10)"])
   → terra_pool_release(name)
 ```
-
 
 ## Repository
 

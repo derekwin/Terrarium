@@ -2,7 +2,7 @@
 
 **生产级 Agent 沙箱 — 高单机密度部署安全隔离的执行环境。**
 
-Terrarium Engine 是一个与具体 VM/沙箱技术解耦的调度控制层，把任意 Linux 宿主机变成多租户 Agent 运行时——硬件级 VM 隔离、可插拔沙箱后端、分层 virtiofs 文件系统（EROFS + OverlayFS，设计见 docs/plans）。
+Terrarium Engine 是一个Agent运行时执行环境的调度控制层，与具体 VM/沙箱技术解耦 —— 硬件级 VM 隔离、可插拔沙箱后端、分层 virtiofs 文件系统。
 
 ## 为什么选择 Terrarium
 
@@ -12,9 +12,9 @@ Terrarium Engine 是一个与具体 VM/沙箱技术解耦的调度控制层，�
 |---|---|---|---|
 | 隔离性 | 弱（共享内核） | 强（KVM） | **强（KVM + 沙箱）** |
 | 密度 | 高 | 低 | **高** |
-| 启动速度 | 快 | 慢（~1s） | **快（CH ~1s，预热池更快）** |
-| 文件持久化 | 临时 | 磁盘镜像 | **分层 virtiofs（页缓存共享）** |
-| 资源控制 | cgroup | VM 配置 | **tc 网络 QoS** |
+| 启动速度 | 快 | 慢（~1s） | **快（预热池快速启动）** |
+| 文件持久化 | 临时 | 磁盘镜像 | **分层 virtiofs ** |
+| 资源控制 | cgroup | VM 配置 | **tc QoS** |
 | 沙箱后端 | — | — | **可插拔（Sandlock、OpenShell）** |
 
 ## 架构
@@ -49,7 +49,7 @@ Terrarium Engine 是一个与具体 VM/沙箱技术解耦的调度控制层，�
 
 | Trait | 职责 | 实现 |
 |---|---|---|
-| `VmAdapter` | VM 创建、扩缩、快照 | Cloud Hypervisor（Firecracker 已移除——不支持 virtiofs） |
+| `VmAdapter` | VM 创建、扩缩、快照 | Cloud Hypervisor |
 | `SandboxAdapter` | 沙箱创建、执行、销毁 | Sandlock、OpenShell |
 
 ## 核心能力
@@ -69,15 +69,15 @@ Terrarium Engine 是一个与具体 VM/沙箱技术解耦的调度控制层，�
   base layer （只读 EROFS，共享）           ← 系统层
 ```
 
-只读层在宿主侧经 OverlayFS 星型组合（任意搭配、page cache 共享），经 virtiofs + `cache=always` 暴露给 VM（注意：DAX 已从 Cloud Hypervisor 移除——见 docs/fs-m2-benchmark.md）；写操作 copy-up 进独立 upperdir。计算与数据生命周期分离：VM 命令永不删除数据。设计见 docs/plans。
+只读层在宿主侧经 OverlayFS 星型组合（任意搭配、page cache 共享），经 virtiofs + `cache=always` 暴露给 VM；写操作 copy-up 进独立 upperdir。计算与数据生命周期分离：VM 命令永不删除数据。
 
 ### 可插拔沙箱后端
 
 | 后端 | 隔离 | 特点 |
 |---|---|---|
-| **Sandlock** | Landlock + seccomp-bpf + seccomp notif | 免 root、COW FS、HTTP ACL、~5ms 启动（能力门控：宿主 Landlock ABI ≥ v5） |
+| **Sandlock** | Landlock + seccomp-bpf + seccomp notif | 免 root、COW FS、HTTP ACL、~5ms 启动（需要宿主 Landlock ABI ≥ v5） |
 | **OpenShell** (NVIDIA) | Container + Landlock + OPA proxy | 推理路由、凭据注入、GPU |
-| **guest-proxy** | 瘦中继 | host↔guest 命令转发（vsock） |
+| **guest-proxy** | 中继 | host↔guest 命令转发（vsock） |
 
 ### 资源控制
 
@@ -86,71 +86,78 @@ Terrarium Engine 是一个与具体 VM/沙箱技术解耦的调度控制层，�
 - 网络：tap + 宿主 NAT + dnsmasq DHCP，`create --net` 即用，`net-list`/`net-down` 管理
 - 执行超时 + 输出上限：每条命令默认 60s（可调至 3600s）+ 10MB 输出上限
 
-## 快速上手（Python SDK / MCP 用户视角）
+## 快速上手 — 三种使用方式
 
-安装 SDK：
+### 1. `terra` CLI — 管理员工具（docker 风格）
+
+面向宿主管理员：管理 daemon、镜像、网络、预热池，查看一切资源。
+
+```bash
+# daemon（本机使用无需 root；网络功能需要）
+target/release/engine daemon
+
+# 支持远程的 daemon（TCP + token 门控）
+TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
+
+terra image kernel --version 6.12     # 构建 guest 内核
+terra image layer python312 ./dir     # 打包 EROFS 层
+terra pool-create --size 3            # 预热池
+terra create dev --kernel ... --initramfs ... --layers python312,base --net
+terra list / info dev / resize dev --cpus 4
+terra net-list / net-down             # 网络管理
+terra destroy dev
+```
+
+### 2. Python 直连模式 — 随手开一台临时 VM
+
+零准备：SDK 在幕后启动一个私有引擎，退出时自动拆除。适合脚本、
+notebook、本地 agent。
 
 ```bash
 pip install -e sdk/python
 ```
 
-**你唯一需要知道的概念是 `layers`**：环境层的名字列表，如 `["python312", "base"]`（前面是工具层，最后是系统层）。其余一切（daemon、二进制、目录）都是自动的。
-
-### 方式 A：单用户，SDK 全自动
-
-零准备——SDK 自动解决引擎、二进制和目录，用完自动清理：
-
 ```python
-from terra.daemon import Daemon
-from terra.client import TerraClient
+import terra
 
-with Daemon():
-    c = TerraClient()
-
-    # 从预热池拿一台 VM（层自动挂载）
-    claim = c.pool_claim(["python312", "base"])
-    name = claim["name"]
-
-    # 在 VM 里跑命令
-    print(c.vm_exec(name, ["python3", "-c", "import numpy; print(numpy.__version__)"]))
-
-    # 归还池
-    c.pool_release(name)
+with terra.session() as c:                       # 临时 daemon，自动清理
+    claim = c.pool_claim(["python312", "base"])  # 拿一台热 VM
+    print(c.vm_exec(claim["name"],
+                    ["python3", "-c", "import numpy; print(numpy.__version__)"]))
+    c.pool_release(claim["name"])
 ```
 
-### 方式 B：服务器已有 daemon（客户端使用）
+### 3. 客户端-服务器模式 — 使用远程 daemon 的 VM 池
 
-管理员在服务器上跑着 daemon 时，你只连它用：
+管理员在服务器上跑 daemon，你只连它用。
+
+服务器（管理员）：
+
+```bash
+sudo env TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
+```
+
+客户端（你）：
 
 ```python
 from terra.client import TerraClient
-from terra.vm import create
 
-c = TerraClient()          # 默认 socket；远程可用 TerraClient("/path/forwarded.sock")
+c = TerraClient("tcp://server-ip:19099", token="secret")
+print(c.vm_list())
 
-# 创建一台带环境的 VM
-vm = create("dev", "target/guest/vmlinux.bin",
-            initramfs="target/guest/initramfs-virtiofs.cpio.gz",
-            layers=["python312", "base"], cpus=2, memory_mb=512, net=True)
-
-print(vm.info())                                # state / cpus / memory_mb
-print(vm.exec(["python3", "--version"]))        # 在 VM 里执行
-vm.resize(cpus=4)                               # 在线扩容
-vm.destroy()
-
-# 或用预热池（更快的路径）
-claim = c.pool_claim(["python312", "base"])
-print(c.vm_exec(claim["name"], ["python3", "-c", "print(2**10)"]))
+claim = c.pool_claim(["python312", "base"])      # 用服务器的池
+print(c.vm_exec(claim["name"], ["python3", "--version"]))
 c.pool_release(claim["name"])
 ```
 
-API 速查（`TerraClient` / `Vm`）：
+或用 CLI：`TERRA_TOKEN=secret terra --socket tcp://server-ip:19099 list`
 
-| 类别 | 方法 |
-|---|---|
-| VM | `vm_create / vm_list / vm_info / vm_resize / vm_shutdown / vm_kill / vm_destroy` |
-| 执行 | `vm_exec(name, args, timeout_secs=60)` |
-| 池 | `pool_claim / pool_list / pool_release` |
+> TCP 是明文 + 共享 token 基础访问控制——仅限可信网络。不可信网络
+> 请用 SSH 隧道转发 unix socket：
+> `ssh -N -L /tmp/terra.sock:/tmp/terra.sock user@server`。
+
+> 管理员操作（daemon 启停、镜像构建、网络拆除、建池）在 `terra` CLI。
+> MCP 集成：
 
 ### MCP（给 AI Agent 用）
 
@@ -167,15 +174,13 @@ MCP Server 以 stdio 运行，直接配进你的 agent（Claude Code / Desktop �
 }
 ```
 
-Agent 侧可见的用户面工具：`terra_vm_create/list/info/resize/shutdown/kill/destroy`、`terra_exec`、`terra_pool_claim/list/release`、`terra_attach_fs/detach_fs`。典型调用流：
+用户面工具：`terra_vm_create/list/info/resize/shutdown/kill/destroy`、`terra_exec`、`terra_pool_claim/list/release`、`terra_attach_fs/detach_fs`。典型调用流：
 
 ```
 terra_pool_claim(layers=["python312","base"])
   → terra_exec(name, args=["python3","-c","print(2**10)"])
   → terra_pool_release(name)
 ```
-
-> 管理员操作（daemon 启停、镜像构建、网络拆除、建池）不属于用户面——见 `terra` CLI 与 `AGENTS.md`。
 
 ## 仓库结构
 

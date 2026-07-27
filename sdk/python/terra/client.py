@@ -18,21 +18,39 @@ class TerraError(Exception):
 
 
 class TerraClient:
-    """Client for the terrarium engine daemon."""
+    """Client for the terrarium engine daemon.
 
-    def __init__(self, socket_path: str | None = None):
+    Addresses:
+    - unix socket path (default, local daemon)
+    - "tcp://host:port" (remote daemon started with `--tcp`; pass
+      `token=` when the server sets TERRA_TOKEN)
+    """
+
+    def __init__(self, socket_path: str | None = None, token: str | None = None):
         if socket_path is None:
             from . import paths
 
             socket_path = paths.default_socket()
         self.socket_path = socket_path
+        self.token = token
+
+    def _connect(self) -> socket.socket:
+        if self.socket_path.startswith("tcp://"):
+            host, port = self.socket_path[6:].rsplit(":", 1)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((host, int(port)))
+            return sock
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(self.socket_path)
+        return sock
 
     def _send(self, cmd: dict) -> dict:
         """Send a JSON command and return the parsed response data."""
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock = self._connect()
         sock.settimeout(30)
         try:
-            sock.connect(self.socket_path)
+            if self.token:
+                sock.sendall((self.token + "\n").encode())
             payload = json.dumps(cmd) + "\n"
             sock.sendall(payload.encode())
 

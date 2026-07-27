@@ -328,7 +328,33 @@ fn call_tool(name: &str, args: &serde_json::Value) -> String {
 }
 
 fn send_to_engine(cmd: &Command) -> String {
-    match UnixStream::connect(engine_socket()) {
+    let addr = engine_socket();
+    if let Some(tcp) = addr.strip_prefix("tcp://") {
+        return match std::net::TcpStream::connect(tcp) {
+            Ok(mut stream) => {
+                // Remote servers may require TERRA_TOKEN as the first line.
+                if let Ok(token) = std::env::var("TERRA_TOKEN") {
+                    let _ = writeln!(stream, "{}", token);
+                    let _ = stream.flush();
+                }
+                let json = serde_json::to_string(cmd).unwrap_or_default();
+                let _ = writeln!(stream, "{}", json);
+                let _ = stream.flush();
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok() {
+                    line.trim().to_string()
+                } else {
+                    r#"{"status":"error","error":"no response from engine"}"#.to_string()
+                }
+            }
+            Err(e) => format!(
+                r#"{{"status":"error","error":"engine unavailable: {}"}}"#,
+                e
+            ),
+        };
+    }
+    match UnixStream::connect(addr) {
         Ok(mut stream) => {
             let json = serde_json::to_string(cmd).unwrap_or_default();
             let _ = writeln!(stream, "{}", json);

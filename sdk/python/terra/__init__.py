@@ -19,6 +19,7 @@ from . import paths
 from . import assets
 from . import images
 from . import daemon
+from .daemon import session
 
 __all__ = [
     "TerraClient",
@@ -28,4 +29,5 @@ __all__ = [
     "assets",
     "images",
     "daemon",
+    "session",
 ]

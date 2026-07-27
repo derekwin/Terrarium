@@ -105,3 +105,22 @@ class Daemon:
 
     def __exit__(self, *args: object) -> None:
         self.stop()
+
+
+from contextlib import contextmanager
+
+from .client import TerraClient
+
+
+@contextmanager
+def session(**daemon_kwargs):
+    """Direct mode: a temporary engine daemon + client, zero setup.
+
+        with terra.session() as c:
+            print(c.vm_exec(...))
+
+    The daemon starts on entry and is torn down (SIGTERM, VMs cleaned)
+    on exit. Keyword args are forwarded to Daemon().
+    """
+    with Daemon(**daemon_kwargs) as d:
+        yield TerraClient(socket_path=d.socket)
