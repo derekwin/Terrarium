@@ -356,18 +356,33 @@ def _kernel_variants() -> list[str]:
     return out
 
 
+_ROOTFS_ALIASES = {
+    "alpine.cpio": "alpine",
+    "initramfs-agent.cpio.gz": "agent",
+    "initramfs-virtiofs.cpio.gz": "virtiofs",
+}
+
+
 def _rootfs_variants() -> list[str]:
-    """Rootfs/initramfs artifacts in images/rootfs/."""
+    """Logical names users type: --rootfs <name>."""
     out = []
     for e in sorted(paths.rootfs_dir().iterdir()):
-        out.append(f"{e.name}/" if e.is_dir() else e.name)
+        if e.name in _ROOTFS_ALIASES:
+            out.append(_ROOTFS_ALIASES[e.name])
+        elif e.suffix == ".cpio":
+            out.append(e.stem)
+        elif e.name.endswith(".cpio.gz"):
+            out.append(e.name[: -len(".cpio.gz")])
+        else:
+            out.append(e.name)
     return out
 
 
 def cmd_kernel_ls(args):
+    # Print the identifiers users type: --kernel <name>
     for e in sorted(paths.kernels_dir().iterdir()):
         if e.is_dir() and (e / "vmlinux.bin").exists():
-            print(f"{e.name}/")
+            print(e.name)
     return 0
 
 
