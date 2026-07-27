@@ -1,0 +1,23 @@
+#!/bin/sh
+# Terrarium Ubuntu guest init (conventional: pseudo-fs, network, agent)
+
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /tmp
+
+# Network (if a virtio-net device is present)
+ip link set lo up 2>/dev/null
+if ip link show eth0 2>/dev/null; then
+    ip link set eth0 up
+    if command -v dhclient >/dev/null; then
+        dhclient -v eth0 2>/dev/null &
+    fi
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+fi
+
+# Guest agent (host exec channel)
+/bin/guest-proxy &
+
+echo "Ubuntu guest ready ($(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '\"'))"
+exec /bin/sh
