@@ -2,7 +2,7 @@
 
 **Production-grade agent sandboxing — deploy secure, isolated execution environments with high single-node density.**
 
-Terrarium Engine is a scheduling and control layer that decouples agent sandboxing from specific VM and sandbox technologies. Think of it as the control plane that turns any Linux host into a multi-tenant agent runtime — with hardware-level VM isolation, pluggable sandbox backends, and a layered virtiofs filesystem (EROFS + OverlayFS, see docs/plans).
+Terrarium Engine is a scheduling and control layer for agent runtime execution environments, decoupled from specific VM and sandbox technologies — hardware-level VM isolation, pluggable sandbox backends, and a layered virtiofs filesystem.
 
 ## Why Terrarium
 
@@ -12,28 +12,25 @@ Running AI agents in production means running untrusted code at scale. Container
 |---|---|---|---|
 | Isolation | Weak (shared kernel) | Strong (KVM) | **Strong (KVM + sandbox)** |
 | Density | High | Low | **High** |
-| Provisioning | Fast | Slow (~1s) | **Fast (~1s via CH)** |
-| File persistence | Ephemeral | Disk image | **Layered virtiofs (shared page cache)** |
-| Resource control | cgroup | VM config | **Network QoS via tc** |
+| Provisioning | Fast | Slow (~1s) | **Fast (warm-pool quick start)** |
+| File persistence | Ephemeral | Disk image | **Layered virtiofs** |
+| Resource control | cgroup | VM config | **tc QoS** |
 | Sandbox backends | N/A | N/A | **Pluggable (Sandlock, OpenShell)** |
 
 ## Architecture
 
 ```
 ┌─ Host ──────────────────────────────────────────────────────┐
-│                                                              │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │                Terrarium Engine                       │   │
 │  │     daemon · CLI · Python SDK · MCP Server            │   │
 │  └──────────────────────┬───────────────────────────────┘   │
-│                         │                                    │
 │          ┌──────────────┴──────────────┐                     │
 │          ▼                             ▼                     │
 │  ┌───────────────┐            ┌────────────────┐            │
 │  │  CH Adapter   │            │ SandboxAdapter  │            │
 │  │  (VmAdapter)  │            │ Sandlock/OpenShell│          │
 │  └───────┬───────┘            └───────┬────────┘            │
-│          │                            │                      │
 │          ▼                            ▼                      │
 │  ┌─────────────────────────────────────────────┐            │
 │  │          Cloud Hypervisor VM × N            │            │
@@ -42,10 +39,9 @@ Running AI agents in production means running untrusted code at scale. Container
 │  │  │  sandlock CLI / openshell CLI         │  │            │
 │  │  │  Agent process ◄── Sandbox isolation  │  │            │
 │  │  └───────────────────────────────────────┘  │            │
-│  │  per VM: virtiofs rootfs (EROFS layers + private upperdir)   │            │
+│  │  per VM: virtiofs rootfs (EROFS layers + private upperdir) ││
 │  └─────────────────────────────────────────────┘            │
-│                                                              │
-│  Multi-backend via Adapter traits                              │
+│  Multi-backend via Adapter traits                            │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -53,7 +49,7 @@ Running AI agents in production means running untrusted code at scale. Container
 
 | Trait | What it does | Implementations |
 |---|---|---|
-| `VmAdapter` | Spawn, resize, snapshot VMs | Cloud Hypervisor (Firecracker dropped — no virtiofs) |
+| `VmAdapter` | Spawn, resize, snapshot VMs | Cloud Hypervisor |
 | `SandboxAdapter` | Create, exec, destroy sandboxes | Sandlock, OpenShell |
 
 ## Key Capabilities
@@ -61,7 +57,7 @@ Running AI agents in production means running untrusted code at scale. Container
 ### Adapter Trait Architecture
 
 - Engine completely decoupled from VM implementations via `VmAdapter` / `VmHandle` traits
-- Pluggable backends: Cloud Hypervisor, Sandlock, OpenShell (Firecracker removed — no virtiofs support)
+- Pluggable backends: Cloud Hypervisor, Sandlock, OpenShell
 - Unified error type (`AdapterError`) across all adapters
 - Async runtime (tokio) for concurrent VM operations
 
@@ -72,26 +68,23 @@ Running AI agents in production means running untrusted code at scale. Container
   tool layers (read-only EROFS, composable)   <- tools/runtime
   base layer  (read-only EROFS, shared)       <- system
 ```
-Read-only layers are star-composed on the host with OverlayFS (arbitrary
-combinations, shared page cache) and exposed to the VM via virtiofs with
-`cache=always` (note: DAX was removed from Cloud Hypervisor — see
-docs/fs-m2-benchmark.md). Writes copy-up into the per-VM upperdir.
-Compute and data lifecycles are separate: VM commands never delete data.
-Design: docs/plans.
+
+Read-only layers are star-composed on the host with OverlayFS (arbitrary combinations, shared page cache) and exposed to the VM via virtiofs with `cache=always`. Writes copy-up into the per-VM upperdir. Compute and data lifecycles are separate: VM commands never delete data.
 
 ### Pluggable Sandbox Backends
 
 | Backend | Isolation | Unique |
 |---|---|---|
-| **Sandlock** | Landlock + seccomp-bpf + seccomp notif | No root needed, COW FS, HTTP ACL, ~5ms startup |
+| **Sandlock** | Landlock + seccomp-bpf + seccomp notif | No root needed, COW FS, HTTP ACL, ~5ms startup (requires host Landlock ABI ≥ v5) |
 | **OpenShell** (NVIDIA) | Container + Landlock + OPA proxy | Inference routing, credential injection, GPU |
-| **guest-proxy** | Thin relay | Host↔guest command forwarding |
+| **guest-proxy** | Relay | Host↔guest command forwarding (vsock) |
 
 ### Resource Control
 
-- Network QoS: per-VM egress/ingress rate limiting via Linux tc
-- Dynamic resize: CPU, memory online adjustment without reboot
-- Exec timeout + output cap: all sandbox commands limited to 60s + 10MB output
+- Network QoS: per-VM egress/ingress rate limiting and priority (Linux tc)
+- Dynamic resize: CPU and memory online adjustment without reboot (verified: 100% effective for both)
+- Networking: tap + host NAT + dnsmasq DHCP — ready with `create --net`, managed via `net-list` / `net-down`
+- Exec timeout + output cap: 60s default per command (up to 3600s) + 10MB output cap
 
 ## Quick Start (Python SDK / MCP)
 
@@ -101,14 +94,11 @@ Install the SDK:
 pip install -e sdk/python
 ```
 
-**The only concept you need is `layers`**: names of environment layers,
-e.g. `["python312", "base"]` (tool layers first, the base system last).
-Everything else — daemon, binaries, directories — is automatic.
+**The layering concept: `layers`** — a list of environment layer names, e.g. `["python312", "base"]` (tool layers first, the base system last).
 
 ### Mode A: single user, fully managed by the SDK
 
-Zero setup — the SDK resolves the engine, binaries, and directories,
-and cleans up when done:
+Zero setup — the SDK resolves the engine, binaries, and directories, and cleans up when done:
 
 ```python
 from terra.daemon import Daemon
@@ -185,38 +175,37 @@ terra_pool_claim(layers=["python312","base"])
   → terra_pool_release(name)
 ```
 
-> Admin operations (daemon lifecycle, image building, network teardown, pool creation) are out of the user surface — see the `terra` CLI and `AGENTS.md`.
 
 ## Repository
 
 ```
 crates/
-├── engine/          Engine daemon + CLI + VM lifecycle
+├── engine/          Engine daemon + VM lifecycle + pool management
 ├── adapter/
 │   ├── traits/      VmAdapter + SandboxAdapter trait definitions
-│   ├── cloud-hypervisor/  CH adapter (tokio async client)
-│   ├── sandlock/    Sandlock adapter (SandboxAdapter, capability-gated)
-│   └── openshell/   OpenShell adapter (SandboxAdapter)
+│   ├── cloud-hypervisor/  CH adapter (async client + virtiofs composition)
+│   ├── sandlock/    Sandlock adapter (capability-gated)
+│   └── openshell/   OpenShell adapter
 ├── protocol/        Shared Command/Response types (JSON protocol)
-├── guest-proxy/     Host↔guest command relay daemon
-├── network/         Per-VM tc-based network QoS
-├── cli/             terra CLI (uses protocol crate)
+├── guest-proxy/     Host↔guest command relay (vsock + unix socket)
+├── network/         tap/NAT/DHCP + tc QoS
+├── cli/             terra CLI (incl. image build commands)
 └── mcp/             MCP Server (stdio JSON-RPC)
 
-sdk/python/          Python SDK
+sdk/python/          Python SDK (zero-config management: daemon/assets/images/paths)
 
 thirdparty/          Third-party deps + patch registry
-images/              Guest kernel + rootfs build
+images/              Guest kernel + rootfs + initramfs build scripts
 ```
 
 ## Roadmap
 
 - **M0** ✅ CH base, guest images, baseline measurements
 - **M1** ✅ Engine daemon, CLI, VM lifecycle
-- **M2** ✅ Adapter layer, Sandlock/OpenShell, async tokio runtime, Python SDK
+- **M2** ✅ Adapter layer, async runtime, Python SDK
 - **M3** ✅ virtiofs filesystem (EROFS layers + OverlayFS), warm pool, networking (tap/NAT/DHCP), layer build-by-doing
 - **M4** 🔲 Pool auto-scaling, snapshot fault tolerance, density benchmarks, observability
 
 ## License
 
-Apache 2.0. Built on Cloud Hypervisor and Linux kernel features. See `THIRD-PARTY` for acknowledgments.
+Apache-2.0. Built on Cloud Hypervisor and Linux kernel features. See `THIRD-PARTY` for acknowledgments.
