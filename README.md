@@ -90,6 +90,9 @@ Read-only layers are star-composed on the host with OverlayFS (arbitrary combina
 
 ### 1. `terra` CLI — the admin tool (docker-style)
 
+> Available both as the Rust binary and as part of the Python SDK:
+> `python -m terra ...` (pip install puts a `terra` command on PATH).
+
 For host administrators: manage the daemon, images, network, pools,
 and inspect everything.
 

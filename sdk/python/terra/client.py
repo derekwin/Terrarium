@@ -28,9 +28,13 @@ class TerraClient:
 
     def __init__(self, socket_path: str | None = None, token: str | None = None):
         if socket_path is None:
-            from . import paths
+            import os
 
-            socket_path = paths.default_socket()
+            socket_path = os.environ.get("TERRA_SOCKET")
+            if not socket_path:
+                from . import paths
+
+                socket_path = paths.default_socket()
         self.socket_path = socket_path
         self.token = token
 

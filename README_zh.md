@@ -90,6 +90,9 @@ Terrarium Engine 是一个Agent运行时执行环境的调度控制层，与具�
 
 ### 1. `terra` CLI — 管理员工具（docker 风格）
 
+> 两种形态都有：Rust 二进制，或 Python SDK 自带（pip 安装后
+> `python -m terra ...`，PATH 上也有 `terra` 命令）。
+
 面向宿主管理员：管理 daemon、镜像、网络、预热池，查看一切资源。
 
 ```bash
