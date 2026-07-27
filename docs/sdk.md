@@ -79,6 +79,8 @@ default_memory_mb / default_layers / default_net / token`。
 资源分组 + 统一动词（`ls / create / remove [-n 名字]`）：
 
 - `vm ls/create/remove/info/exec/resize/shutdown/kill/attach-fs/detach-fs`
+（`--kernel`/`--rootfs` 均可传绝对路径或 ls 出来的变体名，如
+`--kernel k612 --rootfs alpine`）
 - `kernel ls/create -n <名> --version/remove -n`、`rootfs` 同构
 - `layer ls/create -n <名> [--from-dir|--script|--from-image]/remove -n`
 - `pool ls/create/remove/claim/release`

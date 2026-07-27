@@ -58,7 +58,7 @@ terra daemon start                              # engine daemon
 terra kernel create -n k612 --version 6.12      # build a guest kernel
 terra layer create -n python312 --script images/examples/python312.sh
 terra pool create --size 3                      # warm pool
-terra vm create dev --kernel ... --initramfs ... --layers python312,base --net
+terra vm create dev --kernel k612 --rootfs alpine --layers python312,base --net
 terra vm exec dev -- python3 --version
 terra vm remove dev
 ```

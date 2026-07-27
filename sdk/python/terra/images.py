@@ -144,6 +144,34 @@ def resolve_kernel(name_or_path: str) -> Path:
     )
 
 
+def resolve_rootfs(name_or_path: str) -> Path:
+    """Resolve a rootfs/initramfs image by variant name or explicit path.
+
+    Convention: images/rootfs/<name>, <name>.cpio, <name>.cpio.gz.
+    Well-known aliases: alpine, virtiofs, agent.
+    """
+    p = Path(name_or_path).expanduser()
+    if p.exists():
+        return p
+    aliases = {
+        "alpine": "alpine.cpio",
+        "virtiofs": "initramfs-virtiofs.cpio.gz",
+        "agent": "initramfs-agent.cpio.gz",
+    }
+    name = aliases.get(name_or_path, name_or_path)
+    for cand in (
+        paths.rootfs_dir() / name,
+        paths.rootfs_dir() / f"{name}.cpio",
+        paths.rootfs_dir() / f"{name}.cpio.gz",
+    ):
+        if cand.exists():
+            return cand
+    raise ImageError(
+        f"rootfs image {name_or_path!r} not found under {paths.rootfs_dir()} "
+        f"(see `terra rootfs ls`)"
+    )
+
+
 def build_layer(src_dir: str, name: str) -> Path:
     """Pack a directory into an EROFS layer image in the managed layers dir."""
     mkfs, _fuse = assets.ensure_erofs_tools()

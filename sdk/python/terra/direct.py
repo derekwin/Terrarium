@@ -109,6 +109,8 @@ def create(
             if layers
             else images.ensure("alpine.cpio")
         )
+    elif not Path(initramfs).exists():
+        initramfs = str(images.resolve_rootfs(initramfs))
     name = name or f"vm-{next(_names)}"
     if _mode == "remote" and layers:
         # Remote daemons allocate from the warm pool — same verb.

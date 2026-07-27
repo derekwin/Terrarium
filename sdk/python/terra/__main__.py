@@ -56,10 +56,13 @@ def cmd_create(args):
     kernel = args.kernel
     if kernel and not Path(kernel).exists():
         kernel = str(images.resolve_kernel(kernel))
+    rootfs = args.rootfs
+    if rootfs and not Path(rootfs).exists():
+        rootfs = str(images.resolve_rootfs(rootfs))
     resp = c.vm_create(
         args.name,
         kernel,
-        initramfs=args.initramfs,
+        initramfs=rootfs,
         cpus=args.cpus,
         max_cpus=args.max_cpus,
         memory_mb=args.memory,
@@ -474,7 +477,7 @@ def main() -> int:
     sp = vms.add_parser("create")
     sp.add_argument("name")
     sp.add_argument("--kernel", required=True)
-    sp.add_argument("--initramfs")
+    sp.add_argument("--rootfs", "--initramfs", dest="rootfs")
     sp.add_argument("--cpus", type=int, default=2)
     sp.add_argument("--max-cpus", type=int)
     sp.add_argument("--memory", type=int, default=512)
