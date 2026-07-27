@@ -10,10 +10,25 @@ use std::sync::Arc;
 
 use adapter_traits::{AdapterError, VmAdapter, VmHandle, VmName, VmSpec};
 
+/// One warm-pool slot: an idle or claimed VM.
+#[derive(Debug, Clone)]
+pub struct PoolSlot {
+    /// VM name (pool-N).
+    pub name: String,
+    /// Currently claimed by a task (fs attached).
+    pub claimed: bool,
+    /// Layers attached when claimed.
+    pub layers: Vec<String>,
+}
+
 /// Central VM registry for the controller.
 pub struct VmManager {
     adapter: Arc<dyn VmAdapter>,
     vms: HashMap<VmName, Box<dyn VmHandle>>,
+    /// Warm pool slots (idle agent VMs ready for hot-plug assignment).
+    pool: Vec<PoolSlot>,
+    /// Next pool VM id.
+    pool_next_id: u32,
 }
 
 impl VmManager {
@@ -22,6 +37,8 @@ impl VmManager {
         Self {
             adapter,
             vms: HashMap::new(),
+            pool: Vec::new(),
+            pool_next_id: 0,
         }
     }
 
@@ -37,6 +54,81 @@ impl VmManager {
         }
         let handle = self.adapter.create(&spec).await?;
         self.vms.insert(name, handle);
+        Ok(())
+    }
+
+    /// Create `size` idle warm-pool VMs (agent initramfs, no fs).
+    /// Returns the names of the newly created pool VMs.
+    pub async fn pool_create(
+        &mut self,
+        size: u32,
+        kernel: &str,
+        agent_initramfs: &str,
+    ) -> Result<Vec<String>, AdapterError> {
+        let mut created = Vec::new();
+        for _ in 0..size {
+            let name = format!("pool-{}", self.pool_next_id);
+            self.pool_next_id += 1;
+            let vm_name = VmName::new(name.clone()).map_err(AdapterError::invalid_argument)?;
+            let spec = VmSpec {
+                name: vm_name,
+                kernel: kernel.to_string(),
+                cmdline: None,
+                boot_vcpus: 1,
+                max_vcpus: Some(4),
+                memory_mb: 256,
+                max_memory_mb: Some(1024),
+                initramfs: Some(agent_initramfs.to_string()),
+                fs: None,
+                backend_config: None,
+            };
+            self.spawn(spec).await?;
+            self.pool.push(PoolSlot {
+                name: name.clone(),
+                claimed: false,
+                layers: Vec::new(),
+            });
+            created.push(name);
+        }
+        Ok(created)
+    }
+
+    /// Pool status snapshot.
+    pub fn pool_list(&self) -> Vec<PoolSlot> {
+        self.pool.clone()
+    }
+
+    /// Claim an idle pool VM and hot-plug the given layers.
+    /// Returns the claimed VM name.
+    pub async fn pool_claim(&mut self, layers: Vec<String>) -> Result<String, AdapterError> {
+        let idx = self
+            .pool
+            .iter()
+            .position(|s| !s.claimed)
+            .ok_or_else(|| AdapterError::internal("warm pool exhausted".to_string()))?;
+        let name = self.pool[idx].name.clone();
+        let fs = adapter_traits::FsSpec {
+            layers: layers.clone(),
+            upper: adapter_traits::UpperPolicy::Ephemeral,
+        };
+        self.attach_fs(&name, &fs).await?;
+        self.pool[idx].claimed = true;
+        self.pool[idx].layers = layers;
+        tracing::info!(vm = %name, "pool VM claimed");
+        Ok(name)
+    }
+
+    /// Release a claimed pool VM: detach its fs and return it to idle.
+    pub async fn pool_release(&mut self, name: &str) -> Result<(), AdapterError> {
+        let idx = self
+            .pool
+            .iter()
+            .position(|s| s.name == name && s.claimed)
+            .ok_or_else(|| AdapterError::not_found(format!("no claimed pool VM '{}'", name)))?;
+        self.detach_fs(name).await?;
+        self.pool[idx].claimed = false;
+        self.pool[idx].layers.clear();
+        tracing::info!(vm = %name, "pool VM released to idle");
         Ok(())
     }
 
@@ -97,6 +189,7 @@ impl VmManager {
             .vms
             .remove(name)
             .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
+        self.pool.retain(|s| s.name != name);
         handle.shutdown().await
     }
 
@@ -126,6 +219,7 @@ impl VmManager {
             if remove {
                 tracing::warn!(%name, "Reaping dead VM");
                 self.vms.remove(&name);
+                self.pool.retain(|s| s.name != name.as_ref());
                 dead.push(name);
             }
         }

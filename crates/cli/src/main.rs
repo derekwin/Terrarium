@@ -71,6 +71,22 @@ enum Commands {
     DetachFs {
         name: String,
     },
+    /// Create warm-pool idle VMs.
+    PoolCreate {
+        #[arg(long, default_value = "1")]
+        size: u32,
+        #[arg(long)]
+        kernel: Option<String>,
+    },
+    PoolList,
+    /// Claim an idle pool VM and hot-plug layers.
+    PoolClaim {
+        #[arg(long, value_delimiter = ',')]
+        layers: Vec<String>,
+    },
+    PoolRelease {
+        name: String,
+    },
 }
 
 fn main() {
@@ -140,6 +156,26 @@ fn main() {
             print_response(send(
                 &cli.socket,
                 &Command::new("detach_fs").with_name(name),
+            ));
+        }
+        Commands::PoolCreate { size, kernel } => {
+            let mut cmd = Command::new("pool_create").with_pool_size(size);
+            if let Some(k) = kernel {
+                cmd.kernel = Some(k);
+            }
+            print_response(send(&cli.socket, &cmd));
+        }
+        Commands::PoolList => {
+            print_response(send(&cli.socket, &Command::new("pool_list")));
+        }
+        Commands::PoolClaim { layers } => {
+            let cmd = Command::new("pool_claim").with_layers(layers);
+            print_response(send(&cli.socket, &cmd));
+        }
+        Commands::PoolRelease { name } => {
+            print_response(send(
+                &cli.socket,
+                &Command::new("pool_release").with_name(name),
             ));
         }
     }

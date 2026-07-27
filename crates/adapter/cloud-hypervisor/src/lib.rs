@@ -419,38 +419,32 @@ impl VmHandle for ChVmHandle {
             .map_err(|e| AdapterError::internal(format!("vm.add-fs: {}", e)))?;
         // 3) mount inside the guest via guest-proxy vsock. The guest
         // agent may still be booting — retry briefly.
+        // Retry while either the agent is unreachable or the device is
+        // not yet enumerated (mount returns "Invalid argument" early).
         let mut resp = serde_json::Value::Null;
-        #[allow(unused_assignments)]
-        let mut last_err = String::new();
         for attempt in 0..20 {
-            match self
+            let err = match self
                 .guest_cmd(&serde_json::json!({
                     "command": "mount", "tag": "rootfs", "target": "/newroot",
                 }))
                 .await
             {
-                Ok(r) => {
+                Ok(r) if r["status"].as_str() == Some("ok") => {
                     resp = r;
                     break;
                 }
-                Err(e) => {
-                    last_err = e.to_string();
-                    if attempt == 19 {
-                        return Err(AdapterError::internal(format!(
-                            "guest mount unreachable after retries: {}",
-                            last_err
-                        )));
-                    }
-                    sleep(Duration::from_millis(500)).await;
-                }
+                Ok(r) => r["message"].as_str().unwrap_or("unknown").to_string(),
+                Err(e) => e.to_string(),
+            };
+            if attempt == 19 {
+                return Err(AdapterError::internal(format!(
+                    "guest mount failed after retries: {}",
+                    err
+                )));
             }
+            sleep(Duration::from_millis(500)).await;
         }
-        if resp["status"].as_str() != Some("ok") {
-            return Err(AdapterError::internal(format!(
-                "guest mount failed: {}",
-                resp["message"].as_str().unwrap_or("unknown")
-            )));
-        }
+        debug_assert!(resp["status"].as_str() == Some("ok"));
         *self.fs_device_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(device_id);
         *self.fs.lock().unwrap_or_else(|e| e.into_inner()) = Some(stack);
         tracing::info!(name = %self.name, "fs attached (hot-plug)");

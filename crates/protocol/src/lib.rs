@@ -47,6 +47,10 @@ pub struct Command {
     // resize
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes: Option<u64>,
+
+    // pool_create: number of idle VMs to maintain
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_size: Option<u32>,
 }
 
 impl Command {
@@ -66,6 +70,7 @@ impl Command {
             max_memory_mb: None,
             snapshot_path: None,
             memory_bytes: None,
+            pool_size: None,
         }
     }
 
@@ -130,6 +135,12 @@ impl Command {
     /// Builder: set initramfs.
     pub fn with_initramfs(mut self, path: impl Into<String>) -> Self {
         self.initramfs = Some(path.into());
+        self
+    }
+
+    /// Builder: set pool size.
+    pub fn with_pool_size(mut self, size: u32) -> Self {
+        self.pool_size = Some(size);
         self
     }
 

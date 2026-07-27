@@ -482,6 +482,60 @@ def test_warm_attach_detach() -> None:
     _state["created"].remove("sdk-w1")
 
 
+def test_warm_pool() -> None:
+    """Warm pool: create idle VMs -> claim -> guest exec -> release -> reclaim."""
+    client = _state["client"]
+    if not _state.get("vfsd"):
+        print("SKIP test_warm_pool: no virtiofsd binary found")
+        return
+    agent_irfs = REPO / "target/guest/initramfs-agent.cpio.gz"
+    if not agent_irfs.exists():
+        subprocess.run(["bash", "images/build-initramfs-agent.sh"], cwd=REPO, check=True)
+
+    created = client.pool_create(2, kernel=str(KERNEL))
+    assert created["count"] == 2, created
+    names = created["created"]
+    _track(names)
+    pool = client.pool_list()["pool"]
+    assert all(not s["claimed"] for s in pool), pool
+
+    # claim with layers -> the VM gets the fs hot-plugged
+    claim = client.pool_claim(["marker", "base"])
+    vm_name = claim["name"]
+    assert claim["layers"] == ["marker", "base"], claim
+    out = _guest_exec(vm_name, ["cat", "/newroot/usr/bin/hello.py"])
+    assert "marker layer" in out, out
+    # the other slot stays idle
+    pool = client.pool_list()["pool"]
+    claimed = [s for s in pool if s["claimed"]]
+    assert len(claimed) == 1 and claimed[0]["name"] == vm_name, pool
+
+    # second claim takes the other slot; third must be exhausted
+    second = client.pool_claim(["marker", "base"])["name"]
+    try:
+        client.pool_claim(["marker", "base"])
+        raise AssertionError("pool should be exhausted")
+    except TerraError as e:
+        assert "exhausted" in str(e), e
+
+    client.pool_release(vm_name)
+    client.pool_release(second)
+    pool = client.pool_list()["pool"]
+    assert all(not s["claimed"] for s in pool), pool
+
+    # release of an idle slot is an error
+    try:
+        client.pool_release(vm_name)
+        raise AssertionError("release of idle slot accepted")
+    except TerraError:
+        pass
+
+    for n in names:
+        client.vm_destroy(n)
+    _state["created"] = [x for x in _state["created"] if x not in names]
+    assert client.pool_list()["count"] == 0
+
+
 def test_layered_boot_erofs() -> None:
     """EROFS image layers: built on the fly, mounted by the adapter."""
     client = _state["client"]

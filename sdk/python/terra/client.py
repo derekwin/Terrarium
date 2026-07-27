@@ -118,6 +118,25 @@ class TerraClient:
         """Hot-plug a layered filesystem into a running VM (warm pool)."""
         return self._send({"command": "attach_fs", "name": name, "layers": list(layers)})
 
+    def pool_create(self, size: int, *, kernel: str | None = None) -> dict:
+        """Create warm-pool idle VMs."""
+        cmd: dict = {"command": "pool_create", "pool_size": size}
+        if kernel:
+            cmd["kernel"] = kernel
+        return self._send(cmd)
+
+    def pool_list(self) -> dict:
+        """List warm-pool slots and their claim state."""
+        return self._send({"command": "pool_list"})
+
+    def pool_claim(self, layers: list[str]) -> dict:
+        """Claim an idle pool VM and hot-plug the given layers."""
+        return self._send({"command": "pool_claim", "layers": list(layers)})
+
+    def pool_release(self, name: str) -> dict:
+        """Release a claimed pool VM back to idle."""
+        return self._send({"command": "pool_release", "name": name})
+
     def vm_detach_fs(self, name: str) -> dict:
         """Detach a previously attached layered filesystem."""
         return self._send({"command": "detach_fs", "name": name})
