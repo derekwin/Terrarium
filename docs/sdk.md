@@ -78,22 +78,20 @@ default_memory_mb / default_layers / default_net / token`。
 
 资源分组 + 统一动词（`ls / create / remove [-n 名字]`）：
 
-- `vm ls/create/remove/info/exec/resize/shutdown/kill`
+- `vm ls/create/remove/info/exec/resize/shutdown/kill/attach-fs/detach-fs`
 - `kernel ls/create -n <名> --version/remove -n`、`rootfs` 同构
 - `layer ls/create -n <名> [--from-dir|--script|--from-image]/remove -n`
 - `pool ls/create/remove/claim/release`
 - `net ls/create/remove`、`daemon start/ls/stop/destroy [--tcp]`
 
-旧的扁平命令（list/create/exec/destroy/pool-*/net-list/net-down/
-daemon-start/image ...）作为别名保留。
 
-层与镜像统一为「托管目录命名工件」：`image base [--name base]
-[--force]` 把 guest rootfs 铺成 `layers/<name>/`（层名直接可用，
-无需任何环境变量）；`image layer-build <name>` 把做中建的层打进
-同一目录（`<name>.erofs`）；`image layers` 列出全部。命名变体：`image kernel --version 6.12 --name k612` 与
-`image rootfs --name alpine321` 将产物放进托管镜像目录
-（`~/.local/share/terra/images/<name>/`），与默认 `base` 共存；
-使用时显式给路径（`create --kernel .../images/k612/vmlinux.bin`）。
+层与镜像统一为「托管目录命名工件」：`layer create -n base
+--from-image` 把 guest rootfs 铺成 `layers/<name>/`；`layer create
+-n <名> --script` 把做中建的层打进同一目录（`<名>.erofs`）；
+`layer ls` 列出全部。命名变体：`kernel create -n k612 --version
+6.12` 与 `rootfs create -n alpine321` 将产物放进托管镜像目录
+（`~/.local/share/terra/images/<name>/`），使用时显式给路径
+（`vm create --kernel .../images/k612/vmlinux.bin`）。
 
 连接：`--socket <path|tcp://host:port>` 或 `TERRA_SOCKET` /
 `TERRA_TOKEN`。

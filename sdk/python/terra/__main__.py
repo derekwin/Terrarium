@@ -436,118 +436,6 @@ def main() -> int:
     p.add_argument("--socket", help="daemon socket path or tcp://host:port")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("list").set_defaults(f=cmd_list)
-    sp = sub.add_parser("info")
-    sp.add_argument("name")
-    sp.set_defaults(f=cmd_info)
-
-    sp = sub.add_parser("create")
-    sp.add_argument("name")
-    sp.add_argument("--kernel", required=True)
-    sp.add_argument("--initramfs")
-    sp.add_argument("--cpus", type=int, default=2)
-    sp.add_argument("--max-cpus", type=int)
-    sp.add_argument("--memory", type=int, default=512)
-    sp.add_argument("--max-memory", type=int)
-    sp.add_argument("--layers", nargs="*", default=[])
-    sp.add_argument("--upper")
-    sp.add_argument("--net", action="store_true")
-    sp.set_defaults(f=cmd_create)
-
-    sp = sub.add_parser("exec")
-    sp.add_argument("name")
-    sp.add_argument("--timeout", type=int, default=60)
-    sp.add_argument("args", nargs=argparse.REMAINDER)
-    sp.set_defaults(f=cmd_exec)
-
-    sp = sub.add_parser("resize")
-    sp.add_argument("name")
-    sp.add_argument("--cpus", type=int)
-    sp.add_argument("--memory-bytes", type=int)
-    sp.set_defaults(f=cmd_resize)
-
-    for name, method in (
-        ("shutdown", "vm_shutdown"),
-        ("kill", "vm_kill"),
-        ("destroy", "vm_destroy"),
-    ):
-        sp = sub.add_parser(name)
-        sp.add_argument("name")
-        sp.set_defaults(f=_simple(method))
-
-    sp = sub.add_parser("pool-create")
-    sp.add_argument("--size", type=int, default=1)
-    sp.add_argument("--kernel")
-    sp.add_argument("--net", action="store_true")
-    sp.set_defaults(f=cmd_pool_create)
-
-    sub.add_parser("pool-list").set_defaults(f=cmd_pool_list)
-
-    sp = sub.add_parser("pool-claim")
-    sp.add_argument("--layers", nargs="+", required=True)
-    sp.set_defaults(f=cmd_pool_claim)
-
-    sp = sub.add_parser("pool-release")
-    sp.add_argument("name")
-    sp.set_defaults(f=_simple_pool_release)
-
-    sp = sub.add_parser("attach-fs")
-    sp.add_argument("name")
-    sp.add_argument("--layers", nargs="+", required=True)
-    sp.set_defaults(f=cmd_attach_fs)
-
-    sp = sub.add_parser("detach-fs")
-    sp.add_argument("name")
-    sp.set_defaults(f=_simple_detach)
-
-    sub.add_parser("net-list").set_defaults(f=cmd_net_list)
-    sub.add_parser("net-down").set_defaults(f=cmd_net_down)
-
-    sp = sub.add_parser(
-        "daemon-start",
-        help="start an engine daemon in the background (managed env, no sudo)",
-    )
-    sp.add_argument("--tcp", help="also listen on host:port for remote clients")
-    sp.set_defaults(f=cmd_daemon_start)
-
-    img = sub.add_parser("image")
-    isub = img.add_subparsers(dest="image_cmd", required=True)
-
-    sp = isub.add_parser(
-        "base", help="build the base layer into the managed layers dir"
-    )
-    sp.add_argument("--name", default="base")
-    sp.add_argument("--force", action="store_true")
-    sp.set_defaults(f=cmd_image_base)
-
-    isub.add_parser("layers").set_defaults(f=cmd_image_layers)
-
-    sp = isub.add_parser("layer")
-    sp.add_argument("src")
-    sp.add_argument("name")
-    sp.set_defaults(f=cmd_image_layer)
-
-    sp = isub.add_parser("layer-build")
-    sp.add_argument("name")
-    sp.add_argument("--script", required=True)
-    sp.add_argument("--base", default="base")
-    sp.add_argument("--kernel", default="target/guest/vmlinux.bin")
-    sp.add_argument("--initramfs", default="target/guest/initramfs-virtiofs.cpio.gz")
-    sp.add_argument("--no-net", action="store_true")
-    sp.add_argument("--timeout", type=int, default=600)
-    sp.set_defaults(f=cmd_image_layer_build)
-
-    for what in ("kernel", "rootfs", "initramfs", "agent-initramfs"):
-        sp = isub.add_parser(what)
-        if what == "kernel":
-            sp.add_argument("--version")
-        if what == "rootfs":
-            sp.add_argument("--type", default="busybox")
-        if what in ("kernel", "rootfs"):
-            sp.add_argument("--name", help="named variant in the managed images dir")
-        sp.set_defaults(f=cmd_image_build, what=what)
-
-
     # --- unified resource groups: vm/kernel/rootfs/layer/pool/net/daemon ---
     vm = sub.add_parser("vm", help="VM operations")
     vms = vm.add_subparsers(dest="action", required=True)
@@ -586,6 +474,14 @@ def main() -> int:
             sp.set_defaults(f=cmd_info)
         else:
             sp.set_defaults(f=_simple(method))
+
+    sp = vms.add_parser("attach-fs")
+    sp.add_argument("name")
+    sp.add_argument("--layers", nargs="+", required=True)
+    sp.set_defaults(f=cmd_attach_fs)
+    sp = vms.add_parser("detach-fs")
+    sp.add_argument("name")
+    sp.set_defaults(f=_simple_detach)
 
     for kind in ("kernel", "rootfs"):
         g = sub.add_parser(kind, help=f"manage {kind} variants")
