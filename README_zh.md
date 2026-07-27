@@ -100,7 +100,9 @@ target/release/engine daemon
 TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
 
 terra image kernel --version 6.12     # 构建 guest 内核
-terra image layer python312 ./dir     # 打包 EROFS 层
+terra image layer-build python312 --script setup.sh   # 工具层「做中建」：
+                                        # builder VM 里配环境，改动即层
+terra image layers                    # 列出可用层
 terra pool-create --size 3            # 预热池
 terra create dev --kernel ... --initramfs ... --layers python312,base --net
 terra list / info dev / resize dev --cpus 4
@@ -108,10 +110,10 @@ terra net-list / net-down             # 网络管理
 terra destroy dev
 ```
 
-### 2. Python 直连模式 — 随手开一台临时 VM
+### 2. Python 直连模式 — 随手开临时 VM，无需任何概念
 
-零准备：SDK 在幕后启动一个私有引擎，退出时自动拆除。适合脚本、
-notebook、本地 agent。
+零准备零概念：不用关心 daemon、session、pool。SDK 首次调用时惰性
+启动托管引擎，进程退出自动清理。适合脚本、notebook、本地 agent。
 
 ```bash
 pip install -e sdk/python
@@ -120,11 +122,22 @@ pip install -e sdk/python
 ```python
 import terra
 
-with terra.session() as c:                       # 临时 daemon，自动清理
-    claim = c.pool_claim(["python312", "base"])  # 拿一台热 VM
-    print(c.vm_exec(claim["name"],
-                    ["python3", "-c", "import numpy; print(numpy.__version__)"]))
-    c.pool_release(claim["name"])
+vm = terra.create(layers=["python312", "base"])   # 就这样
+print(vm.exec(["python3", "-c", "import numpy; print(numpy.__version__)"]))
+vm.destroy()
+```
+
+想控制但不写 daemon 代码？用 HostConfig 声明一次——镜像、层、池
+大小、VM 默认值、token——你的 Python 脚本就是 daemon 程序：
+
+```python
+from terra import HostConfig, create
+
+terra.configure(HostConfig(kernel="~/img/vmlinux.bin",
+                           layer_dir="~/layers",
+                           pool_size=4,
+                           default_net=True))
+vm = create(layers=["python312", "base"])
 ```
 
 ### 3. 客户端-服务器模式 — 使用远程 daemon 的 VM 池

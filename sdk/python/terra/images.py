@@ -53,8 +53,6 @@ def ensure(name: str) -> Path:
         raise ImageError(f"unknown image {name!r}; known: {sorted(_ARTIFACTS)}")
 
     managed = paths.images_dir() / name
-    if managed.exists():
-        return managed
 
     repo = _find_repo()
     if repo:
@@ -64,7 +62,13 @@ def ensure(name: str) -> Path:
             if not builder.exists():
                 raise ImageError(f"builder missing: {builder}")
             subprocess.run(["bash", str(builder)], cwd=repo, check=True)
-        shutil.copy(built, managed)
+        # Refresh the managed copy when the repo image is newer —
+        # stale images silently miss later fixes (learned the hard way).
+        if not managed.exists() or built.stat().st_mtime > managed.stat().st_mtime:
+            shutil.copy(built, managed)
+        return managed
+
+    if managed.exists():
         return managed
 
     base_url = os.environ.get("TERRA_ARTIFACT_BASE", "").rstrip("/")

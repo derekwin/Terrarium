@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 from . import assets, paths
+from .config import HostConfig
 
 
 class DaemonError(RuntimeError):
@@ -32,6 +33,7 @@ class Daemon:
     def __init__(
         self,
         *,
+        config: HostConfig | None = None,
         socket: str | None = None,
         kernel: str | None = None,
         ch_binary: str | None = None,
@@ -41,11 +43,12 @@ class Daemon:
         log: str | None = None,
     ):
         self.socket = socket or paths.default_socket()
-        self._kernel = kernel
-        self._ch = ch_binary
-        self._vfsd = virtiofsd
-        self._layer_dir = layer_dir
-        self._state_dir = state_dir
+        self.config = config or HostConfig()
+        self._kernel = kernel or self.config.kernel
+        self._ch = ch_binary or self.config.ch_binary
+        self._vfsd = virtiofsd or self.config.virtiofsd
+        self._layer_dir = layer_dir or self.config.layer_dir
+        self._state_dir = state_dir or self.config.state_dir
         self._log = log
         self._proc: subprocess.Popen | None = None
         self._log_file = None
@@ -54,6 +57,7 @@ class Daemon:
         engine = assets.ensure_engine()
         env = {
             **os.environ,
+            **self.config.env(),
             "TERRA_STATE_DIR": self._state_dir or str(paths.state_dir()),
             "TERRA_CH_BINARY": self._ch or str(assets.ensure_ch()),
             "TERRA_LAYER_DIR": self._layer_dir or str(paths.layers_dir()),
@@ -64,7 +68,12 @@ class Daemon:
             env["TERRA_KERNEL"] = self._kernel
 
         if Path(self.socket).exists():
-            Path(self.socket).unlink()
+            try:
+                Path(self.socket).unlink()
+            except PermissionError:
+                # Someone else's (e.g. root's) daemon owns this socket —
+                # use a private one instead of failing.
+                self.socket = str(paths.run_dir() / f"terra-{os.getpid()}.sock")
         if self._log:
             self._log_file = open(self._log, "w")
             out, err = self._log_file, subprocess.STDOUT

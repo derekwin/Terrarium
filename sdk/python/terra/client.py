@@ -175,15 +175,30 @@ class TerraClient:
         return self._send({"command": "detach_fs", "name": name})
 
     def vm_exec(self, name: str, args: list[str], timeout_secs: int = 60) -> dict:
-        """Execute a command inside the VM via the guest agent (vsock)."""
-        return self._send(
-            {
-                "command": "exec",
-                "name": name,
-                "args": list(args),
-                "timeout_secs": timeout_secs,
-            }
-        )
+        """Execute a command inside the VM via the guest agent (vsock).
+
+        Retries transient agent-boot errors (handshake/vsock connect)
+        for a few seconds — a VM is "Running" before its agent is ready.
+        """
+        import time as _time
+
+        last: Exception | None = None
+        for _ in range(16):
+            try:
+                return self._send(
+                    {
+                        "command": "exec",
+                        "name": name,
+                        "args": list(args),
+                        "timeout_secs": timeout_secs,
+                    }
+                )
+            except TerraError as e:
+                if "handshake" not in str(e) and "vsock" not in str(e):
+                    raise
+                last = e
+                _time.sleep(0.5)
+        raise last  # type: ignore[misc]
 
     def vm_destroy(self, name: str) -> dict:
         """Stop and deregister a VM."""

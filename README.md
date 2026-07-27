@@ -101,7 +101,10 @@ target/release/engine daemon
 TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
 
 terra image kernel --version 6.12     # build the guest kernel
-terra image layer python312 ./dir     # pack an EROFS layer
+terra image layer-build python312 --script setup.sh   # build a tool
+                                        # layer by configuring inside a
+                                        # builder VM (env is proven)
+terra image layers                    # list available layers
 terra pool-create --size 3            # warm pool
 terra create dev --kernel ... --initramfs ... --layers python312,base --net
 terra list / info dev / resize dev --cpus 4
@@ -109,10 +112,11 @@ terra net-list / net-down             # networking
 terra destroy dev
 ```
 
-### 2. Python direct mode — a throwaway VM, no daemon to manage
+### 2. Python direct mode — throwaway VMs, nothing to manage
 
-Zero setup: the SDK spins up a private engine behind the scenes and
-tears it down on exit. For scripts, notebooks, and local agents.
+Zero setup and zero concepts: no daemon, no session, no pool to think
+about. The SDK lazily starts a managed engine on first use and cleans
+it up at process exit. For scripts, notebooks, and local agents.
 
 ```bash
 pip install -e sdk/python
@@ -121,11 +125,23 @@ pip install -e sdk/python
 ```python
 import terra
 
-with terra.session() as c:                       # temp daemon, auto-cleaned
-    claim = c.pool_claim(["python312", "base"])  # grab a warm VM
-    print(c.vm_exec(claim["name"],
-                    ["python3", "-c", "import numpy; print(numpy.__version__)"]))
-    c.pool_release(claim["name"])
+vm = terra.create(layers=["python312", "base"])   # that's it
+print(vm.exec(["python3", "-c", "import numpy; print(numpy.__version__)"]))
+vm.destroy()
+```
+
+Want control without writing daemon code? Configure the host once —
+images, layers, pool size, VM defaults, token — and your Python script
+*is* the daemon program:
+
+```python
+from terra import HostConfig, create
+
+terra.configure(HostConfig(kernel="~/img/vmlinux.bin",
+                           layer_dir="~/layers",
+                           pool_size=4,
+                           default_net=True))
+vm = create(layers=["python312", "base"])
 ```
 
 ### 3. Client–server mode — use a remote daemon's VM pool

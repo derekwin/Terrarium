@@ -132,6 +132,8 @@ enum ImageCommands {
     Initramfs,
     /// Build the warm-pool idle initramfs.
     AgentInitramfs,
+    /// List available layers (dirs and .erofs images in the layer dir).
+    Layers,
     /// Pack a directory into an EROFS layer image.
     Layer {
         /// Directory containing the layer content.
@@ -305,6 +307,28 @@ fn main() {
                 &initramfs,
                 !no_net,
             ),
+            ImageCommands::Layers => {
+                let layer_dir = std::env::var("TERRA_LAYER_DIR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{}/.local/share/terra/layers",
+                            std::env::var("HOME").unwrap_or_default()
+                        )
+                    });
+                match std::fs::read_dir(&layer_dir) {
+                    Ok(entries) => {
+                        for e in entries.flatten() {
+                            println!("{}", e.file_name().to_string_lossy());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("ERROR: read {}: {}", layer_dir, e);
+                        std::process::exit(1);
+                    }
+                }
+            }
             other => run_image(other),
         },
     }
@@ -426,8 +450,8 @@ fn run_image(img: ImageCommands) {
                 });
             ("images/build-layer.sh", vec![src, name, layer_dir])
         }
-        ImageCommands::LayerBuild { .. } => {
-            unreachable!("LayerBuild is handled before run_image")
+        ImageCommands::LayerBuild { .. } | ImageCommands::Layers => {
+            unreachable!("handled before run_image")
         }
     };
     if !std::path::Path::new(script).exists() {

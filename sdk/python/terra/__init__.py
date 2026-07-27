@@ -20,6 +20,9 @@ from . import assets
 from . import images
 from . import daemon
 from .daemon import session
+from .config import HostConfig
+from . import direct
+from .direct import create, list_vms
 
 __all__ = [
     "TerraClient",
@@ -30,4 +33,8 @@ __all__ = [
     "images",
     "daemon",
     "session",
+    "HostConfig",
+    "direct",
+    "create",
+    "list_vms",
 ]
