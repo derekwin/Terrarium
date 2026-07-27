@@ -121,6 +121,29 @@ def cmd_net_down(args):
 # ---------------------------------------------------------------------------
 # image commands (host-side)
 # ---------------------------------------------------------------------------
+def cmd_daemon_start(args):
+    """Start a daemon as a detached background process (same Python, no sudo)."""
+    import subprocess
+
+    cmd = [
+        sys.executable,
+        "-c",
+        "from terra.daemon import Daemon; import time\n"
+        "d = Daemon(tcp=%r).start()\n"
+        "print(d.socket, flush=True)\n"
+        "time.sleep(10**9)" % (args.tcp,),
+    ]
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
+    )
+    time.sleep(1.5)
+    from . import paths
+
+    sock = paths.default_socket()
+    print(f"daemon started (pid={proc.pid}, socket={sock})")
+    return 0
+
+
 def cmd_image_layers(args):
     layer_dir = os.environ.get("TERRA_LAYER_DIR") or str(paths.layers_dir())
     try:
@@ -299,6 +322,13 @@ def main() -> int:
     sub.add_parser("net-list").set_defaults(f=cmd_net_list)
     sub.add_parser("net-down").set_defaults(f=cmd_net_down)
 
+    sp = sub.add_parser(
+        "daemon-start",
+        help="start an engine daemon in the background (managed env, no sudo)",
+    )
+    sp.add_argument("--tcp", help="also listen on host:port for remote clients")
+    sp.set_defaults(f=cmd_daemon_start)
+
     img = sub.add_parser("image")
     isub = img.add_subparsers(dest="image_cmd", required=True)
 
@@ -330,6 +360,19 @@ def main() -> int:
         return args.f(args)
     except TerraError as e:
         return _err(str(e))
+    except (FileNotFoundError, ConnectionRefusedError):
+        hint = (
+            "no engine daemon found — start one first:\n"
+            "  python -m terra daemon-start\n"
+            "  (or: python -c 'from terra.daemon import Daemon; Daemon().start()')\n"
+            "  or point at an existing one: --socket <path|tcp://host:port> or TERRA_SOCKET"
+        )
+        return _err(hint)
+    except PermissionError:
+        return _err(
+            "socket exists but is not usable by this user (owned by root?) — "
+            "you should never need sudo; use your own daemon (python -m terra daemon-start)"
+        )
     except KeyboardInterrupt:
         return 130
 
