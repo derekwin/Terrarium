@@ -91,6 +91,31 @@ def ensure_all() -> dict[str, Path]:
     return {name: ensure(name) for name in _ARTIFACTS}
 
 
+def resolve_kernel(name_or_path: str) -> Path:
+    """Resolve a kernel variant name or explicit path to a vmlinux.bin.
+
+    Convention: images/<name>/vmlinux.bin. A bare images/vmlinux.bin
+    (legacy) is migrated to images/default/vmlinux.bin on first touch.
+    """
+    p = Path(name_or_path).expanduser()
+    if p.exists():
+        return p
+    default = paths.images_dir() / "default" / "vmlinux.bin"
+    legacy = paths.images_dir() / "vmlinux.bin"
+    if legacy.exists() and not default.exists():
+        default.parent.mkdir(parents=True, exist_ok=True)
+        legacy.replace(default)
+    variant = paths.images_dir() / name_or_path / "vmlinux.bin"
+    if variant.exists():
+        return variant
+    if name_or_path == "default" and default.exists():
+        return default
+    raise ImageError(
+        f"kernel variant {name_or_path!r} not found — build one with "
+        f"`terra kernel create -n {name_or_path} --version <ver>`"
+    )
+
+
 def build_layer(src_dir: str, name: str) -> Path:
     """Pack a directory into an EROFS layer image in the managed layers dir."""
     mkfs, _fuse = assets.ensure_erofs_tools()

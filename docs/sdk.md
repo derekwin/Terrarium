@@ -88,10 +88,12 @@ default_memory_mb / default_layers / default_net / token`。
 层与镜像统一为「托管目录命名工件」：`layer create -n base
 --from-image` 把 guest rootfs 铺成 `layers/<name>/`；`layer create
 -n <名> --script` 把做中建的层打进同一目录（`<名>.erofs`）；
-`layer ls` 列出全部。命名变体：`kernel create -n k612 --version
-6.12` 与 `rootfs create -n alpine321` 将产物放进托管镜像目录
-（`~/.local/share/terra/images/<name>/`），使用时显式给路径
-（`vm create --kernel .../images/k612/vmlinux.bin`）。
+`layer ls` 列出全部。
+
+**目录即标识**：内核统一为 `images/<name>/vmlinux.bin`（裸
+`vmlinux.bin` 自动迁移到 `default/`）。使用时只写名字，内部按约定
+解析：`terra.create(kernel="k612")` / `vm create --kernel k612`。
+rootfs 同理（`rootfs create -n alpine321` 产 `images/alpine321/`）。
 
 连接：`--socket <path|tcp://host:port>` 或 `TERRA_SOCKET` /
 `TERRA_TOKEN`。

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import atexit
 import itertools
+from pathlib import Path
 import threading
 
 from .client import TerraClient
@@ -100,6 +101,8 @@ def create(
     layers = layers if layers is not None else list(cfg.default_layers)
     if kernel is None:
         kernel = str(images.ensure("vmlinux.bin"))
+    elif not Path(kernel).exists():
+        kernel = str(images.resolve_kernel(kernel))
     if initramfs is None:
         initramfs = str(
             images.ensure("initramfs-virtiofs.cpio.gz")

@@ -53,9 +53,12 @@ def cmd_info(args):
 
 def cmd_create(args):
     c = _client(args)
+    kernel = args.kernel
+    if kernel and not Path(kernel).exists():
+        kernel = str(images.resolve_kernel(kernel))
     resp = c.vm_create(
         args.name,
-        args.kernel,
+        kernel,
         initramfs=args.initramfs,
         cpus=args.cpus,
         max_cpus=args.max_cpus,
@@ -349,8 +352,12 @@ def _rootfs_variants() -> list[str]:
 
 
 def cmd_kernel_ls(args):
-    for line in _kernel_variants():
-        print(line)
+    for e in sorted(paths.images_dir().iterdir()):
+        if e.is_dir() and (e / "vmlinux.bin").exists():
+            print(f"{e.name}/")
+    legacy = paths.images_dir() / "vmlinux.bin"
+    if legacy.exists():
+        print("vmlinux.bin (legacy flat file — will migrate to default/)")
     return 0
 
 
@@ -514,7 +521,7 @@ def main() -> int:
         gs = g.add_subparsers(dest="action", required=True)
         gs.add_parser("ls").set_defaults(f=cmd_kernel_ls if kind == "kernel" else cmd_rootfs_ls)
         c = gs.add_parser("create")
-        c.add_argument("-n", "--name", required=True)
+        c.add_argument("-n", "--name", default="default")
         if kind == "kernel":
             c.add_argument("--version")
         else:
