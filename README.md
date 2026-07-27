@@ -54,7 +54,7 @@ pip install -e sdk/python
 **CLI** — resource groups with uniform `ls / create / remove` verbs:
 
 ```bash
-sudo terra daemon start                       # engine daemon (root enables NAT networking)
+sudo env "PATH=$PATH" terra daemon start                       # engine daemon (root enables NAT networking)
 terra kernel create -n k612 --version 6.12      # build a guest kernel
 terra layer create -n python312 --script images/examples/python312.sh
 terra pool create --size 3                      # warm pool
