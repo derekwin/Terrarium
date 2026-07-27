@@ -88,46 +88,96 @@ Running AI agents in production means running untrusted code at scale. Container
 - Dynamic resize: CPU, memory online adjustment without reboot
 - Exec timeout + output cap: all sandbox commands limited to 60s + 10MB output
 
-## Quick Start
+## Quick Start（Python SDK / MCP 用户视角）
+
+安装 SDK：
 
 ```bash
-# Install CH (official release binary)
-wget https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/cloud-hypervisor-static
-chmod +x cloud-hypervisor-static
-
-# Build guest image
-cd images && bash build.sh
-
-# Start engine daemon (env vars for configuration)
-export TERRA_CH_BINARY=/usr/local/bin/cloud-hypervisor
-export TERRA_STATE_DIR=/var/lib/terra/vms
-cargo run -p engine --release -- daemon
-
-# Create VM (initramfs-based; layered rootfs lands with the virtiofs backend)
-terra create agent-1 --kernel target/guest/vmlinux.bin --initramfs target/guest/alpine.cpio
-
-# List VMs
-terra list
+pip install -e sdk/python
 ```
 
-### Python SDK
+**你唯一需要知道的概念是 `layers`**：环境层的名字列表，如 `["python312", "base"]`（前面是工具层，最后是系统层）。其余一切（daemon、二进制、目录）都是自动的。
+
+### 方式 A：单用户，SDK 全自动
+
+零准备——SDK 自动解决引擎、二进制和目录，用完自动清理：
 
 ```python
-import terra
+from terra.daemon import Daemon
+from terra.client import TerraClient
 
-# Create VM
-vm = terra.vm.create("agent-1", kernel="target/guest/vmlinux.bin")
+with Daemon():
+    c = TerraClient()
 
-# Query VM info
-info = vm.info()
-print(info["state"])  # "Running"
+    # 从预热池拿一台 VM（层自动挂载）
+    claim = c.pool_claim(["python312", "base"])
+    name = claim["name"]
 
-# Resize VM
-vm.resize(cpus=4)
+    # 在 VM 里跑命令
+    print(c.vm_exec(name, ["python3", "-c", "import numpy; print(numpy.__version__)"]))
 
-# Clean shutdown
-vm.shutdown()
+    # 归还池
+    c.pool_release(name)
 ```
+
+### 方式 B：服务器已有 daemon（客户端使用）
+
+管理员在服务器上跑着 daemon 时，你只连它用：
+
+```python
+from terra.client import TerraClient
+from terra.vm import create
+
+c = TerraClient()          # 默认 socket；远程可用 TerraClient("/path/forwarded.sock")
+
+# 创建一台带环境的 VM
+vm = create("dev", "target/guest/vmlinux.bin",
+            initramfs="target/guest/initramfs-virtiofs.cpio.gz",
+            layers=["python312", "base"], cpus=2, memory_mb=512, net=True)
+
+print(vm.info())                                # state / cpus / memory_mb
+print(vm.exec(["python3", "--version"]))        # 在 VM 里执行
+vm.resize(cpus=4)                               # 在线扩容
+vm.destroy()
+
+# 或用预热池（更快的路径）
+claim = c.pool_claim(["python312", "base"])
+print(c.vm_exec(claim["name"], ["python3", "-c", "print(2**10)"]))
+c.pool_release(claim["name"])
+```
+
+API 速查（`TerraClient` / `Vm`）：
+
+| 类别 | 方法 |
+|---|---|
+| VM | `vm_create / vm_list / vm_info / vm_resize / vm_shutdown / vm_kill / vm_destroy` |
+| 执行 | `vm_exec(name, args, timeout_secs=60)` |
+| 池 | `pool_claim / pool_list / pool_release` |
+
+### MCP（给 AI Agent 用）
+
+MCP Server 以 stdio 运行，直接配进你的 agent（Claude Code / Desktop 等）：
+
+```json
+{
+  "mcpServers": {
+    "terrarium": {
+      "command": "/path/to/target/release/terra-mcp",
+      "env": { "TERRA_SOCKET": "/tmp/terra.sock" }
+    }
+  }
+}
+```
+
+Agent 侧可见的用户面工具：`terra_vm_create/list/info/resize/shutdown/kill/destroy`、`terra_exec`、`terra_pool_claim/list/release`、`terra_attach_fs/detach_fs`。典型调用流：
+
+```
+terra_pool_claim(layers=["python312","base"])
+  → terra_exec(name, args=["python3","-c","print(2**10)"])
+  → terra_pool_release(name)
+```
+
+> 管理员操作（daemon 启停、镜像构建、网络拆除、建池）不属于用户面——见 `terra` CLI 与 `AGENTS.md`。
 
 ## Repository
 
