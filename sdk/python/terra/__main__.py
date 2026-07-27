@@ -326,12 +326,38 @@ def _variant_ls_dir(path: Path, kinds=(".erofs",)) -> int:
     return 0
 
 
+def _kernel_variants() -> list[str]:
+    """Kernel artifacts: vmlinux.bin and named dirs containing a kernel."""
+    out = []
+    for e in sorted(paths.images_dir().iterdir()):
+        if e.name == "vmlinux.bin":
+            out.append("vmlinux.bin (default)")
+        elif e.is_dir() and (e / "vmlinux.bin").exists():
+            out.append(f"{e.name}/")
+    return out
+
+
+def _rootfs_variants() -> list[str]:
+    """Rootfs/initramfs artifacts: cpio images and named rootfs dirs."""
+    out = []
+    for e in sorted(paths.images_dir().iterdir()):
+        if e.suffix in (".cpio", ".gz"):
+            out.append(e.name)
+        elif e.is_dir() and (e / "rootfs").exists():
+            out.append(f"{e.name}/")
+    return out
+
+
 def cmd_kernel_ls(args):
-    return _variant_ls_dir(paths.images_dir())
+    for line in _kernel_variants():
+        print(line)
+    return 0
 
 
 def cmd_rootfs_ls(args):
-    return _variant_ls_dir(paths.images_dir())
+    for line in _rootfs_variants():
+        print(line)
+    return 0
 
 
 def _remove_path(path: Path) -> int:
