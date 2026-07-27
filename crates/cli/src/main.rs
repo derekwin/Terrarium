@@ -42,6 +42,9 @@ enum Commands {
         /// Persistent upperdir name (user data survives VM destruction).
         #[arg(long)]
         upper: Option<String>,
+        /// Attach virtio-net (tap + host NAT, DHCP in guest).
+        #[arg(long)]
+        net: bool,
     },
     List,
     Info {
@@ -90,6 +93,8 @@ enum Commands {
     PoolRelease {
         name: String,
     },
+    /// Show NAT bridge and per-VM network attachments.
+    NetList,
     /// Execute a command inside a VM (via the guest agent).
     Exec {
         name: String,
@@ -160,6 +165,7 @@ fn main() {
             memory,
             layers,
             upper,
+            net,
         } => {
             let mut cmd = Command::create(&name, &kernel)
                 .with_cpus(cpus)
@@ -168,6 +174,7 @@ fn main() {
             if let Some(u) = upper {
                 cmd = cmd.with_upper(u);
             }
+            cmd = cmd.with_net(net);
             if let Some(i) = initramfs {
                 cmd = cmd.with_initramfs(i);
             }
@@ -239,6 +246,9 @@ fn main() {
                 &cli.socket,
                 &Command::new("pool_release").with_name(name),
             ));
+        }
+        Commands::NetList => {
+            print_response(send(&cli.socket, &Command::new("net_list")));
         }
         Commands::Exec { name, args } => {
             let cmd = Command::new("exec").with_name(name).with_args(args);

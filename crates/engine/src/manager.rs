@@ -25,6 +25,8 @@ pub struct PoolSlot {
 pub struct VmManager {
     adapter: Arc<dyn VmAdapter>,
     vms: HashMap<VmName, Box<dyn VmHandle>>,
+    /// VMs created with networking enabled.
+    net_vms: std::collections::HashSet<String>,
     /// Warm pool slots (idle agent VMs ready for hot-plug assignment).
     pool: Vec<PoolSlot>,
     /// Next pool VM id.
@@ -37,9 +39,15 @@ impl VmManager {
         Self {
             adapter,
             vms: HashMap::new(),
+            net_vms: std::collections::HashSet::new(),
             pool: Vec::new(),
             pool_next_id: 0,
         }
+    }
+
+    /// Whether a VM was created with networking enabled.
+    pub fn has_net(&self, name: &str) -> bool {
+        self.net_vms.contains(name)
     }
 
     /// Spawn a new VM from the given spec.
@@ -52,7 +60,11 @@ impl VmManager {
                 name
             )));
         }
+        let net = spec.net;
         let handle = self.adapter.create(&spec).await?;
+        if net {
+            self.net_vms.insert(name.to_string());
+        }
         self.vms.insert(name, handle);
         Ok(())
     }
@@ -92,6 +104,7 @@ impl VmManager {
                 memory_mb: 256,
                 max_memory_mb: Some(1024),
                 initramfs: Some(agent_initramfs.to_string()),
+                net: false,
                 fs: None,
                 backend_config: None,
             };
@@ -203,6 +216,7 @@ impl VmManager {
             .remove(name)
             .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
         self.pool.retain(|s| s.name != name);
+        self.net_vms.remove(name);
         handle.shutdown().await
     }
 
@@ -232,6 +246,7 @@ impl VmManager {
             if remove {
                 tracing::warn!(%name, "Reaping dead VM");
                 self.vms.remove(&name);
+                self.net_vms.remove(name.as_ref());
                 self.pool.retain(|s| s.name != name.as_ref());
                 dead.push(name);
             }

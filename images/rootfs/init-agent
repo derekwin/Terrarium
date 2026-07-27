@@ -10,6 +10,14 @@ mount -t sysfs sys /sys
 mount -t devtmpfs devtmpfs /dev
 mount -t tmpfs tmpfs /tmp
 
+# Bring up networking if a virtio-net device is present (DHCP via host NAT)
+ip link set lo up 2>/dev/null
+if ip link show eth0 2>/dev/null; then
+    ip link set eth0 up
+    udhcpc -i eth0 -n -q 2>/dev/null
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf 2>/dev/null
+fi
+
 echo "init: starting guest-proxy (vsock :1024)"
 /bin/guest-proxy &
 

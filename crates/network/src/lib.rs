@@ -95,3 +95,127 @@ fn run_tc(args: &[&str]) -> Result<(), String> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// NAT networking (tap + bridge + masquerade)
+// ---------------------------------------------------------------------------
+
+/// Default bridge and subnet used for VM NAT networking.
+pub const DEFAULT_BRIDGE: &str = "terra0";
+pub const DEFAULT_GATEWAY: &str = "10.200.0.1";
+pub const DEFAULT_PREFIX: u8 = 24;
+
+fn run_ip(args: &[&str]) -> Result<(), String> {
+    let output = Command::new("ip")
+        .args(args)
+        .output()
+        .map_err(|e| format!("ip command failed: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ip {}: {} (need CAP_NET_ADMIN — run the daemon as root or pre-create devices)",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+fn run_iptables(args: &[&str]) -> Result<(), String> {
+    let output = Command::new("iptables")
+        .args(args)
+        .output()
+        .map_err(|e| format!("iptables command failed: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "iptables {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Ensure the NAT bridge + forwarding rules exist (idempotent).
+/// Requires CAP_NET_ADMIN.
+pub fn ensure_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), String> {
+    // Create bridge if missing.
+    let exists = Command::new("ip")
+        .args(["link", "show", bridge])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !exists {
+        run_ip(&["link", "add", "name", bridge, "type", "bridge"])?;
+    }
+    run_ip(&["addr", "replace", &format!("{}/{}", gateway, prefix), "dev", bridge])?;
+    run_ip(&["link", "set", bridge, "up"])?;
+
+    // Enable forwarding (read-only check; warn only).
+    let fwd = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if fwd != "1" {
+        std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
+            .map_err(|e| format!("enable ip_forward: {}", e))?;
+    }
+
+    // Masquerade outbound traffic from the bridge subnet (idempotent check).
+    let rule_exists = Command::new("iptables")
+        .args([
+            "-t", "nat", "-C", "POSTROUTING", "-s",
+            &format!("{}/{}", subnet_of(gateway), prefix),
+            "-j", "MASQUERADE",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !rule_exists {
+        run_iptables(&[
+            "-t", "nat", "-A", "POSTROUTING", "-s",
+            &format!("{}/{}", subnet_of(gateway), prefix),
+            "-j", "MASQUERADE",
+        ])?;
+    }
+    tracing::info!(%bridge, %gateway, "NAT bridge ready");
+    Ok(())
+}
+
+/// /24-style subnet string from a gateway address (last octet zeroed).
+fn subnet_of(gateway: &str) -> String {
+    let mut parts: Vec<&str> = gateway.split('.').collect();
+    if parts.len() == 4 {
+        parts[3] = "0";
+        parts.join(".")
+    } else {
+        gateway.to_string()
+    }
+}
+
+/// Create (or reuse) a tap device and enslave it to the bridge.
+pub fn ensure_tap(tap: &str, bridge: &str) -> Result<(), String> {
+    let exists = Command::new("ip")
+        .args(["link", "show", tap])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !exists {
+        run_ip(&["tuntap", "add", "dev", tap, "mode", "tap"])?;
+    }
+    run_ip(&["link", "set", tap, "master", bridge])?;
+    run_ip(&["link", "set", tap, "up"])?;
+    Ok(())
+}
+
+/// Remove a tap device (best-effort on missing).
+pub fn remove_tap(tap: &str) -> Result<(), String> {
+    let exists = Command::new("ip")
+        .args(["link", "show", tap])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if exists {
+        run_ip(&["link", "del", tap])?;
+    }
+    Ok(())
+}

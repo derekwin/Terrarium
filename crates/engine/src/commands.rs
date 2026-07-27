@@ -23,6 +23,7 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "attach_fs" => cmd_attach_fs(mgr, cmd).await,
         "detach_fs" => cmd_detach_fs(mgr, cmd).await,
         "exec" => cmd_exec(mgr, cmd).await,
+        "net_list" => cmd_net_list(mgr),
         "pool_create" => cmd_pool_create(mgr, cmd).await,
         "pool_list" => cmd_pool_list(mgr),
         "pool_claim" => cmd_pool_claim(mgr, cmd).await,
@@ -52,6 +53,7 @@ fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
         memory_mb,
         max_memory_mb,
         initramfs: cmd.initramfs.clone(),
+        net: cmd.net,
         fs: if cmd.layers.is_empty() {
             None
         } else {
@@ -235,6 +237,30 @@ async fn cmd_exec(mgr: &VmManager, cmd: Command) -> Response {
         })),
         Err(e) => Response::err(e.to_string()),
     }
+}
+
+fn cmd_net_list(mgr: &VmManager) -> Response {
+    let vms: Vec<_> = mgr
+        .list_names()
+        .into_iter()
+        .filter(|n| mgr.has_net(n))
+        .map(|n| {
+            let tap = format!(
+                "terra-{}",
+                n.chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                    .take(9)
+                    .collect::<String>()
+            );
+            serde_json::json!({"name": n, "tap": tap, "bridge": "terra0"})
+        })
+        .collect();
+    Response::ok(serde_json::json!({
+        "bridge": "terra0",
+        "gateway": "10.200.0.1/24",
+        "mode": "nat",
+        "vms": vms,
+    }))
 }
 
 async fn cmd_pool_create(mgr: &mut VmManager, cmd: Command) -> Response {

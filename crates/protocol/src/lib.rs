@@ -34,6 +34,10 @@ pub struct Command {
     // survives VM destruction; default is ephemeral per-VM)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upper: Option<String>,
+
+    // create: attach virtio-net (tap + host NAT; guest uses DHCP)
+    #[serde(default)]
+    pub net: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initramfs: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +77,7 @@ impl Command {
             layers: Vec::new(),
             args: Vec::new(),
             upper: None,
+            net: false,
             cmdline: None,
             cpus: None,
             max_cpus: None,
@@ -152,6 +157,12 @@ impl Command {
     /// Builder: set persistent upperdir name.
     pub fn with_upper(mut self, name: impl Into<String>) -> Self {
         self.upper = Some(name.into());
+        self
+    }
+
+    /// Builder: enable virtio-net (tap + NAT).
+    pub fn with_net(mut self, net: bool) -> Self {
+        self.net = net;
         self
     }
 

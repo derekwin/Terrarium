@@ -143,6 +143,10 @@ pub struct VmSpec {
     /// Path to initramfs (cpio archive).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initramfs: Option<String>,
+    /// Attach a virtio-net device backed by a host tap + NAT bridge.
+    /// Guest gets DHCP from the bridge (10.200.0.x by default).
+    #[serde(default)]
+    pub net: bool,
     /// Layered root filesystem (virtiofs). When set, the adapter composes
     /// the named layers on the host and boots the VM with the result as
     /// its rootfs (initramfs is then only the thin virtiofs bootstrap).

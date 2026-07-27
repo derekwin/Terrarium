@@ -67,6 +67,7 @@ class TerraClient:
         max_memory_mb: int | None = None,
         layers: list[str] | None = None,
         upper: str | None = None,
+        net: bool = False,
     ) -> dict:
         """Create a new VM.
 
@@ -75,6 +76,7 @@ class TerraClient:
                 layer last. None = plain initramfs boot.
             upper: persistent upperdir name — user data survives VM
                 destruction and is reused by later VMs with the same name.
+            net: attach virtio-net (tap + host NAT; guest uses DHCP).
         """
         cmd = {"command": "create", "name": name, "kernel": kernel}
         if initramfs:
@@ -90,6 +92,8 @@ class TerraClient:
             cmd["layers"] = list(layers)
         if upper:
             cmd["upper"] = upper
+        if net:
+            cmd["net"] = True
         return self._send(cmd)
 
     def vm_list(self) -> dict:

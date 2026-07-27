@@ -51,6 +51,18 @@ case "$TYPE" in
         ;;
 esac
 
+# Include the guest agent if the musl-static build is available —
+# required for the host-side exec/vsock channel.
+GP="$(cd "$SCRIPT_DIR/.." && pwd)/target/x86_64-unknown-linux-musl/release/guest-proxy"
+if [ -x "$GP" ]; then
+    cp "$GP" "${OUTPUT}/bin/guest-proxy"
+    chmod +x "${OUTPUT}/bin/guest-proxy"
+    sed -i 's|^exec /bin/sh|/bin/guest-proxy \&\nexec /bin/sh|' "${OUTPUT}/init"
+    echo "guest-proxy: included"
+else
+    echo "guest-proxy: musl build not found, skipping (exec/vsock will be unavailable)"
+fi
+
 echo "terrarium-guest" > "${OUTPUT}/etc/hostname"
 echo "127.0.0.1 localhost" > "${OUTPUT}/etc/hosts"
 echo "root:x:0:0:root:/root:/bin/sh" > "${OUTPUT}/etc/passwd"

@@ -40,7 +40,7 @@ if [ -z "$SRC" ]; then
 fi
 
 cp "$SRC/bin/busybox" "$WORK/bin/"
-for cmd in sh mount umount mkdir echo cat ls; do
+for cmd in sh mount umount mkdir echo cat ls ip udhcpc; do
     ln -sf busybox "$WORK/bin/$cmd"
 done
 cp "$SRC"/lib/ld-musl-*.so.1 "$SRC"/lib/libc.musl-*.so.1 "$WORK/lib/"

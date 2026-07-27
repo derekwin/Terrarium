@@ -199,6 +199,16 @@ struct ChVmHandle {
 /// Next free vsock CID (0/1/2 reserved: hypervisor/host/local).
 static NEXT_VSOCK_CID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(3);
 
+/// Sanitize a VM name into a kernel-safe interface name (<= 15 chars).
+fn tap_name(name: &str) -> String {
+    let mut t: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    t.truncate(9); // "terra-" + 9 = 15 max
+    t
+}
+
 /// A composed layered rootfs: overlayfs mount + virtiofsd, running inside
 /// a private user/mount namespace so the whole stack (including the
 /// mount) dies with the supervisor process — no privileged cleanup needed.
@@ -227,15 +237,40 @@ impl ChVmHandle {
 
         let vsock = format!("/tmp/terra-{}-vsock.sock", name);
         let _ = std::fs::remove_file(&vsock);
-        let args = ch_args(spec, &socket, fs_socket, &vsock);
+
+        // Networking: NAT bridge + per-VM tap (privileged; clear error).
+        let tap = if spec.net {
+            terrarium_network::ensure_nat_bridge(
+                terrarium_network::DEFAULT_BRIDGE,
+                terrarium_network::DEFAULT_GATEWAY,
+                terrarium_network::DEFAULT_PREFIX,
+            )
+            .map_err(AdapterError::internal)?;
+            let tap = format!("terra-{}", tap_name(name.as_ref()));
+            terrarium_network::ensure_tap(&tap, terrarium_network::DEFAULT_BRIDGE)
+                .map_err(AdapterError::internal)?;
+            Some(tap)
+        } else {
+            None
+        };
+
+        let args = ch_args(spec, &socket, fs_socket, &vsock, tap.as_deref());
 
         tracing::info!(name = %name, socket = %socket, layered = fs.is_some(), "Spawning CH VM");
+
+        // CH stderr goes to a per-VM log file — invisible deaths (like
+        // landlock denials) must be diagnosable.
+        let log_dir = format!("{}/logs", adapter.fs_root);
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = format!("{}/{}.log", log_dir, name);
+        let log_file = std::fs::File::create(&log_path)
+            .map_err(|e| format!("create CH log {}: {}", log_path, e))?;
 
         let mut child = Command::new(&adapter.ch_binary)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(log_file))
             .spawn()
             .map_err(|e| format!("spawn CH: {}", e))?;
 
@@ -628,6 +663,9 @@ impl Drop for ChVmHandle {
             // virtiofsd dies and the overlayfs mount evaporates with it.
             teardown_fs(&mut fs);
         }
+        // Remove the per-VM tap if networking was enabled (best-effort).
+        let tap = format!("terra-{}", tap_name(self.name.as_ref()));
+        let _ = terrarium_network::remove_tap(&tap);
     }
 }
 
@@ -635,7 +673,7 @@ impl Drop for ChVmHandle {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn ch_args(spec: &VmSpec, socket: &str, fs_socket: Option<&str>, vsock: &str) -> Vec<String> {
+fn ch_args(spec: &VmSpec, socket: &str, fs_socket: Option<&str>, vsock: &str, tap: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "--api-socket".into(),
         socket.into(),
@@ -675,6 +713,24 @@ fn ch_args(spec: &VmSpec, socket: &str, fs_socket: Option<&str>, vsock: &str) ->
     if let Some(fs_sock) = fs_socket {
         args.push("--fs".into());
         args.push(format!("tag=rootfs,socket={},num_queues=1", fs_sock));
+    }
+    if let Some(tap) = tap {
+        args.push("--net".into());
+        args.push(format!("tap={}", tap));
+    }
+    // Landlock whitelists only cmdline paths; CH opens /dev/net/tun to
+    // attach tap devices, so it must be granted explicitly when
+    // networking is enabled (otherwise CH dies right after boot).
+    if tap.is_some() {
+        // CH opens /dev/net/tun to create/attach taps and reads the tap
+        // flags from sysfs (/sys/class/net is a symlink farm into
+        // /sys/devices/virtual/net — grant both, read-only).
+        args.push("--landlock-rules".into());
+        args.push("path=/dev/net/tun,access=rw".into());
+        args.push("--landlock-rules".into());
+        args.push("path=/sys/class/net,access=r".into());
+        args.push("--landlock-rules".into());
+        args.push("path=/sys/devices/virtual/net,access=r".into());
     }
     // vsock for host→guest control (guest-proxy); unique CID per VM.
     let cid = NEXT_VSOCK_CID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
