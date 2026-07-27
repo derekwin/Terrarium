@@ -73,11 +73,24 @@ impl ChAdapter {
             )));
         }
         let mnt = format!("{}/layers-mnt/{}", self.fs_root, name);
-        // Already mounted? /proc/mounts is authoritative (survives
-        // daemon restarts; EROFS mounts are read-only so no marker file
-        // can be written into the mountpoint itself).
+        // Already mounted? The mount may be STALE: a rebuilt image at the
+        // same path keeps serving the old inode via the old loop mount.
+        // Track the image mtime in a sidecar (the erofs itself is
+        // read-only, so it can't live in the mountpoint).
+        let mtime = std::fs::metadata(&image)
+            .and_then(|m| m.modified())
+            .map(|t| format!("{:?}", t))
+            .unwrap_or_default();
+        let sidecar = format!("{}.mtime", mnt);
+        let mounted_as = std::fs::read_to_string(&sidecar).unwrap_or_default();
         if is_mounted(&mnt) {
-            return Ok(mnt);
+            if mounted_as == mtime {
+                return Ok(mnt);
+            }
+            // Stale mount of a superseded image — tear it down.
+            tracing::warn!(%mnt, "layer image rebuilt, remounting");
+            let _ = Command::new("umount").arg(&mnt).output();
+            let _ = Command::new("fusermount").args(["-u", &mnt]).output();
         }
         let mut set = self
             .mounted_layers
@@ -88,6 +101,7 @@ impl ChAdapter {
         }
         std::fs::create_dir_all(&mnt).map_err(|e| format!("mkdir {}: {}", mnt, e))?;
         mount_erofs(&image, &mnt)?;
+        let _ = std::fs::write(&sidecar, &mtime);
         set.insert(name.to_string());
         Ok(mnt)
     }
