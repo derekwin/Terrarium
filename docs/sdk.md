@@ -84,5 +84,10 @@ attach-fs / detach-fs / net-list / net-down`
 `image layers / layer / layer-build / kernel / rootfs / initramfs /
 agent-initramfs`
 
+命名变体：`image kernel --version 6.12 --name k612` 与
+`image rootfs --name alpine321` 将产物放进托管镜像目录
+（`~/.local/share/terra/images/<name>/`），与默认 `base` 共存；
+使用时显式给路径（`create --kernel .../images/k612/vmlinux.bin`）。
+
 连接：`--socket <path|tcp://host:port>` 或 `TERRA_SOCKET` /
 `TERRA_TOKEN`。

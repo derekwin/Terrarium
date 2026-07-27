@@ -179,8 +179,43 @@ def cmd_image_build(args):
     if not Path(script).exists():
         return _err(f"{script} not found — run from the Terrarium repo root")
     import subprocess
+    import tempfile
+
+    name = getattr(args, "name", None)
+    if name:
+        # Named variant: build into a temp dir, then move the artifact
+        # into the managed images dir under its name.
+        with tempfile.TemporaryDirectory() as td:
+            extra = []
+            if args.what == "kernel":
+                # build-kernel.sh [version] [config] [output_dir];
+                # empty strings fall back to the script's defaults.
+                r = subprocess.run(
+                    ["bash", script, args.version or "", "", td]
+                )
+                if r.returncode:
+                    return r.returncode
+                src = Path(td) / "vmlinux.bin"
+            else:  # rootfs
+                out_dir = Path(td) / "rootfs"
+                r = subprocess.run(["bash", script, args.type, str(out_dir)])
+                if r.returncode:
+                    return r.returncode
+                src = out_dir
+            import shutil
+
+            dest = paths.images_dir() / name
+            if dest.exists():
+                shutil.rmtree(dest)
+            dest.mkdir(parents=True)
+            target = dest / src.name if src.is_file() else dest / "rootfs"
+            shutil.move(str(src), str(target))
+            print(f"built: {target}")
+            return 0
 
     extra = [args.version] if getattr(args, "version", None) else []
+    if args.what == "rootfs" and getattr(args, "type", None):
+        extra = [args.type]
     r = subprocess.run(["bash", script, *extra])
     return r.returncode
 
@@ -353,6 +388,10 @@ def main() -> int:
         sp = isub.add_parser(what)
         if what == "kernel":
             sp.add_argument("--version")
+        if what == "rootfs":
+            sp.add_argument("--type", default="busybox")
+        if what in ("kernel", "rootfs"):
+            sp.add_argument("--name", help="named variant in the managed images dir")
         sp.set_defaults(f=cmd_image_build, what=what)
 
     args = p.parse_args()
