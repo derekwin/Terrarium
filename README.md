@@ -56,8 +56,10 @@ pip install -e sdk/python
 ```bash
 sudo env "PATH=$PATH" terra daemon start                       # engine daemon (root enables NAT networking)
 terra kernel create -n k612 --version 6.12      # build a guest kernel
+bash images/build-layer-distro.sh ubuntu        # …or a distro base layer
 terra layer create -n python312 --script images/examples/python312.sh
-terra pool create --size 3                      # warm pool
+terra pool create --size 3                      # warm pool (grow/shrink live)
+terra daemon config                             # engine, pool, net, layers at a glance
 terra vm create dev --kernel k612 --rootfs alpine --layers python312,base --net
 terra vm exec dev -- python3 --version
 terra vm remove dev
@@ -93,7 +95,7 @@ vm.destroy()
 
 ## Features
 
-- **Layered filesystem** — read-only EROFS layers star-composed on the host (arbitrary combinations, shared page cache), exposed via virtiofs. Tool layers are built by configuring a real VM and packing the delta, so environments are runnable by construction.
+- **Layered filesystem** — read-only EROFS layers star-composed on the host (arbitrary combinations, shared page cache), exposed via virtiofs. Distro base layers come from a config-driven pipeline (alpine and ubuntu ship today; more are a 3-line config). Tool layers are built by configuring a real VM and packing the delta, so environments are runnable by construction.
 - **Warm pool** — pre-booted idle VMs; claiming hot-plugs the requested layers and returns a ready VM. Pool VMs release back to idle for reuse.
 - **In-guest exec** — command execution inside VMs through the guest agent, with per-command timeouts.
 - **Networking** — one-flag NAT networking (`--net`) with DHCP; lifecycle managed via `terra net`.

@@ -56,8 +56,10 @@ pip install -e sdk/python
 ```bash
 sudo env "PATH=$PATH" terra daemon start                       # 引擎 daemon（root 才有 NAT 网络）
 terra kernel create -n k612 --version 6.12      # 构建 guest 内核
+bash images/build-layer-distro.sh ubuntu        # …或一个发行版系统层
 terra layer create -n python312 --script images/examples/python312.sh
-terra pool create --size 3                      # 预热池
+terra pool create --size 3                      # 预热池（大小实时可调）
+terra daemon config                             # 引擎/池/网络/层一览
 terra vm create dev --kernel k612 --rootfs alpine --layers python312,base --net
 terra vm exec dev -- python3 --version
 terra vm remove dev
@@ -93,7 +95,7 @@ vm.destroy()
 
 ## 特性
 
-- **分层文件系统**——只读 EROFS 层在宿主侧星型组合（任意搭配、页缓存共享），经 virtiofs 暴露。工具层通过在真实 VM 中配置环境、打包增量来构建——环境自证可用。
+- **分层文件系统**——只读 EROFS 层在宿主侧星型组合（任意搭配、页缓存共享），经 virtiofs 暴露。发行版系统层来自配置驱动 pipeline（内置 alpine 与 ubuntu，新增仅需三行配置）。工具层通过在真实 VM 中配置环境、打包增量来构建——环境自证可用。
 - **预热池**——预启动的空转 VM；认领时热插所需层并返回就绪 VM，任务结束归还复用。
 - **guest 内执行**——经 guest agent 在 VM 内执行命令，支持单命令超时。
 - **网络**——`--net` 一键 NAT 联网（DHCP 即用），生命周期经 `terra net` 管理。
