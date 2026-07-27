@@ -9,6 +9,7 @@ mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs devtmpfs /dev
 mount -t tmpfs tmpfs /tmp
+mkdir -p /workdir
 
 # Bring up networking if a virtio-net device is present (DHCP via host NAT)
 ip link set lo up 2>/dev/null

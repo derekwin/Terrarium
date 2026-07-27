@@ -96,8 +96,8 @@ fn handle<S: Read + Write>(mut stream: S) {
     }
 }
 
-/// {"command":"mount","tag":"<virtiofs tag>","target":"/newroot"}
-/// {"command":"umount","target":"/newroot"}
+/// {"command":"mount","tag":"<virtiofs tag>","target":"/workdir"}
+/// {"command":"umount","target":"/workdir"}
 fn mount_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value, umount: bool) {
     let target = match cmd["target"].as_str() {
         Some(t) if !t.is_empty() => t,
@@ -156,7 +156,18 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
         return;
     }
 
-    let work_dir = cmd["work_dir"].as_str().unwrap_or("/tmp");
+    // Default cwd: the mounted sandbox workspace when present.
+    let work_dir = cmd["work_dir"]
+        .as_str()
+        .map(String::from)
+        .unwrap_or_else(|| {
+            if std::path::Path::new("/workdir").is_dir() {
+                "/workdir".into()
+            } else {
+                "/tmp".into()
+            }
+        });
+    let work_dir = work_dir.as_str();
     let timeout = cmd["timeout_secs"].as_u64().unwrap_or(60).min(3600);
 
     match sandbox::exec_isolated(&args[0], &args, work_dir, timeout) {

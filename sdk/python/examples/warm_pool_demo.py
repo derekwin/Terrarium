@@ -103,7 +103,7 @@ def main() -> int:
             print(f"claimed {name} in {claim_ms:.0f} ms")
 
             step("Execute commands inside the guest (SDK -> engine -> vsock)")
-            for args in (["ls", "/newroot"], ["ls", "/newroot/usr/bin"], ["cat", "/newroot/etc/alpine-release"]):
+            for args in (["ls", "/workdir"], ["ls", "/workdir/usr/bin"], ["cat", "/workdir/etc/alpine-release"]):
                 r = exec_retry(client, name, args, tries=3)
                 print(f"$ {' '.join(args)}\n  {r['stdout'].strip()}")
 

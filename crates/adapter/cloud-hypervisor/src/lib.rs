@@ -554,7 +554,7 @@ impl VmHandle for ChVmHandle {
         for attempt in 0..20 {
             let err = match self
                 .guest_cmd(&serde_json::json!({
-                    "command": "mount", "tag": "rootfs", "target": "/newroot",
+                    "command": "mount", "tag": "rootfs", "target": "/workdir",
                 }))
                 .await
             {
@@ -583,7 +583,7 @@ impl VmHandle for ChVmHandle {
     async fn detach_fs(&self) -> Result<(), AdapterError> {
         // 1) best-effort guest umount
         let _ = self
-            .guest_cmd(&serde_json::json!({"command": "umount", "target": "/newroot"}))
+            .guest_cmd(&serde_json::json!({"command": "umount", "target": "/workdir"}))
             .await;
         // 2) remove the device (take the lock guard before any await)
         let device_id = self

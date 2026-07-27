@@ -468,14 +468,14 @@ def test_warm_attach_detach() -> None:
 
     # hot-plug the layered fs and verify FROM INSIDE THE GUEST
     client.vm_attach_fs("sdk-w1", ["marker", "base"])
-    out = _guest_exec("sdk-w1", ["ls", "/newroot"])
+    out = _guest_exec("sdk-w1", ["ls", "/workdir"])
     assert "bin" in out and "usr" in out, out
-    out = _guest_exec("sdk-w1", ["cat", "/newroot/usr/bin/hello.py"])
+    out = _guest_exec("sdk-w1", ["cat", "/workdir/usr/bin/hello.py"])
     assert "marker layer" in out, out
 
     # detach: guest umount + device removal + host stack teardown
     client.vm_detach_fs("sdk-w1")
-    out = _guest_exec("sdk-w1", ["ls", "/newroot"])
+    out = _guest_exec("sdk-w1", ["ls", "/workdir"])
     assert "bin" not in out, f"mount still present after detach: {out!r}"
 
     client.vm_destroy("sdk-w1")
@@ -503,7 +503,7 @@ def test_warm_pool() -> None:
     claim = client.pool_claim(["marker", "base"])
     vm_name = claim["name"]
     assert claim["layers"] == ["marker", "base"], claim
-    out = _guest_exec(vm_name, ["cat", "/newroot/usr/bin/hello.py"])
+    out = _guest_exec(vm_name, ["cat", "/workdir/usr/bin/hello.py"])
     assert "marker layer" in out, out
     # the other slot stays idle
     pool = client.pool_list()["pool"]
