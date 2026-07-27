@@ -468,7 +468,7 @@ def main() -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # --- unified resource groups: vm/kernel/rootfs/layer/pool/net/daemon ---
-    vm = sub.add_parser("vm", aliases=["vms"], help="VM operations")
+    vm = sub.add_parser("vm", help="VM operations")
     vms = vm.add_subparsers(dest="action", required=True)
     vms.add_parser("ls").set_defaults(f=cmd_list)
     sp = vms.add_parser("create")
@@ -514,8 +514,8 @@ def main() -> int:
     sp.add_argument("name")
     sp.set_defaults(f=_simple_detach)
 
-    for kind, aliases in (("kernel", ["kernels"]), ("rootfs", [])):
-        g = sub.add_parser(kind, aliases=aliases, help=f"manage {kind} variants")
+    for kind in ("kernel", "rootfs"):
+        g = sub.add_parser(kind, help=f"manage {kind} variants")
         gs = g.add_subparsers(dest="action", required=True)
         gs.add_parser("ls").set_defaults(f=cmd_kernel_ls if kind == "kernel" else cmd_rootfs_ls)
         c = gs.add_parser("create")
@@ -529,7 +529,7 @@ def main() -> int:
         r.add_argument("-n", "--name", required=True)
         r.set_defaults(f=cmd_kernel_remove if kind == "kernel" else cmd_rootfs_remove)
 
-    g = sub.add_parser("layer", aliases=["layers"], help="manage filesystem layers")
+    g = sub.add_parser("layer", help="manage filesystem layers")
     gs = g.add_subparsers(dest="action", required=True)
     gs.add_parser("ls").set_defaults(f=cmd_image_layers)
     c = gs.add_parser("create")
@@ -548,7 +548,7 @@ def main() -> int:
     r.add_argument("-n", "--name", required=True)
     r.set_defaults(f=cmd_layer_remove)
 
-    g = sub.add_parser("pool", aliases=["pools"], help="warm pool operations")
+    g = sub.add_parser("pool", help="warm pool operations")
     gs = g.add_subparsers(dest="action", required=True)
     gs.add_parser("ls").set_defaults(f=cmd_pool_list)
     c = gs.add_parser("create")
@@ -566,13 +566,13 @@ def main() -> int:
     r.add_argument("name")
     r.set_defaults(f=_simple_pool_release)
 
-    g = sub.add_parser("net", aliases=["nets"], help="NAT networking")
+    g = sub.add_parser("net", help="NAT networking")
     gs = g.add_subparsers(dest="action", required=True)
     gs.add_parser("ls").set_defaults(f=cmd_net_list)
     gs.add_parser("create").set_defaults(f=cmd_net_create)
     gs.add_parser("remove").set_defaults(f=cmd_net_down)
 
-    g = sub.add_parser("daemon", aliases=["daemons"], help="engine daemon lifecycle")
+    g = sub.add_parser("daemon", help="engine daemon lifecycle")
     gs = g.add_subparsers(dest="action", required=True)
     sp = gs.add_parser("start")
     sp.add_argument("--tcp", help="also listen on host:port for remote clients")
