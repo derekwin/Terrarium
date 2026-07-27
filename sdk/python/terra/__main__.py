@@ -236,7 +236,11 @@ def cmd_image_build(args):
                 src = out_dir
             import shutil
 
-            dest = paths.images_dir() / name
+            dest = (
+                paths.kernels_dir() / name
+                if args.what == "kernel"
+                else paths.rootfs_dir() / name
+            )
             if dest.exists():
                 shutil.rmtree(dest)
             dest.mkdir(parents=True)
@@ -341,23 +345,17 @@ def _kernel_variants() -> list[str]:
 
 
 def _rootfs_variants() -> list[str]:
-    """Rootfs/initramfs artifacts: cpio images and named rootfs dirs."""
+    """Rootfs/initramfs artifacts in images/rootfs/."""
     out = []
-    for e in sorted(paths.images_dir().iterdir()):
-        if e.suffix in (".cpio", ".gz"):
-            out.append(e.name)
-        elif e.is_dir() and (e / "rootfs").exists():
-            out.append(f"{e.name}/")
+    for e in sorted(paths.rootfs_dir().iterdir()):
+        out.append(f"{e.name}/" if e.is_dir() else e.name)
     return out
 
 
 def cmd_kernel_ls(args):
-    for e in sorted(paths.images_dir().iterdir()):
+    for e in sorted(paths.kernels_dir().iterdir()):
         if e.is_dir() and (e / "vmlinux.bin").exists():
             print(f"{e.name}/")
-    legacy = paths.images_dir() / "vmlinux.bin"
-    if legacy.exists():
-        print("vmlinux.bin (legacy flat file — will migrate to default/)")
     return 0
 
 
@@ -381,11 +379,11 @@ def _remove_path(path: Path) -> int:
 
 
 def cmd_kernel_remove(args):
-    return _remove_path(paths.images_dir() / args.name)
+    return _remove_path(paths.kernels_dir() / args.name)
 
 
 def cmd_rootfs_remove(args):
-    return _remove_path(paths.images_dir() / args.name)
+    return _remove_path(paths.rootfs_dir() / args.name)
 
 
 def cmd_layer_remove(args):

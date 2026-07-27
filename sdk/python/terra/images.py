@@ -52,7 +52,7 @@ def ensure(name: str) -> Path:
     if name not in _ARTIFACTS:
         raise ImageError(f"unknown image {name!r}; known: {sorted(_ARTIFACTS)}")
 
-    managed = paths.images_dir() / name
+    managed = _migrate_artifact(name)
 
     repo = _find_repo()
     if repo:
@@ -91,25 +91,53 @@ def ensure_all() -> dict[str, Path]:
     return {name: ensure(name) for name in _ARTIFACTS}
 
 
+def _migrate_artifact(name: str) -> Path:
+    """Managed path for an image, migrating legacy flat layouts.
+
+    kernels live at images/kernels/<name>/vmlinux.bin;
+    rootfs/initramfs at images/rootfs/<name>.
+    """
+    if name == "vmlinux.bin":
+        dest = paths.kernels_dir() / "default" / "vmlinux.bin"
+        for legacy in (
+            paths.images_dir() / "vmlinux.bin",
+            paths.images_dir() / "default" / "vmlinux.bin",
+        ):
+            if legacy.exists() and not dest.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                legacy.replace(dest)
+        # migrate older variant dirs (images/<name>/vmlinux.bin)
+        for d in paths.images_dir().iterdir():
+            if d.is_dir() and (d / "vmlinux.bin").exists():
+                target = paths.kernels_dir() / d.name / "vmlinux.bin"
+                if not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    (d / "vmlinux.bin").replace(target)
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
+        return dest
+    dest = paths.rootfs_dir() / name
+    legacy = paths.images_dir() / name
+    if legacy.exists() and not dest.exists():
+        legacy.replace(dest)
+    return dest
+
+
 def resolve_kernel(name_or_path: str) -> Path:
     """Resolve a kernel variant name or explicit path to a vmlinux.bin.
 
-    Convention: images/<name>/vmlinux.bin. A bare images/vmlinux.bin
-    (legacy) is migrated to images/default/vmlinux.bin on first touch.
+    Convention: images/kernels/<name>/vmlinux.bin.
     """
     p = Path(name_or_path).expanduser()
     if p.exists():
         return p
-    default = paths.images_dir() / "default" / "vmlinux.bin"
-    legacy = paths.images_dir() / "vmlinux.bin"
-    if legacy.exists() and not default.exists():
-        default.parent.mkdir(parents=True, exist_ok=True)
-        legacy.replace(default)
-    variant = paths.images_dir() / name_or_path / "vmlinux.bin"
+    variant = paths.kernels_dir() / name_or_path / "vmlinux.bin"
     if variant.exists():
         return variant
-    if name_or_path == "default" and default.exists():
-        return default
+    if name_or_path == "default":
+        return _migrate_artifact("vmlinux.bin")
     raise ImageError(
         f"kernel variant {name_or_path!r} not found — build one with "
         f"`terra kernel create -n {name_or_path} --version <ver>`"

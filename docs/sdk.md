@@ -90,10 +90,11 @@ default_memory_mb / default_layers / default_net / token`。
 -n <名> --script` 把做中建的层打进同一目录（`<名>.erofs`）；
 `layer ls` 列出全部。
 
-**目录即标识**：内核统一为 `images/<name>/vmlinux.bin`（裸
-`vmlinux.bin` 自动迁移到 `default/`）。使用时只写名字，内部按约定
-解析：`terra.create(kernel="k612")` / `vm create --kernel k612`。
-rootfs 同理（`rootfs create -n alpine321` 产 `images/alpine321/`）。
+**目录即标识**：工件分区存放——内核在 `images/kernels/<name>/
+vmlinux.bin`，rootfs/initramfs 在 `images/rootfs/...`（旧布局自动
+迁移）。使用时只写名字，内部按约定解析：
+`terra.create(kernel="k612")` / `vm create --kernel k612`。
+rootfs 同理（`rootfs create -n alpine321` 产 `images/rootfs/alpine321/`）。
 
 连接：`--socket <path|tcp://host:port>` 或 `TERRA_SOCKET` /
 `TERRA_TOKEN`。

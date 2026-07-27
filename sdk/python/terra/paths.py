@@ -48,6 +48,20 @@ def images_dir() -> Path:
     return d
 
 
+def kernels_dir() -> Path:
+    """Kernel variants: images/kernels/<name>/vmlinux.bin."""
+    d = images_dir() / "kernels"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def rootfs_dir() -> Path:
+    """Rootfs/initramfs images: images/rootfs/..."""
+    d = images_dir() / "rootfs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def layers_dir() -> Path:
     """Filesystem layers (dirs and .erofs images)."""
     d = root() / "layers"
