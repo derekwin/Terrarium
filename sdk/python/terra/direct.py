@@ -103,12 +103,10 @@ def create(
         kernel = str(images.ensure("vmlinux.bin"))
     elif not Path(kernel).exists():
         kernel = str(images.resolve_kernel(kernel))
-    if initramfs is None:
-        initramfs = str(
-            images.ensure("initramfs-virtiofs.cpio.gz")
-            if layers
-            else images.ensure("alpine.cpio")
-        )
+    if layers:
+        initramfs = str(images.resolve_rootfs("virtiofs"))
+    elif initramfs is None:
+        initramfs = str(images.ensure("alpine.cpio"))
     elif not Path(initramfs).exists():
         initramfs = str(images.resolve_rootfs(initramfs))
     name = name or f"vm-{next(_names)}"

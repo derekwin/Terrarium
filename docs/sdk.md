@@ -80,7 +80,9 @@ default_memory_mb / default_layers / default_net / token`。
 
 - `vm ls/create/remove/info/exec/resize/shutdown/kill/attach-fs/detach-fs`
 （`--kernel`/`--rootfs` 均可传绝对路径或 ls 出来的变体名，如
-`--kernel k612 --rootfs alpine`）
+`--kernel k612 --rootfs alpine`。`rootfs ls` 只显示系统镜像；
+两个引导器镜像（virtiofs/agent）是内部基础设施——带 `--layers`
+时引导器自动选择，用户无需关心）
 - `kernel ls/create -n <名> --version/remove -n`、`rootfs` 同构
 - `layer ls/create -n <名> [--from-dir|--script|--from-image]/remove -n`
 - `pool ls/create/remove/claim/release`

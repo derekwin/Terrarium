@@ -56,9 +56,16 @@ def cmd_create(args):
     kernel = args.kernel
     if kernel and not Path(kernel).exists():
         kernel = str(images.resolve_kernel(kernel))
-    rootfs = args.rootfs
-    if rootfs and not Path(rootfs).exists():
-        rootfs = str(images.resolve_rootfs(rootfs))
+    if args.layers:
+        # Layered boot always uses the virtiofs bootstrap; the system
+        # picks it automatically — no need to know it exists.
+        rootfs = str(images.resolve_rootfs("virtiofs"))
+        if args.rootfs and args.rootfs != "virtiofs":
+            print("note: --rootfs ignored when --layers is given (bootstrap is automatic)")
+    else:
+        rootfs = args.rootfs or "alpine"
+        if not Path(rootfs).exists():
+            rootfs = str(images.resolve_rootfs(rootfs))
     resp = c.vm_create(
         args.name,
         kernel,
@@ -362,11 +369,16 @@ _ROOTFS_ALIASES = {
     "initramfs-virtiofs.cpio.gz": "virtiofs",
 }
 
+# Infra bootstrap images: needed by the system, not user-facing.
+_INFRA_IMAGES = {"initramfs-agent.cpio.gz", "initramfs-virtiofs.cpio.gz"}
+
 
 def _rootfs_variants() -> list[str]:
-    """Logical names users type: --rootfs <name>."""
+    """Logical names users type: --rootfs <name> (infra images hidden)."""
     out = []
     for e in sorted(paths.rootfs_dir().iterdir()):
+        if e.name in _INFRA_IMAGES:
+            continue
         if e.name in _ROOTFS_ALIASES:
             out.append(_ROOTFS_ALIASES[e.name])
         elif e.suffix == ".cpio":
