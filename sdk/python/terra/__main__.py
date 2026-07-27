@@ -166,6 +166,25 @@ def cmd_daemon_start(args):
     return 0
 
 
+def cmd_rootfs_create(args) -> int:
+    """Create a bootable system rootfs. Currently supported: alpine, ubuntu."""
+    import subprocess
+
+    name = args.name
+    if name == "ubuntu":
+        layer_dir = Path(os.environ.get("TERRA_LAYER_DIR") or paths.layers_dir()) / "ubuntu"
+        if not layer_dir.is_dir():
+            r = subprocess.run(["bash", "images/build-layer-distro.sh", "ubuntu"])
+            if r.returncode:
+                return r.returncode
+        return _pack_layer_as_rootfs("ubuntu", "ubuntu")
+    if name == "alpine":
+        img = images.ensure("alpine.cpio")
+        print(f"rootfs ready: {img}")
+        return 0
+    return _err(f"unsupported rootfs {name!r} — supported: alpine, ubuntu (more coming later)")
+
+
 def _pack_layer_as_rootfs(layer_name: str, out_name: str) -> int:
     """Pack a layer directory into a bootable rootfs cpio image."""
     import subprocess
@@ -646,16 +665,12 @@ def main() -> int:
         gs = g.add_subparsers(dest="action", required=True)
         gs.add_parser("ls").set_defaults(f=cmd_kernel_ls if kind == "kernel" else cmd_rootfs_ls)
         c = gs.add_parser("create")
-        c.add_argument("-n", "--name", default="default")
+        c.add_argument("-n", "--name", required=True)
         if kind == "kernel":
             c.add_argument("--version")
+            c.set_defaults(f=cmd_image_build, what=kind)
         else:
-            c.add_argument("--type", default="busybox")
-            c.add_argument(
-                "--from-layer",
-                help="pack an existing layer dir into a bootable rootfs image",
-            )
-        c.set_defaults(f=cmd_image_build, what=kind)
+            c.set_defaults(f=cmd_rootfs_create)
         r = gs.add_parser("remove")
         r.add_argument("-n", "--name", required=True)
         r.set_defaults(f=cmd_kernel_remove if kind == "kernel" else cmd_rootfs_remove)
