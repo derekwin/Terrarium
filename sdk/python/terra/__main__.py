@@ -138,6 +138,13 @@ def cmd_daemon_start(args):
     """Start a daemon as a detached background process (same Python, no sudo)."""
     import subprocess
 
+    # Single instance: a second daemon would unlink and steal the socket,
+    # leaving the first one alive but unreachable (silent split-brain).
+    existing = _daemon_pids()
+    if existing:
+        print(f"daemon already running (pid={existing[0]}) — stop it first: terra daemon stop")
+        return 1
+
     cmd = [
         sys.executable,
         "-c",
@@ -456,30 +463,43 @@ def cmd_daemon_ls(args):
     import json as _json
 
     info = {"socket": paths.default_socket()}
-    pf = _daemon_pidfile()
-    if pf.exists():
-        info["pid"] = int(pf.read_text().strip())
-        info["alive"] = Path(f"/proc/{info['pid']}").exists()
-    else:
-        info["alive"] = Path(info["socket"]).exists()
+    pids = _daemon_pids()
+    info["pids"] = pids
+    info["alive"] = bool(pids) or Path(info["socket"]).exists()
     print(_json.dumps(info, indent=2))
     return 0
+
+
+def _daemon_pids() -> list[int]:
+    """Live engine pids (zombies excluded) — any start method."""
+    import subprocess
+
+    out = subprocess.run(["pgrep", "-x", "engine"], capture_output=True, text=True)
+    pids = []
+    for p in out.stdout.split():
+        if not p.strip().isdigit():
+            continue
+        try:
+            stat = Path(f"/proc/{p}/stat").read_text().split()[2]
+            if stat != "Z":
+                pids.append(int(p))
+        except OSError:
+            pass
+    return pids
 
 
 def _daemon_stop(sig) -> int:
     import signal as _signal
 
-    pf = _daemon_pidfile()
-    if not pf.exists():
-        return _err("no daemon.pid — was it started via 'terra daemon start'?")
-    pid = int(pf.read_text().strip())
-    try:
+    pids = _daemon_pids()
+    if not pids:
+        _daemon_pidfile().unlink(missing_ok=True)
+        return _err("no engine daemon running")
+    for pid in pids:
         os.kill(pid, sig)
         print(f"sent {_signal.Signals(sig).name} to daemon (pid={pid})")
-        return 0
-    except ProcessLookupError:
-        pf.unlink(missing_ok=True)
-        return _err(f"daemon pid {pid} not running (stale pidfile removed)")
+    _daemon_pidfile().unlink(missing_ok=True)
+    return 0
 
 
 def cmd_daemon_stop(args):
