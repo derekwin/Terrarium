@@ -261,6 +261,15 @@ def cmd_image_build(args):
 
 def cmd_image_layer_build(args):
     """Build a tool layer by configuring inside a builder VM."""
+    # Preflight: networked builds need a privileged daemon — offer the
+    # two ways out before burning a builder VM.
+    if not args.no_net and os.geteuid() != 0:
+        return _err(
+            "this build uses a networked builder VM (downloads), which needs "
+            "CAP_NET_ADMIN.\n"
+            "  either: sudo python -m terra daemon-start   (then retry)\n"
+            "  or:     add --no-net for an offline build"
+        )
     client = _client(args)
     name = args.name
     builder = f"lb-{name}"
