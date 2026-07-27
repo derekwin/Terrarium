@@ -90,26 +90,27 @@ Terrarium Engine 是一个Agent运行时执行环境的调度控制层，与具�
 
 ### 1. `terra` CLI — 管理员工具（docker 风格）
 
-面向宿主管理员：管理 daemon、镜像、网络、预热池，查看一切资源。
-全部走 Python 包——`pip install -e sdk/python` 后 `python -m terra`
-（PATH 上也有 `terra` 命令），不用放二进制、不用 sudo。
+面向宿主管理员，按资源分组、动词统一为 `ls / create / remove [-n 名字]`
+（`pip install -e sdk/python` 后 `python -m terra` 或 `terra` 命令，
+不放二进制、不用 sudo）：
 
+```bash
+terra daemon start [--tcp 0.0.0.0:19099]   # 生命周期：ls / stop / destroy
+terra kernel ls                            # ls / create -n k612 --version 6.12 / remove -n
+terra rootfs ls                            # ls / create -n alpine321 --type alpine / remove -n
+terra layer  ls                            # ls / create -n python312 --script setup.sh / remove -n
+terra pool   ls                            # ls / create --size 3 / remove -n pool-0 / claim / release
+terra net    ls                            # ls / create / remove（NAT 网桥生命周期）
+terra vm     ls                            # ls / create / remove / info / exec / resize / shutdown / kill
 ```
-python -m terra daemon-start                        # 后台起自己的 daemon（零 sudo）
-python -m terra daemon-start --tcp 0.0.0.0:19099    # 或开放远程（先设 TERRA_TOKEN）
 
-terra image kernel --version 6.12                   # 构建 guest 内核
-terra image layer-build python312 \
-    --script images/examples/python312.sh           # 工具层「做中建」：
-                                                    # builder VM 里配环境
-terra image base                                    # base 层铺进托管层目录
-terra image layers                                  # 列出可用层
-terra pool-create --size 3                          # 预热池
-terra create dev --kernel ... --initramfs ... --layers python312,base --net
-terra list / info dev / resize dev --cpus 4
-terra net-list / net-down                           # 网络管理
-terra destroy dev
-```
+建层三种姿势：
+`terra layer create -n foo --from-dir ./dir`（目录打包）、
+`... -n foo --script setup.sh`（builder VM 做中建，见 images/examples/）、
+`... -n base --from-image`（从 guest rootfs 铺 base 层）。
+
+旧的扁平命令（`list`、`create`、`exec`、`destroy`、`pool-list`、
+`daemon-start`、`image ...`）作为别名继续可用。
 
 ### 2. Python 直连模式 — 随手开临时 VM，无需任何概念
 

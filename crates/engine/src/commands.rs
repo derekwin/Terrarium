@@ -25,6 +25,7 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "exec" => cmd_exec(mgr, cmd).await,
         "net_list" => cmd_net_list(mgr),
         "net_down" => cmd_net_down(mgr),
+        "net_up" => cmd_net_up(),
         "pool_create" => cmd_pool_create(mgr, cmd).await,
         "pool_list" => cmd_pool_list(mgr),
         "pool_claim" => cmd_pool_claim(mgr, cmd).await,
@@ -250,6 +251,17 @@ async fn cmd_exec(mgr: &VmManager, cmd: Command) -> Response {
             "exit_code": r.exit_code,
         })),
         Err(e) => Response::err(e.to_string()),
+    }
+}
+
+fn cmd_net_up() -> Response {
+    match terrarium_network::ensure_nat_bridge(
+        terrarium_network::DEFAULT_BRIDGE,
+        terrarium_network::DEFAULT_GATEWAY,
+        terrarium_network::DEFAULT_PREFIX,
+    ) {
+        Ok(()) => Response::ok_msg("NAT bridge up (terra0, 10.200.0.1/24)"),
+        Err(e) => Response::err(e),
     }
 }
 

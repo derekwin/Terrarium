@@ -90,36 +90,29 @@ Read-only layers are star-composed on the host with OverlayFS (arbitrary combina
 
 ### 1. `terra` CLI — the admin tool (docker-style)
 
-> Available both as the Rust binary and as part of the Python SDK:
-> `python -m terra ...` (pip install puts a `terra` command on PATH).
-
-For host administrators: manage the daemon, images, network, and
-pools, and inspect everything. Everything runs through the Python
-package — `pip install -e sdk/python` gives you `python -m terra`
-(and a `terra` command); no binaries to place, no sudo for everyday use.
+For host administrators, organized as resource groups with uniform
+`ls / create / remove [-n name]` verbs (no binaries to place, no sudo
+for everyday use — `pip install -e sdk/python` gives you `python -m
+terra` and a `terra` command):
 
 ```bash
-# start your own daemon in the background (zero sudo)
-python -m terra daemon-start
-
-# or serve remote clients (token-gated TCP)
-python -m terra daemon-start --tcp 0.0.0.0:19099   # with TERRA_TOKEN set
-
-terra image kernel --version 6.12                  # build the guest kernel
-terra image layer-build python312 \
-    --script images/examples/python312.sh          # build a tool layer by
-                                                   # configuring inside a
-                                                   # builder VM (proven env)
-terra image base                                   # base layer into the
-                                                   # managed layers dir
-terra image layers                                 # list available layers
-terra pool-create --size 3                         # warm pool
-terra create dev --kernel ... --initramfs ... --layers python312,base --net
-terra list / info dev / resize dev --cpus 4
-terra net-list / net-down                          # networking
+terra daemon start [--tcp 0.0.0.0:19099]   # lifecycle: ls / stop / destroy
+terra kernel ls                            # ls / create -n k612 --version 6.12 / remove -n
+terra rootfs ls                            # ls / create -n alpine321 --type alpine / remove -n
+terra layer  ls                            # ls / create -n python312 --script setup.sh / remove -n
+terra pool   ls                            # ls / create --size 3 / remove -n pool-0 / claim / release
+terra net    ls                            # ls / create / remove (NAT bridge lifecycle)
+terra vm     ls                            # ls / create / remove / info / exec / resize / shutdown / kill
 ```
-terra destroy dev
-```
+
+Layer creation has three styles:
+`terra layer create -n foo --from-dir ./dir` (pack a directory),
+`... -n foo --script setup.sh` (build-by-doing inside a builder VM,
+see images/examples/), `... -n base --from-image` (base layer from
+the guest rootfs).
+
+Older flat commands (`list`, `create`, `exec`, `destroy`, `pool-list`,
+`daemon-start`, `image ...`) keep working as aliases.
 
 ### 2. Python direct mode — throwaway VMs, nothing to manage
 

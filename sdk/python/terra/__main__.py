@@ -136,9 +136,10 @@ def cmd_daemon_start(args):
     proc = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
     )
-    time.sleep(1.5)
     from . import paths
 
+    (paths.run_dir() / "daemon.pid").write_text(str(proc.pid))
+    time.sleep(1.5)
     sock = paths.default_socket()
     print(f"daemon started (pid={proc.pid}, socket={sock})")
     return 0
@@ -313,6 +314,123 @@ def cmd_image_layer_build(args):
 
 
 # ---------------------------------------------------------------------------
+# resource-group handlers (kernel/rootfs/layer/net/daemon)
+# ---------------------------------------------------------------------------
+def _variant_ls_dir(path: Path, kinds=(".erofs",)) -> int:
+    if not path.is_dir():
+        print(f"(empty: {path})")
+        return 0
+    for e in sorted(path.iterdir()):
+        tag = "/" if e.is_dir() else ""
+        print(f"{e.name}{tag}")
+    return 0
+
+
+def cmd_kernel_ls(args):
+    return _variant_ls_dir(paths.images_dir())
+
+
+def cmd_rootfs_ls(args):
+    return _variant_ls_dir(paths.images_dir())
+
+
+def _remove_path(path: Path) -> int:
+    import shutil
+
+    if not path.exists():
+        return _err(f"not found: {path}")
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+    print(f"removed {path}")
+    return 0
+
+
+def cmd_kernel_remove(args):
+    return _remove_path(paths.images_dir() / args.name)
+
+
+def cmd_rootfs_remove(args):
+    return _remove_path(paths.images_dir() / args.name)
+
+
+def cmd_layer_remove(args):
+    layer_dir = Path(os.environ.get("TERRA_LAYER_DIR") or paths.layers_dir())
+    for cand in (layer_dir / args.name, layer_dir / f"{args.name}.erofs"):
+        if cand.exists():
+            return _remove_path(cand)
+    return _err(f"layer '{args.name}' not found under {layer_dir}")
+
+
+def cmd_layer_create(args):
+    if args.from_dir:
+        out = images.build_layer(args.from_dir, args.name)
+        print(f"layer built: {out}")
+        return 0
+    if args.from_image:
+        args2 = argparse.Namespace(name=args.name, force=True)
+        return cmd_image_base(args2)
+    return cmd_image_layer_build(args)  # --script path (build-by-doing)
+
+
+def cmd_net_create(args):
+    return _print(_client(args)._send({"command": "net_up"}))
+
+
+def _daemon_pidfile() -> Path:
+    return paths.run_dir() / "daemon.pid"
+
+
+def cmd_daemon_ls(args):
+    import json as _json
+
+    info = {"socket": paths.default_socket()}
+    pf = _daemon_pidfile()
+    if pf.exists():
+        info["pid"] = int(pf.read_text().strip())
+        info["alive"] = Path(f"/proc/{info['pid']}").exists()
+    else:
+        info["alive"] = Path(info["socket"]).exists()
+    print(_json.dumps(info, indent=2))
+    return 0
+
+
+def _daemon_stop(sig) -> int:
+    import signal as _signal
+
+    pf = _daemon_pidfile()
+    if not pf.exists():
+        return _err("no daemon.pid — was it started via 'terra daemon start'?")
+    pid = int(pf.read_text().strip())
+    try:
+        os.kill(pid, sig)
+        print(f"sent {_signal.Signals(sig).name} to daemon (pid={pid})")
+        return 0
+    except ProcessLookupError:
+        pf.unlink(missing_ok=True)
+        return _err(f"daemon pid {pid} not running (stale pidfile removed)")
+
+
+def cmd_daemon_stop(args):
+    import signal as _signal
+
+    return _daemon_stop(_signal.SIGTERM)
+
+
+def cmd_daemon_destroy(args):
+    import signal as _signal
+
+    rc = _daemon_stop(_signal.SIGKILL)
+    _daemon_pidfile().unlink(missing_ok=True)
+    try:
+        Path(paths.default_socket()).unlink()
+    except FileNotFoundError:
+        pass
+    return rc
+
+
+# ---------------------------------------------------------------------------
 def main() -> int:
     p = argparse.ArgumentParser(prog="terra", description="Terrarium CLI (python -m terra)")
     p.add_argument("--socket", help="daemon socket path or tcp://host:port")
@@ -428,6 +546,113 @@ def main() -> int:
         if what in ("kernel", "rootfs"):
             sp.add_argument("--name", help="named variant in the managed images dir")
         sp.set_defaults(f=cmd_image_build, what=what)
+
+
+    # --- unified resource groups: vm/kernel/rootfs/layer/pool/net/daemon ---
+    vm = sub.add_parser("vm", help="VM operations")
+    vms = vm.add_subparsers(dest="action", required=True)
+    vms.add_parser("ls").set_defaults(f=cmd_list)
+    sp = vms.add_parser("create")
+    sp.add_argument("name")
+    sp.add_argument("--kernel", required=True)
+    sp.add_argument("--initramfs")
+    sp.add_argument("--cpus", type=int, default=2)
+    sp.add_argument("--max-cpus", type=int)
+    sp.add_argument("--memory", type=int, default=512)
+    sp.add_argument("--max-memory", type=int)
+    sp.add_argument("--layers", nargs="*", default=[])
+    sp.add_argument("--upper")
+    sp.add_argument("--net", action="store_true")
+    sp.set_defaults(f=cmd_create)
+    for act, method in (
+        ("remove", "vm_destroy"),
+        ("info", None),
+        ("exec", None),
+        ("resize", None),
+        ("shutdown", "vm_shutdown"),
+        ("kill", "vm_kill"),
+    ):
+        sp = vms.add_parser(act)
+        sp.add_argument("name")
+        if act == "exec":
+            sp.add_argument("--timeout", type=int, default=60)
+            sp.add_argument("args", nargs=argparse.REMAINDER)
+            sp.set_defaults(f=cmd_exec)
+        elif act == "resize":
+            sp.add_argument("--cpus", type=int)
+            sp.add_argument("--memory-bytes", type=int)
+            sp.set_defaults(f=cmd_resize)
+        elif act == "info":
+            sp.set_defaults(f=cmd_info)
+        else:
+            sp.set_defaults(f=_simple(method))
+
+    for kind in ("kernel", "rootfs"):
+        g = sub.add_parser(kind, help=f"manage {kind} variants")
+        gs = g.add_subparsers(dest="action", required=True)
+        gs.add_parser("ls").set_defaults(f=cmd_kernel_ls if kind == "kernel" else cmd_rootfs_ls)
+        c = gs.add_parser("create")
+        c.add_argument("-n", "--name", required=True)
+        if kind == "kernel":
+            c.add_argument("--version")
+        else:
+            c.add_argument("--type", default="busybox")
+        c.set_defaults(f=cmd_image_build, what=kind)
+        r = gs.add_parser("remove")
+        r.add_argument("-n", "--name", required=True)
+        r.set_defaults(f=cmd_kernel_remove if kind == "kernel" else cmd_rootfs_remove)
+
+    g = sub.add_parser("layer", help="manage filesystem layers")
+    gs = g.add_subparsers(dest="action", required=True)
+    gs.add_parser("ls").set_defaults(f=cmd_image_layers)
+    c = gs.add_parser("create")
+    c.add_argument("-n", "--name", required=True)
+    src = c.add_mutually_exclusive_group(required=True)
+    src.add_argument("--from-dir", help="pack an existing directory")
+    src.add_argument("--script", help="build-by-doing: run setup in a builder VM")
+    src.add_argument("--from-image", action="store_true", help="base layer from guest rootfs")
+    c.add_argument("--base", default="base")
+    c.add_argument("--kernel", default="target/guest/vmlinux.bin")
+    c.add_argument("--initramfs", default="target/guest/initramfs-virtiofs.cpio.gz")
+    c.add_argument("--no-net", action="store_true")
+    c.add_argument("--timeout", type=int, default=600)
+    c.set_defaults(f=cmd_layer_create)
+    r = gs.add_parser("remove")
+    r.add_argument("-n", "--name", required=True)
+    r.set_defaults(f=cmd_layer_remove)
+
+    g = sub.add_parser("pool", help="warm pool operations")
+    gs = g.add_subparsers(dest="action", required=True)
+    gs.add_parser("ls").set_defaults(f=cmd_pool_list)
+    c = gs.add_parser("create")
+    c.add_argument("--size", type=int, default=1)
+    c.add_argument("--kernel")
+    c.add_argument("--net", action="store_true")
+    c.set_defaults(f=cmd_pool_create)
+    r = gs.add_parser("remove")
+    r.add_argument("-n", "--name", required=True)
+    r.set_defaults(f=_simple("vm_destroy"))
+    c = gs.add_parser("claim")
+    c.add_argument("--layers", nargs="+", required=True)
+    c.set_defaults(f=cmd_pool_claim)
+    r = gs.add_parser("release")
+    r.add_argument("name")
+    r.set_defaults(f=_simple_pool_release)
+
+    g = sub.add_parser("net", help="NAT networking")
+    gs = g.add_subparsers(dest="action", required=True)
+    gs.add_parser("ls").set_defaults(f=cmd_net_list)
+    gs.add_parser("create").set_defaults(f=cmd_net_create)
+    gs.add_parser("remove").set_defaults(f=cmd_net_down)
+
+    g = sub.add_parser("daemon", help="engine daemon lifecycle")
+    gs = g.add_subparsers(dest="action", required=True)
+    sp = gs.add_parser("start")
+    sp.add_argument("--tcp", help="also listen on host:port for remote clients")
+    sp.set_defaults(f=cmd_daemon_start)
+    gs.add_parser("ls").set_defaults(f=cmd_daemon_ls)
+    gs.add_parser("stop").set_defaults(f=cmd_daemon_stop)
+    gs.add_parser("destroy").set_defaults(f=cmd_daemon_destroy)
 
     args = p.parse_args()
     try:

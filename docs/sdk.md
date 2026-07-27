@@ -76,13 +76,16 @@ default_memory_mb / default_layers / default_net / token`。
 
 ## `python -m terra`（CLI）
 
-daemon 操作：`list / info / create / exec / resize / shutdown / kill /
-destroy / pool-create / pool-list / pool-claim / pool-release /
-attach-fs / detach-fs / net-list / net-down`
+资源分组 + 统一动词（`ls / create / remove [-n 名字]`）：
 
-宿主侧：`daemon-start [--tcp host:port]`（零 sudo 后台 daemon）、
-`image layers / layer / layer-build / kernel / rootfs / initramfs /
-agent-initramfs`
+- `vm ls/create/remove/info/exec/resize/shutdown/kill`
+- `kernel ls/create -n <名> --version/remove -n`、`rootfs` 同构
+- `layer ls/create -n <名> [--from-dir|--script|--from-image]/remove -n`
+- `pool ls/create/remove/claim/release`
+- `net ls/create/remove`、`daemon start/ls/stop/destroy [--tcp]`
+
+旧的扁平命令（list/create/exec/destroy/pool-*/net-list/net-down/
+daemon-start/image ...）作为别名保留。
 
 层与镜像统一为「托管目录命名工件」：`image base [--name base]
 [--force]` 把 guest rootfs 铺成 `layers/<name>/`（层名直接可用，
