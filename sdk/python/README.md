@@ -22,6 +22,18 @@ downloads what it needs into `~/.local/share/terra/` (override with
 - guest images — built from a repo checkout, or downloaded from
   `TERRA_ARTIFACT_BASE` when provided
 
+## Usage model
+
+Two roles, two tools:
+
+| Role | Tool | What they do |
+|---|---|---|
+| **Platform / host admin** | `terra` CLI | Runs `terra daemon` (or a systemd unit), prepares images once: `terra image kernel/rootfs/initramfs/layer`, creates the warm pool |
+| **Agent application** | this SDK | Client only — talks to the running daemon: `pool_claim` → `vm_exec` → `pool_release`. Never starts daemons or touches host setup |
+
+The SDK's `Daemon` context manager below is a **dev/test convenience** for
+single-process scenarios, not the production shape.
+
 ## Quickstart
 
 ```python

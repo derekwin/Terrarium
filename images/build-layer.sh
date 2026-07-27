@@ -14,7 +14,7 @@ set -euo pipefail
 
 SRC="${1:?usage: build-layer.sh <src_dir> <name> [layer_dir]}"
 NAME="${2:?usage: build-layer.sh <src_dir> <name> [layer_dir]}"
-LAYER_DIR="${3:-${TERRA_LAYER_DIR:-/var/lib/terra/layers}}"
+LAYER_DIR="${3:-${TERRA_LAYER_DIR:-$HOME/.local/share/terra/layers}}"
 
 if ! command -v mkfs.erofs &>/dev/null; then
     echo "ERROR: mkfs.erofs not found (apt install erofs-utils)"

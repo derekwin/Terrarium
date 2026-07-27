@@ -87,6 +87,28 @@ enum Commands {
     PoolRelease {
         name: String,
     },
+    /// Host-side image preparation (admin operations, run once per host).
+    #[command(subcommand)]
+    Image(ImageCommands),
+}
+
+#[derive(Subcommand)]
+enum ImageCommands {
+    /// Build the guest kernel (images/build-kernel.sh).
+    Kernel,
+    /// Build the guest rootfs cpio (images/build-rootfs.sh).
+    Rootfs,
+    /// Build the virtiofs boot initramfs.
+    Initramfs,
+    /// Build the warm-pool idle initramfs.
+    AgentInitramfs,
+    /// Pack a directory into an EROFS layer image.
+    Layer {
+        /// Directory containing the layer content.
+        src: String,
+        /// Layer name (referenced by `layers` at VM create/claim).
+        name: String,
+    },
 }
 
 fn main() {
@@ -178,6 +200,38 @@ fn main() {
                 &Command::new("pool_release").with_name(name),
             ));
         }
+        Commands::Image(img) => run_image(img),
+    }
+}
+
+/// Image commands are host-side build operations, not daemon protocol.
+fn run_image(img: ImageCommands) {
+    let (script, args): (&str, Vec<String>) = match img {
+        ImageCommands::Kernel => ("images/build-kernel.sh", vec![]),
+        ImageCommands::Rootfs => ("images/build-rootfs.sh", vec![]),
+        ImageCommands::Initramfs => ("images/build-initramfs-virtiofs.sh", vec![]),
+        ImageCommands::AgentInitramfs => ("images/build-initramfs-agent.sh", vec![]),
+        ImageCommands::Layer { src, name } => {
+            ("images/build-layer.sh", vec![src, name])
+        }
+    };
+    if !std::path::Path::new(script).exists() {
+        eprintln!(
+            "ERROR: {} not found — run `terra image` from the Terrarium repo root",
+            script
+        );
+        std::process::exit(1);
+    }
+    let status = std::process::Command::new("bash")
+        .arg(script)
+        .args(&args)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("ERROR: failed to run {}: {}", script, e);
+            std::process::exit(1);
+        });
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
     }
 }
 
