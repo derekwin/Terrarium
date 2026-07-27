@@ -35,6 +35,7 @@ class Daemon:
         *,
         config: HostConfig | None = None,
         socket: str | None = None,
+        tcp: str | None = None,
         kernel: str | None = None,
         ch_binary: str | None = None,
         virtiofsd: str | None = None,
@@ -43,6 +44,7 @@ class Daemon:
         log: str | None = None,
     ):
         self.socket = socket or paths.default_socket()
+        self.tcp = tcp
         self.config = config or HostConfig()
         self._kernel = kernel or self.config.kernel
         self._ch = ch_binary or self.config.ch_binary
@@ -79,8 +81,11 @@ class Daemon:
             out, err = self._log_file, subprocess.STDOUT
         else:
             out = err = subprocess.DEVNULL
+        args = [str(engine), "daemon", "--socket", self.socket]
+        if self.tcp:
+            args += ["--tcp", self.tcp]
         self._proc = subprocess.Popen(
-            [str(engine), "daemon", "--socket", self.socket],
+            args,
             env=env, stdout=out, stderr=err,
         )
         deadline = time.time() + timeout

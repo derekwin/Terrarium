@@ -159,28 +159,66 @@ def ensure_erofs_tools() -> tuple[Path, Path]:
     return mkfs_p, fuse_p
 
 
-def ensure_engine() -> Path:
-    """Locate the terrarium engine binary.
+ENGINE_ARTIFACT_NAME = "engine-linux-x86_64"
 
-    Resolution: $TERRA_ENGINE, repo checkout build, PATH. (Published
-    releases will add a download fallback here.)
+
+def ensure_engine() -> Path:
+    """Provide the terrarium engine binary — users never install it.
+
+    Resolution order:
+    1. $TERRA_ENGINE
+    2. managed bin dir (previously published or downloaded)
+    3. repo checkout build (dev machines)
+    4. PATH
+    5. download from $TERRA_ARTIFACT_BASE (release artifacts)
     """
     env = os.environ.get("TERRA_ENGINE")
     if env and Path(env).exists():
         return Path(env)
-    for rel in ("target/release/engine", "target/debug/engine"):
-        p = Path.cwd() / rel
-        if p.exists():
-            return p
-    # walk up from cwd looking for a repo checkout
-    for parent in Path.cwd().parents:
-        p = parent / "target/release/engine"
+
+    managed = paths.bin_dir() / "engine"
+    if managed.exists():
+        return managed
+
+    for base in (Path.cwd(), *Path.cwd().parents):
+        p = base / "target/release/engine"
         if p.exists():
             return p
     found = shutil.which("terra-engine") or shutil.which("engine")
     if found:
         return Path(found)
+
+    base_url = os.environ.get("TERRA_ARTIFACT_BASE", "").rstrip("/")
+    if base_url:
+        try:
+            _download(f"{base_url}/{ENGINE_ARTIFACT_NAME}", managed)
+            return managed
+        except AssetError:
+            pass
+
     raise AssetError(
-        "engine binary not found: build with `cargo build --release -p engine` "
-        "from the Terrarium repo, or set TERRA_ENGINE"
+        "engine runtime not found. Either:\n"
+        "  - run `python3 -c 'from terra.assets import publish_engine; publish_engine()'` "
+        "once on a machine with the Terrarium repo, or\n"
+        "  - set TERRA_ARTIFACT_BASE to your release-artifacts URL, or\n"
+        "  - set TERRA_ENGINE to an existing engine binary"
+    )
+
+
+def publish_engine() -> Path:
+    """Copy the repo-built engine into the managed bin dir.
+
+    Run once on any machine that has the Terrarium repo; afterwards
+    every SDK daemon on this host works with zero binary handling.
+    """
+    for base in (Path.cwd(), *Path.cwd().parents):
+        src = base / "target/release/engine"
+        if src.exists():
+            dest = paths.bin_dir() / "engine"
+            shutil.copy(src, dest)
+            _chmod_x(dest)
+            print(f"engine published to {dest}")
+            return dest
+    raise AssetError(
+        "no repo build found — run `cargo build --release -p engine` first"
     )

@@ -124,7 +124,7 @@ pip install -e sdk/python
 ```python
 import terra
 
-vm = terra.create(layers=["python312", "base"])   # 就这样
+vm = terra.create(layers=["python312", "base"])
 print(vm.exec(["python3", "-c", "import numpy; print(numpy.__version__)"]))
 vm.destroy()
 ```
@@ -146,11 +146,26 @@ vm = create(layers=["python312", "base"])
 
 管理员在服务器上跑 daemon，你只连它用。
 
-服务器（管理员）：
+服务器（管理员）——一个 Python 脚本就是 daemon 程序；引擎运行时
+自动获取，无需处理二进制：
 
-```bash
-sudo env TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
+```python
+from terra.daemon import Daemon
+from terra.config import HostConfig
+
+cfg = HostConfig(
+    kernel="target/guest/vmlinux.bin",
+    agent_initramfs="target/guest/initramfs-agent.cpio.gz",
+    layer_dir="/var/lib/terra/layers",
+    pool_size=4,
+    default_net=True,
+    token="secret",
+)
+Daemon(config=cfg, tcp="0.0.0.0:19099").start()   # 常驻服务
 ```
+
+一次性准备（任何有仓库的机器上跑一次）：
+`python3 -c "from terra.assets import publish_engine; publish_engine()"`
 
 客户端（你）——**代码与本地模式完全一致**，只在开头多一行 connect。
 创建由服务器的预热池兑现，exec 与 destroy（自动归还池）写法不变：

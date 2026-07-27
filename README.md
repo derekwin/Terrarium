@@ -126,7 +126,7 @@ pip install -e sdk/python
 ```python
 import terra
 
-vm = terra.create(layers=["python312", "base"])   # that's it
+vm = terra.create(layers=["python312", "base"])
 print(vm.exec(["python3", "-c", "import numpy; print(numpy.__version__)"]))
 vm.destroy()
 ```
@@ -149,11 +149,26 @@ vm = create(layers=["python312", "base"])
 
 An admin runs the daemon on a server; you connect and use it.
 
-Server (admin):
+Server (admin) — a Python script is the daemon program; the engine
+runtime is fetched automatically, no binary handling:
 
-```bash
-sudo env TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
+```python
+from terra.daemon import Daemon
+from terra.config import HostConfig
+
+cfg = HostConfig(
+    kernel="target/guest/vmlinux.bin",
+    agent_initramfs="target/guest/initramfs-agent.cpio.gz",
+    layer_dir="/var/lib/terra/layers",
+    pool_size=4,
+    default_net=True,
+    token="secret",
+)
+Daemon(config=cfg, tcp="0.0.0.0:19099").start()   # serve forever
 ```
+
+One-time, on any machine with the repo:
+`python3 -c "from terra.assets import publish_engine; publish_engine()"`
 
 Client (you) — **the code is identical to local mode**, one connect
 line up front. Creation is fulfilled by the server's warm pool; exec
