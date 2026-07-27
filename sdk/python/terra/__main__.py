@@ -520,6 +520,32 @@ def cmd_daemon_destroy(args):
     return rc
 
 
+def cmd_daemon_config(args):
+    """Composed live view: engine, pool, network."""
+    import json as _json
+
+    c = _client(args)
+    out = {}
+    pids = _daemon_pids()
+    out["engine"] = {"pids": pids, "socket": paths.default_socket()}
+    try:
+        pool = c.pool_list()
+        out["pool"] = {
+            "size": pool.get("count", 0),
+            "claimed": sum(1 for s in pool.get("pool", []) if s.get("claimed")),
+        }
+    except TerraError:
+        out["pool"] = "unavailable"
+    try:
+        out["net"] = c._send({"command": "net_list"})
+    except TerraError:
+        out["net"] = "unavailable"
+    out["layers_dir"] = str(paths.layers_dir())
+    out["layers"] = [e.name for e in sorted(paths.layers_dir().iterdir())] if paths.layers_dir().is_dir() else []
+    print(_json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 def main() -> int:
     p = argparse.ArgumentParser(prog="terra", description="Terrarium CLI (python -m terra)")
@@ -637,6 +663,7 @@ def main() -> int:
     sp.add_argument("--tcp", help="also listen on host:port for remote clients")
     sp.set_defaults(f=cmd_daemon_start)
     gs.add_parser("ls").set_defaults(f=cmd_daemon_ls)
+    gs.add_parser("config", help="show live daemon state").set_defaults(f=cmd_daemon_config)
     gs.add_parser("stop").set_defaults(f=cmd_daemon_stop)
     gs.add_parser("destroy").set_defaults(f=cmd_daemon_destroy)
 

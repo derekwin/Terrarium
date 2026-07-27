@@ -85,8 +85,9 @@ default_memory_mb / default_layers / default_net / token`。
 时引导器自动选择，用户无需关心）
 - `kernel ls/create -n <名> --version/remove -n`、`rootfs` 同构
 - `layer ls/create -n <名> [--from-dir|--script|--from-image]/remove -n`
-- `pool ls/create/remove/claim/release`
-- `net ls/create/remove`、`daemon start/ls/stop/destroy [--tcp]`
+- `pool ls/create/remove/claim/release`（池大小**运行时可调**：
+create 追加、remove 缩减，无需重启 daemon）
+- `net ls/create/remove`、`daemon start/ls/stop/destroy/config [--tcp]`
 
 
 层与镜像统一为「托管目录命名工件」：`layer create -n base
