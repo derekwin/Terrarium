@@ -93,26 +93,29 @@ Read-only layers are star-composed on the host with OverlayFS (arbitrary combina
 > Available both as the Rust binary and as part of the Python SDK:
 > `python -m terra ...` (pip install puts a `terra` command on PATH).
 
-For host administrators: manage the daemon, images, network, pools,
-and inspect everything.
+For host administrators: manage the daemon, images, network, and
+pools, and inspect everything. Everything runs through the Python
+package — `pip install -e sdk/python` gives you `python -m terra`
+(and a `terra` command); no binaries to place, no sudo for everyday use.
 
 ```bash
-# daemon (local use doesn't need root; networking does)
-target/release/engine daemon
+# start your own daemon in the background (zero sudo)
+python -m terra daemon-start
 
-# remote-capable daemon (token-gated TCP)
-TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
+# or serve remote clients (token-gated TCP)
+python -m terra daemon-start --tcp 0.0.0.0:19099   # with TERRA_TOKEN set
 
-terra image kernel --version 6.12     # build the guest kernel
+terra image kernel --version 6.12                  # build the guest kernel
 terra image layer-build python312 \
-    --script images/examples/python312.sh   # build a tool layer by
-                                        # configuring inside a builder VM
-                                        # (examples: images/examples/)
-terra image layers                    # list available layers
-terra pool-create --size 3            # warm pool
+    --script images/examples/python312.sh          # build a tool layer by
+                                                   # configuring inside a
+                                                   # builder VM (proven env)
+terra image layers                                 # list available layers
+terra pool-create --size 3                         # warm pool
 terra create dev --kernel ... --initramfs ... --layers python312,base --net
 terra list / info dev / resize dev --cpus 4
-terra net-list / net-down             # networking
+terra net-list / net-down                          # networking
+```
 terra destroy dev
 ```
 
