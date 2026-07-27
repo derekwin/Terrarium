@@ -83,6 +83,9 @@ enum Commands {
         size: u32,
         #[arg(long)]
         kernel: Option<String>,
+        /// Attach virtio-net to pool VMs.
+        #[arg(long)]
+        net: bool,
     },
     PoolList,
     /// Claim an idle pool VM and hot-plug layers.
@@ -152,6 +155,11 @@ enum ImageCommands {
         /// virtiofs boot initramfs path.
         #[arg(long, default_value = "target/guest/initramfs-virtiofs.cpio.gz")]
         initramfs: String,
+        /// Disable networking for the builder VM (network is on by
+        /// default — environment builds usually need downloads, and
+        /// networking requires a privileged daemon).
+        #[arg(long)]
+        no_net: bool,
     },
 }
 
@@ -230,11 +238,12 @@ fn main() {
                 &Command::new("detach_fs").with_name(name),
             ));
         }
-        Commands::PoolCreate { size, kernel } => {
+        Commands::PoolCreate { size, kernel, net } => {
             let mut cmd = Command::new("pool_create").with_pool_size(size);
             if let Some(k) = kernel {
                 cmd.kernel = Some(k);
             }
+            cmd = cmd.with_net(net);
             print_response(send(&cli.socket, &cmd));
         }
         Commands::PoolList => {
@@ -271,14 +280,31 @@ fn main() {
                 base,
                 kernel,
                 initramfs,
-            } => layer_build(&cli.socket, &name, &script, &base, &kernel, &initramfs),
+                no_net,
+            } => layer_build(
+                &cli.socket,
+                &name,
+                &script,
+                &base,
+                &kernel,
+                &initramfs,
+                !no_net,
+            ),
             other => run_image(other),
         },
     }
 }
 
 /// Build a tool layer by doing: builder VM -> setup script -> pack delta.
-fn layer_build(socket: &str, name: &str, script: &str, base: &str, kernel: &str, irfs: &str) {
+fn layer_build(
+    socket: &str,
+    name: &str,
+    script: &str,
+    base: &str,
+    kernel: &str,
+    irfs: &str,
+    net: bool,
+) {
     let builder = format!("lb-{}", name);
     let upper = builder.clone();
 
@@ -288,7 +314,8 @@ fn layer_build(socket: &str, name: &str, script: &str, base: &str, kernel: &str,
         .with_cpus(1)
         .with_memory_mb(512)
         .with_layers(vec![base.to_string()])
-        .with_upper(&upper);
+        .with_upper(&upper)
+        .with_net(net);
     let resp = send(socket, &create);
     if !resp.contains("\"ok\"") && !resp.contains("\"status\":\"ok\"") {
         eprintln!("ERROR: builder VM create failed: {}", resp);
@@ -312,7 +339,9 @@ fn layer_build(socket: &str, name: &str, script: &str, base: &str, kernel: &str,
             content.clone(),
         ]);
         resp = send(socket, &exec);
-        if resp.contains("\"status\":\"ok\"") {
+        // protocol ok AND script exit code 0 — packing on a failed
+        // script would silently produce an empty/garbage layer.
+        if resp.contains("\"status\":\"ok\"") && resp.contains("\"exit_code\":0") {
             ok = true;
             break;
         }
@@ -324,6 +353,9 @@ fn layer_build(socket: &str, name: &str, script: &str, base: &str, kernel: &str,
         std::process::exit(1);
     }
     println!("setup output: {}", resp);
+    // Best-effort network settle for download-heavy scripts: the guest
+    // DHCP lease can still be in flight when the agent answers.
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
     // 3) clean runtime noise from the delta (not part of the environment)
     let cleanup = Command::new("exec").with_name(&builder).with_args(vec![

@@ -90,6 +90,7 @@ impl VmManager {
         size: u32,
         kernel: &str,
         agent_initramfs: &str,
+        net: bool,
     ) -> Result<Vec<String>, AdapterError> {
         let mut created = Vec::new();
         for _ in 0..size {
@@ -105,7 +106,7 @@ impl VmManager {
                 memory_mb: 256,
                 max_memory_mb: Some(1024),
                 initramfs: Some(agent_initramfs.to_string()),
-                net: false,
+                net,
                 fs: None,
                 backend_config: None,
             };

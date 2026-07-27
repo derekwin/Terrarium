@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+libc = "0.2"
 adapter-traits = { path = "../traits" }
 terrarium-network = { path = "../../network" }
 uds-http = { path = "../../uds-http" }

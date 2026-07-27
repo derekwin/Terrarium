@@ -279,7 +279,7 @@ async fn cmd_pool_create(mgr: &mut VmManager, cmd: Command) -> Response {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "target/guest/initramfs-agent.cpio.gz".into());
-    match mgr.pool_create(size, &kernel, &agent).await {
+    match mgr.pool_create(size, &kernel, &agent, cmd.net).await {
         Ok(names) => Response::ok(serde_json::json!({"created": names, "count": names.len()})),
         Err(e) => Response::err(e.to_string()),
     }

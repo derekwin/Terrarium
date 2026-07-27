@@ -26,9 +26,7 @@ pub fn exec_isolated(
     // a sane default PATH so /sbin tools (ip, apk, ...) resolve.
     child.env(
         "PATH",
-        std::env::var("PATH").unwrap_or_else(|_| {
-            "/sbin:/usr/sbin:/bin:/usr/bin".into()
-        }),
+        std::env::var("PATH").unwrap_or_else(|_| "/sbin:/usr/sbin:/bin:/usr/bin".into()),
     );
     let mut child = child
         .args(&args[1..])

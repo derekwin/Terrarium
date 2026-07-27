@@ -209,9 +209,10 @@ fn tap_name(name: &str) -> String {
     t
 }
 
-/// A composed layered rootfs: overlayfs mount + virtiofsd, running inside
-/// a private user/mount namespace so the whole stack (including the
-/// mount) dies with the supervisor process — no privileged cleanup needed.
+/// A composed layered rootfs: overlayfs mount + virtiofsd. As non-root
+/// it runs inside a private user/mount namespace (killing the supervisor
+/// tears down the mount too); as root it mounts directly (userns uid
+/// mapping would make other users' layer files unwritable-nobody).
 struct FsStack {
     supervisor: std::process::Child,
     socket: String,
@@ -219,6 +220,8 @@ struct FsStack {
     dir: String,
     /// Persistent upperdirs live outside `dir` and survive Drop.
     persistent: bool,
+    /// True when composed inside a private namespace (non-root path).
+    in_namespace: bool,
 }
 
 impl ChVmHandle {
@@ -367,18 +370,56 @@ async fn compose_fs(
     // clear leftovers from previous (possibly crashed) stacks.
     let _ = std::fs::remove_file(format!("{}.pid", socket));
 
-    let script = format!(
-        "set -e; mount -t overlay overlay -o lowerdir={},upperdir={},workdir={} {}; \
-         exec {} --socket-path={} --shared-dir={} --sandbox=none --cache=always",
-        lowerdir, upper, work, merged, adapter.virtiofsd_binary, socket, merged
-    );
-    let mut child = Command::new("unshare")
-        .args(["-Urm", "bash", "-c", &script])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn unshare supervisor: {}", e))?;
+    // Root path: plain mount + virtiofsd directly. In a user namespace,
+    // files owned by other uids appear as nobody and become unwritable —
+    // exactly the failure root daemons hit with user-created layers.
+    // SAFETY: geteuid is always safe to call.
+    let in_namespace = unsafe { libc::geteuid() } != 0;
+    let mut child = if in_namespace {
+        let script = format!(
+            "set -e; mount -t overlay overlay -o lowerdir={},upperdir={},workdir={} {}; \
+             exec {} --socket-path={} --shared-dir={} --sandbox=none --cache=always",
+            lowerdir, upper, work, merged, adapter.virtiofsd_binary, socket, merged
+        );
+        Command::new("unshare")
+            .args(["-Urm", "bash", "-c", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn unshare supervisor: {}", e))?
+    } else {
+        let mount = Command::new("mount")
+            .args([
+                "-t",
+                "overlay",
+                "overlay",
+                "-o",
+                &format!("lowerdir={},upperdir={},workdir={}", lowerdir, upper, work),
+                &merged,
+            ])
+            .output()
+            .map_err(|e| format!("mount overlay: {}", e))?;
+        if !mount.status.success() {
+            return Err(format!(
+                "mount overlay: {}",
+                String::from_utf8_lossy(&mount.stderr).trim()
+            )
+            .into());
+        }
+        Command::new(&adapter.virtiofsd_binary)
+            .args([
+                &format!("--socket-path={}", socket),
+                &format!("--shared-dir={}", merged),
+                "--sandbox=none",
+                "--cache=always",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn virtiofsd: {}", e))?
+    };
 
     // Wait for the virtiofsd socket; surface supervisor stderr on failure.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -413,6 +454,7 @@ async fn compose_fs(
         socket,
         dir,
         persistent,
+        in_namespace,
     })
 }
 
@@ -641,6 +683,13 @@ fn teardown_fs(fs: &mut FsStack) {
     let _ = fs.supervisor.kill();
     let _ = fs.supervisor.wait();
     let _ = std::fs::remove_file(&fs.socket);
+    if !fs.in_namespace {
+        // Root path: the overlayfs mount is not tied to a namespace —
+        // unmount explicitly.
+        let _ = Command::new("umount")
+            .arg(format!("{}/merged", fs.dir))
+            .output();
+    }
     let _ = std::fs::remove_file(format!("{}.pid", fs.socket));
     if !fs.persistent {
         // overlayfs creates its internal work/work dir with mode 0000 —
@@ -679,7 +728,13 @@ impl Drop for ChVmHandle {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn ch_args(spec: &VmSpec, socket: &str, fs_socket: Option<&str>, vsock: &str, tap: Option<&str>) -> Vec<String> {
+fn ch_args(
+    spec: &VmSpec,
+    socket: &str,
+    fs_socket: Option<&str>,
+    vsock: &str,
+    tap: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         "--api-socket".into(),
         socket.into(),

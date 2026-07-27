@@ -147,7 +147,13 @@ pub fn ensure_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), 
     if !exists {
         run_ip(&["link", "add", "name", bridge, "type", "bridge"])?;
     }
-    run_ip(&["addr", "replace", &format!("{}/{}", gateway, prefix), "dev", bridge])?;
+    run_ip(&[
+        "addr",
+        "replace",
+        &format!("{}/{}", gateway, prefix),
+        "dev",
+        bridge,
+    ])?;
     run_ip(&["link", "set", bridge, "up"])?;
 
     // Enable forwarding (read-only check; warn only).
@@ -163,18 +169,28 @@ pub fn ensure_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), 
     // Masquerade outbound traffic from the bridge subnet (idempotent check).
     let rule_exists = Command::new("iptables")
         .args([
-            "-t", "nat", "-C", "POSTROUTING", "-s",
+            "-t",
+            "nat",
+            "-C",
+            "POSTROUTING",
+            "-s",
             &format!("{}/{}", subnet_of(gateway), prefix),
-            "-j", "MASQUERADE",
+            "-j",
+            "MASQUERADE",
         ])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !rule_exists {
         run_iptables(&[
-            "-t", "nat", "-A", "POSTROUTING", "-s",
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-s",
             &format!("{}/{}", subnet_of(gateway), prefix),
-            "-j", "MASQUERADE",
+            "-j",
+            "MASQUERADE",
         ])?;
     }
     // DHCP for guests: dnsmasq bound to the bridge (idempotent).
@@ -191,7 +207,8 @@ pub fn ensure_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), 
 /// missing rather than silently leaving guests without DHCP.
 pub fn ensure_dhcp(bridge: &str, gateway: &str) -> Result<(), String> {
     // Already serving this bridge?
-    if let Ok(status) = Command::new("pgrep").args(["-f", "dnsmasq.*", bridge]).output() {
+    let pattern = format!("dnsmasq.*{}", bridge);
+    if let Ok(status) = Command::new("pgrep").args(["-f", &pattern]).output() {
         if status.status.success() && !status.stdout.is_empty() {
             return Ok(());
         }
@@ -200,8 +217,12 @@ pub fn ensure_dhcp(bridge: &str, gateway: &str) -> Result<(), String> {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "dnsmasq".into());
-    // stdio must be null: dnsmasq daemonizes and the background child
-    // would hold our pipes open forever otherwise (output() never EOFs).
+    // stdout must be null and stderr goes to a log file: dnsmasq
+    // daemonizes, and a background child holding our PIPE open would
+    // hang output() forever — but a plain file keeps errors diagnosable.
+    let log_path = format!("/tmp/terra-dnsmasq-{}.log", bridge);
+    let log_file =
+        std::fs::File::create(&log_path).map_err(|e| format!("create dnsmasq log: {}", e))?;
     let out = Command::new(&bin)
         .args([
             &format!("--interface={}", bridge),
@@ -212,7 +233,7 @@ pub fn ensure_dhcp(bridge: &str, gateway: &str) -> Result<(), String> {
         ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(log_file))
         .output()
         .map_err(|e| {
             format!(
@@ -221,10 +242,8 @@ pub fn ensure_dhcp(bridge: &str, gateway: &str) -> Result<(), String> {
             )
         })?;
     if !out.status.success() {
-        return Err(format!(
-            "dnsmasq: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
+        return Err(format!("dnsmasq failed: {}", detail.trim()));
     }
     tracing::info!(%bridge, "dnsmasq DHCP started");
     Ok(())

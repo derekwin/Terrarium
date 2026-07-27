@@ -131,11 +131,13 @@ class TerraClient:
         """Hot-plug a layered filesystem into a running VM (warm pool)."""
         return self._send({"command": "attach_fs", "name": name, "layers": list(layers)})
 
-    def pool_create(self, size: int, *, kernel: str | None = None) -> dict:
+    def pool_create(self, size: int, *, kernel: str | None = None, net: bool = False) -> dict:
         """Create warm-pool idle VMs."""
         cmd: dict = {"command": "pool_create", "pool_size": size}
         if kernel:
             cmd["kernel"] = kernel
+        if net:
+            cmd["net"] = True
         return self._send(cmd)
 
     def pool_list(self) -> dict:
