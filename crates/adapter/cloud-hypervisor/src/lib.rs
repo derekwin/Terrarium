@@ -403,6 +403,24 @@ impl VmHandle for ChVmHandle {
             .map_err(|e| AdapterError::internal(format!("vm.add-disk: {}", e)))
     }
 
+    async fn exec(&self, args: &[String]) -> Result<adapter_traits::ExecResult, AdapterError> {
+        let resp = self
+            .guest_cmd(&serde_json::json!({"command": "exec", "args": args}))
+            .await?;
+        if resp["status"].as_str() != Some("ok") {
+            return Err(AdapterError::internal(format!(
+                "guest exec failed: {}",
+                resp["message"].as_str().unwrap_or("unknown")
+            )));
+        }
+        let d = &resp["data"];
+        Ok(adapter_traits::ExecResult {
+            stdout: d["stdout"].as_str().unwrap_or_default().to_string(),
+            stderr: d["stderr"].as_str().unwrap_or_default().to_string(),
+            exit_code: d["exit_code"].as_i64().unwrap_or(-1) as i32,
+        })
+    }
+
     async fn attach_fs(&self, fs_spec: &FsSpec) -> Result<(), AdapterError> {
         if self.fs.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             return Err(AdapterError::internal(

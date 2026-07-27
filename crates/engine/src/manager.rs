@@ -57,6 +57,19 @@ impl VmManager {
         Ok(())
     }
 
+    /// Execute a command inside a VM via its guest agent.
+    pub async fn exec(
+        &self,
+        name: &str,
+        args: &[String],
+    ) -> Result<adapter_traits::ExecResult, AdapterError> {
+        self.vms
+            .get(name)
+            .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?
+            .exec(args)
+            .await
+    }
+
     /// Create `size` idle warm-pool VMs (agent initramfs, no fs).
     /// Returns the names of the newly created pool VMs.
     pub async fn pool_create(

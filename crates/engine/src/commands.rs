@@ -22,6 +22,7 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "restore" => cmd_restore(mgr, cmd),
         "attach_fs" => cmd_attach_fs(mgr, cmd).await,
         "detach_fs" => cmd_detach_fs(mgr, cmd).await,
+        "exec" => cmd_exec(mgr, cmd).await,
         "pool_create" => cmd_pool_create(mgr, cmd).await,
         "pool_list" => cmd_pool_list(mgr),
         "pool_claim" => cmd_pool_claim(mgr, cmd).await,
@@ -211,6 +212,24 @@ async fn cmd_attach_fs(mgr: &VmManager, cmd: Command) -> Response {
     };
     match mgr.attach_fs(name, &fs).await {
         Ok(()) => Response::ok_msg(&format!("fs attached to VM '{}'", name)),
+        Err(e) => Response::err(e.to_string()),
+    }
+}
+
+async fn cmd_exec(mgr: &VmManager, cmd: Command) -> Response {
+    let name = match cmd.name.as_deref() {
+        Some(n) => n,
+        None => return Response::err("Missing 'name' field"),
+    };
+    if cmd.args.is_empty() {
+        return Response::err("Missing 'args' field");
+    }
+    match mgr.exec(name, &cmd.args).await {
+        Ok(r) => Response::ok(serde_json::json!({
+            "stdout": r.stdout,
+            "stderr": r.stderr,
+            "exit_code": r.exit_code,
+        })),
         Err(e) => Response::err(e.to_string()),
     }
 }

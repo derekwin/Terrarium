@@ -141,6 +141,10 @@ class TerraClient:
         """Detach a previously attached layered filesystem."""
         return self._send({"command": "detach_fs", "name": name})
 
+    def vm_exec(self, name: str, args: list[str]) -> dict:
+        """Execute a command inside the VM via the guest agent (vsock)."""
+        return self._send({"command": "exec", "name": name, "args": list(args)})
+
     def vm_destroy(self, name: str) -> dict:
         """Stop and deregister a VM."""
         return self._send({"command": "destroy", "name": name})

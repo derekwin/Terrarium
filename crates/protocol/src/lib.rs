@@ -25,6 +25,10 @@ pub struct Command {
     // base layer last). Empty = plain initramfs boot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<String>,
+
+    // exec: command argv (exec runs it inside the VM via the guest agent)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initramfs: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,6 +66,7 @@ impl Command {
             kernel: None,
             initramfs: None,
             layers: Vec::new(),
+            args: Vec::new(),
             cmdline: None,
             cpus: None,
             max_cpus: None,
@@ -129,6 +134,12 @@ impl Command {
     /// Builder: set virtiofs layers (highest priority first, base last).
     pub fn with_layers(mut self, layers: Vec<String>) -> Self {
         self.layers = layers;
+        self
+    }
+
+    /// Builder: set exec argv.
+    pub fn with_args(mut self, args: Vec<String>) -> Self {
+        self.args = args;
         self
     }
 

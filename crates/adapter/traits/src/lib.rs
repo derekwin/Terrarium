@@ -335,6 +335,14 @@ pub trait VmHandle: Send + Sync {
     /// Apply network QoS (rate limiting + priority). Implemented via tc on TAP.
     async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), AdapterError>;
 
+    /// Execute a command inside the VM (via the guest agent, e.g.
+    /// guest-proxy over vsock). Default: not supported by this backend.
+    async fn exec(&self, _args: &[String]) -> Result<ExecResult, AdapterError> {
+        Err(AdapterError::not_supported(
+            "exec not supported by this backend",
+        ))
+    }
+
     /// Hot-plug a layered filesystem into a running VM (warm-pool attach:
     /// compose layers on the host, hot-add the virtiofs device, and mount
     /// it inside the guest via the guest-proxy vsock channel).
