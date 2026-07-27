@@ -165,6 +165,27 @@ def cmd_daemon_start(args):
     return 0
 
 
+def _pack_layer_as_rootfs(layer_name: str, out_name: str) -> int:
+    """Pack a layer directory into a bootable rootfs cpio image."""
+    import subprocess
+
+    layer_dir = Path(os.environ.get("TERRA_LAYER_DIR") or paths.layers_dir()) / layer_name
+    if not layer_dir.is_dir():
+        return _err(f"layer '{layer_name}' not found: {layer_dir}")
+    out = paths.rootfs_dir() / f"{out_name}.cpio.gz"
+    tmp = out.with_suffix(".tmp")
+    r = subprocess.run(
+        f"cd {layer_dir} && find . | cpio -o -H newc --quiet | gzip > {tmp}",
+        shell=True,
+    )
+    if r.returncode:
+        tmp.unlink(missing_ok=True)
+        return r.returncode
+    tmp.replace(out)
+    print(f"rootfs image built: {out}")
+    return 0
+
+
 def cmd_image_base(args):
     """Build/refresh the base layer in the managed layers dir.
 
@@ -224,6 +245,8 @@ _BUILDER_SCRIPTS = {
 
 
 def cmd_image_build(args):
+    if getattr(args, "from_layer", None):
+        return _pack_layer_as_rootfs(args.from_layer, args.name)
     script = _BUILDER_SCRIPTS[args.what]
     if not Path(script).exists():
         return _err(f"{script} not found — run from the Terrarium repo root")
@@ -618,6 +641,10 @@ def main() -> int:
             c.add_argument("--version")
         else:
             c.add_argument("--type", default="busybox")
+            c.add_argument(
+                "--from-layer",
+                help="pack an existing layer dir into a bootable rootfs image",
+            )
         c.set_defaults(f=cmd_image_build, what=kind)
         r = gs.add_parser("remove")
         r.add_argument("-n", "--name", required=True)
