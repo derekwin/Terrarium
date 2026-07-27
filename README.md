@@ -154,20 +154,23 @@ Server (admin):
 sudo env TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
 ```
 
-Client (you):
+Client (you) — **the code is identical to local mode**, one connect
+line up front. Creation is fulfilled by the server's warm pool; exec
+and destroy (which releases it back) work exactly the same:
 
 ```python
-from terra.client import TerraClient
+import terra
 
-c = TerraClient("tcp://server-ip:19099", token="secret")
-print(c.vm_list())
+terra.connect("tcp://server-ip:19099", token="secret")
 
-claim = c.pool_claim(["python312", "base"])      # use the server's pool
-print(c.vm_exec(claim["name"], ["python3", "--version"]))
-c.pool_release(claim["name"])
+vm = terra.create(layers=["python312", "base"])  # pool_claim underneath
+print(vm.exec(["python3", "--version"]))
+vm.destroy()                                    # pool_release underneath
 ```
 
-Or with the CLI: `TERRA_TOKEN=secret terra --socket tcp://server-ip:19099 list`
+Low-level client API is still there when you want it
+(`TerraClient`, `pool_claim`, `vm_create`, ...). CLI equivalent:
+`TERRA_TOKEN=secret terra --socket tcp://server-ip:19099 list`
 
 > TCP is plaintext with a shared token as basic access control — use it
 > on trusted networks only. For untrusted networks, tunnel the unix

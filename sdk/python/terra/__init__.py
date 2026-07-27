@@ -22,7 +22,7 @@ from . import daemon
 from .daemon import session
 from .config import HostConfig
 from . import direct
-from .direct import create, list_vms
+from .direct import create, list_vms, connect
 
 __all__ = [
     "TerraClient",
@@ -36,5 +36,6 @@ __all__ = [
     "HostConfig",
     "direct",
     "create",
+    "connect",
     "list_vms",
 ]

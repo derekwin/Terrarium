@@ -28,6 +28,7 @@ from .vm import Vm
 _lock = threading.Lock()
 _daemon: Daemon | None = None
 _client: TerraClient | None = None
+_mode = "local"  # "local" | "remote"
 _names = itertools.count(1)
 
 
@@ -54,6 +55,24 @@ def configure(config: HostConfig) -> None:
     if _client is not None:
         raise RuntimeError("default session already started — configure() must come first")
     _start(config)
+
+
+def connect(address: str, token: str | None = None) -> None:
+    """Point the default session at a (possibly remote) daemon.
+
+    After this, terra.create()/exec()/destroy() run against that daemon
+    with exactly the same code as local mode — creation is fulfilled by
+    the daemon's warm pool (pool_claim) when layers are given.
+
+        terra.connect("tcp://server:19099", token="secret")
+        vm = terra.create(layers=["python312", "base"])
+    """
+    global _client, _mode
+    with _lock:
+        if _client is not None:
+            raise RuntimeError("default session already started — connect() must come first")
+        _client = TerraClient(address, token=token)
+        _mode = "remote"
 
 
 def client() -> TerraClient:
@@ -88,6 +107,10 @@ def create(
             else images.ensure("alpine.cpio")
         )
     name = name or f"vm-{next(_names)}"
+    if _mode == "remote" and layers:
+        # Remote daemons allocate from the warm pool — same verb.
+        claim = c.pool_claim(layers)
+        return Vm(name=claim["name"], client=c, pid=claim.get("pid"), pooled=True)
     resp = c.vm_create(
         name,
         kernel,

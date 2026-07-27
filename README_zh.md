@@ -150,20 +150,22 @@ vm = create(layers=["python312", "base"])
 sudo env TERRA_TOKEN=secret target/release/engine daemon --tcp 0.0.0.0:19099
 ```
 
-客户端（你）：
+客户端（你）——**代码与本地模式完全一致**，只在开头多一行 connect。
+创建由服务器的预热池兑现，exec 与 destroy（自动归还池）写法不变：
 
 ```python
-from terra.client import TerraClient
+import terra
 
-c = TerraClient("tcp://server-ip:19099", token="secret")
-print(c.vm_list())
+terra.connect("tcp://server-ip:19099", token="secret")
 
-claim = c.pool_claim(["python312", "base"])      # 用服务器的池
-print(c.vm_exec(claim["name"], ["python3", "--version"]))
-c.pool_release(claim["name"])
+vm = terra.create(layers=["python312", "base"])  # 底层走 pool_claim
+print(vm.exec(["python3", "--version"]))
+vm.destroy()                                    # 底层走 pool_release
 ```
 
-或用 CLI：`TERRA_TOKEN=secret terra --socket tcp://server-ip:19099 list`
+需要底层控制时仍有完整 client API（`TerraClient`、`pool_claim`、
+`vm_create` 等）。CLI 等价：
+`TERRA_TOKEN=secret terra --socket tcp://server-ip:19099 list`
 
 > TCP 是明文 + 共享 token 基础访问控制——仅限可信网络。不可信网络
 > 请用 SSH 隧道转发 unix socket：

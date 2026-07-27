@@ -10,10 +10,17 @@ __all__ = ["Vm", "create", "list_vms", "TerraError"]
 class Vm:
     """A running Terrarium VM."""
 
-    def __init__(self, name: str, client: TerraClient, pid: int | None = None):
+    def __init__(
+        self,
+        name: str,
+        client: TerraClient,
+        pid: int | None = None,
+        pooled: bool = False,
+    ):
         self.name = name
         self._client = client
         self._pid = pid
+        self._pooled = pooled
 
     def __repr__(self) -> str:
         return f"Vm(name={self.name!r}, pid={self._pid})"
@@ -50,8 +57,14 @@ class Vm:
         return self._client.vm_kill(self.name)
 
     def destroy(self) -> dict:
-        """Stop and deregister the VM."""
+        """Release the VM: pool_release for pooled VMs, destroy otherwise."""
+        if self._pooled:
+            return self._client.pool_release(self.name)
         return self._client.vm_destroy(self.name)
+
+    def release(self) -> dict:
+        """Alias for destroy() — same unified semantics everywhere."""
+        return self.destroy()
 
     def __enter__(self) -> "Vm":
         return self
