@@ -10,7 +10,6 @@ members = [
     "crates/adapter/openshell",
     "crates/network",
     "crates/protocol",
-    "crates/uds-http",
     "crates/fs",
 ]
 

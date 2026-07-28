@@ -7,6 +7,37 @@ use tokio::net::UnixStream;
 use crate::api::*;
 use crate::error::{ClientError, Result};
 
+// -----------------------------------------------------------------------
+// HTTP/1.1 helpers (inlined from the former uds-http crate)
+// -----------------------------------------------------------------------
+
+/// Parse an HTTP status line like "HTTP/1.1 200 OK\r\n" to extract the status code.
+fn parse_status(status_line: &str) -> std::result::Result<u16, String> {
+    let parts: Vec<&str> = status_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Err(format!("invalid status line: {}", status_line.trim()));
+    }
+    parts[1]
+        .parse()
+        .map_err(|_| format!("invalid status code: {}", parts[1]))
+}
+
+/// Build an HTTP/1.1 request string.
+fn build_request(method: &str, path: &str, body: &str) -> String {
+    format!(
+        "{} {} HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {}",
+        method,
+        path,
+        body.len(),
+        body
+    )
+}
+
 /// Client for Cloud Hypervisor's REST API over a Unix domain socket.
 ///
 /// Communicates via raw HTTP/1.1 requests to the CH API socket.
@@ -50,7 +81,7 @@ impl ChClient {
         let (reader, mut writer) = stream.into_split();
 
         let body_str = body.unwrap_or("");
-        let req = uds_http::build_request(method, path, body_str);
+        let req = build_request(method, path, body_str);
 
         tokio::time::timeout(timeout, writer.write_all(req.as_bytes()))
             .await
@@ -78,7 +109,7 @@ impl ChClient {
         // Read status line
         let mut status_line = String::new();
         buf_reader.read_line(&mut status_line).await?;
-        let status = uds_http::parse_status(&status_line).map_err(ClientError::HttpParse)?;
+        let status = parse_status(&status_line).map_err(ClientError::HttpParse)?;
 
         // Read headers, tracking Content-Length
         let mut content_length: usize = 0;

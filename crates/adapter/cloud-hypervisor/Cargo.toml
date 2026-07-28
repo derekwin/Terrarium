@@ -9,7 +9,6 @@ libc = "0.2"
 adapter-traits = { path = "../traits" }
 terrarium-fs = { path = "../../fs" }
 terrarium-network = { path = "../../network" }
-uds-http = { path = "../../uds-http" }
 async-trait = "0.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
