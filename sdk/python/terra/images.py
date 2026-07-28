@@ -174,12 +174,7 @@ def resolve_rootfs(name_or_path: str) -> Path:
 
 def build_layer(src_dir: str, name: str) -> Path:
     """Pack a directory into an EROFS layer image in the managed layers dir."""
-    mkfs, _fuse = assets.ensure_erofs_tools()
-    out = paths.layers_dir() / f"{name}.erofs"
-    tmp = out.with_suffix(".tmp")
-    subprocess.run(
-        [str(mkfs), "-zlz4", str(tmp), str(Path(src_dir).resolve()) + "/"],
-        check=True, capture_output=True,
-    )
-    tmp.replace(out)
-    return out
+    import terrarium_fs
+
+    layers_dir = str(paths.layers_dir())
+    return Path(terrarium_fs.build_erofs_layer(str(src_dir), name, layers_dir))

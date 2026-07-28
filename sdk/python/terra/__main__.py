@@ -189,23 +189,16 @@ def cmd_rootfs_create(args) -> int:
 
 def _pack_layer_as_rootfs(layer_name: str, out_name: str) -> int:
     """Pack a layer directory into a bootable rootfs cpio image."""
-    import subprocess
+    import terrarium_fs
 
-    layer_dir = Path(os.environ.get("TERRA_LAYER_DIR") or paths.layers_dir()) / layer_name
-    if not layer_dir.is_dir():
-        return _err(f"layer '{layer_name}' not found: {layer_dir}")
-    out = paths.rootfs_dir() / f"{out_name}.cpio.gz"
-    tmp = out.with_suffix(".tmp")
-    r = subprocess.run(
-        f"cd {layer_dir} && find . | cpio -o -H newc --quiet | gzip > {tmp}",
-        shell=True,
-    )
-    if r.returncode:
-        tmp.unlink(missing_ok=True)
-        return r.returncode
-    tmp.replace(out)
-    print(f"rootfs image built: {out}")
-    return 0
+    layer_dir = str(Path(os.environ.get("TERRA_LAYER_DIR") or paths.layers_dir()) / layer_name)
+    output_dir = str(paths.rootfs_dir())
+    try:
+        out_path = terrarium_fs.pack_cpio_rootfs(layer_dir, out_name, output_dir)
+        print(f"rootfs image built: {out_path}")
+        return 0
+    except Exception as e:
+        return _err(str(e))
 
 
 def cmd_image_base(args):
@@ -215,7 +208,7 @@ def cmd_image_base(args):
     "base") so `layers=["base"]` resolves with zero env setup.
     """
     import shutil
-    import subprocess
+    import terrarium_fs
 
     name = args.name
     dest = paths.layers_dir() / name
@@ -225,13 +218,10 @@ def cmd_image_base(args):
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True)
     cpio = images.ensure("alpine.cpio")
-    r = subprocess.run(
-        f"zcat {cpio} | cpio -idm --quiet",
-        shell=True,
-        cwd=dest,
-    )
-    if r.returncode:
-        return r.returncode
+    try:
+        terrarium_fs.extract_cpio_layer(str(cpio), str(dest))
+    except Exception as e:
+        return _err(str(e))
     print(f"base layer ready: {dest}")
     return 0
 
@@ -242,15 +232,14 @@ _SYSTEM_LAYER_NAMES = {"base", "ubuntu", ".system"}
 
 
 def cmd_image_layers(args):
+    import terrarium_fs
+
     layer_dir = os.environ.get("TERRA_LAYER_DIR") or str(paths.layers_dir())
     try:
-        for e in sorted(Path(layer_dir).iterdir()):
-            name = e.name
-            if name in _SYSTEM_LAYER_NAMES:
-                continue
-            print(name[:-6] if name.endswith(".erofs") else name)
+        for name in terrarium_fs.list_layers(layer_dir):
+            print(name)
         return 0
-    except OSError as e:
+    except Exception as e:
         return _err(f"read {layer_dir}: {e}")
 
 
@@ -489,11 +478,15 @@ def cmd_rootfs_remove(args):
 
 
 def cmd_layer_remove(args):
-    layer_dir = Path(os.environ.get("TERRA_LAYER_DIR") or paths.layers_dir())
-    for cand in (layer_dir / args.name, layer_dir / f"{args.name}.erofs"):
-        if cand.exists():
-            return _remove_path(cand)
-    return _err(f"layer '{args.name}' not found under {layer_dir}")
+    import terrarium_fs
+
+    layer_dir = os.environ.get("TERRA_LAYER_DIR") or str(paths.layers_dir())
+    try:
+        terrarium_fs.remove_layer(args.name, layer_dir)
+        print(f"removed layer '{args.name}'")
+        return 0
+    except Exception as e:
+        return _err(str(e))
 
 
 def cmd_layer_create(args):
