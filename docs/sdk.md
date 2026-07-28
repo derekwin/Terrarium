@@ -20,7 +20,7 @@ import terra
 # 1) 高层沙箱（推荐）：自动起 daemon，自动回收
 from terra.sandbox import Sandbox
 
-with Sandbox(template="py312", network=True) as sb:
+with Sandbox(tenant="my-org", template="py312", network=True) as sb:
     result = sb.exec(["python3", "-c", "print(2+2)"])
     print(result.stdout)          # ExecResult(exit_code=0, stdout="4\n", ...)
 
@@ -39,22 +39,47 @@ vm.destroy()                                       # 底层走 pool_release
 
 ### `terra.Sandbox`
 
-统一的沙箱抽象，自动创建 VM、管理生命周期。
+统一的沙箱抽象，**租户优先模型**：VM 是租户隔离边界，Sandbox 是 VM 内的会话。
+同一租户下的多个 Sandbox 共享一个 VM，各自拥有独立工作目录。
+
+#### 租户优先架构
+
+```
+租户 "research-team" 的 VM
+ ┌────────────────────────────────────┐
+ │  guest-proxy (vsock)              │
+ │  virtiofs: layers + per-sb wd     │
+ │  ┌──────────┐ ┌──────────┐        │
+ │  │ sb-a3f2  │ │ sb-b7d1  │  ...   │
+ │  │ /workdir │ │ /workdir │        │
+ │  └──────────┘ └──────────┘        │
+ └────────────────────────────────────┘
+
+租户 "production" 的 VM —— 完全独立的 KVM 隔离
+```
 
 ```python
 from terra.sandbox import Sandbox
 from terra.exceptions import ExecError, SandboxTimeoutError
 
-# 从模板创建（推荐）
-sb = Sandbox(template="py312", network=True)
+# 从模板创建（推荐）——首次为租户创建 VM，后续复用
+sb = Sandbox(tenant="my-org", template="py312", network=True)
 
 # 从显式 layers 创建
-sb = Sandbox(layers=["python312", "base"], kernel="k612", cpu=2, memory_mb=512)
+sb = Sandbox(tenant="my-org", layers=["python312", "base"],
+             kernel="k612", cpu=2, memory_mb=512)
 
 # 属性
-print(sb.id)        # 唯一标识（sandbox-xxxxxxxx）
+print(sb.id)        # 完整标识："tenant-my-org/sb-a3f2"（租户/会话）
+print(sb.vm)        # VM 名称："tenant-my-org"
 print(sb.status)    # "running" / "stopped" / "paused"
 print(sb.backend)   # "ch" (Cloud Hypervisor)
+
+# 多 Sandbox 共享同一租户 VM
+sb1 = Sandbox(tenant="research-team", template="py312")
+sb2 = Sandbox(tenant="research-team")   # 复用同一 VM，新工作目录
+sb3 = Sandbox(tenant="research-team")
+# sb1、sb2、sb3 在同一个 VM 内，各自拥有独立的 /workdir
 
 # exec — blocking 执行，返回 ExecResult
 result = sb.exec(["python3", "-c", "print(1+1)"])
@@ -84,12 +109,15 @@ sb.resize(cpu=4, memory_mb=1024)
 metrics = sb.metrics()   # {cpu_count: 4, memory_mb: 1024}
 
 # 生命周期
-sb.kill()                # 停止并注销（幂等）
+sb.kill()                # 移除会话工作目录，VM 保留供同租户其余 Sandbox 使用
+Sandbox.destroy_tenant("my-org")  # 销毁租户 VM 及全部会话
 
 # Context manager — 自动 kill
-with Sandbox(template="py312") as sb:
+with Sandbox(tenant="my-org", template="py312") as sb:
     print(sb.exec(["uname", "-a"]).stdout)
 ```
+
+> **注意：** `sb.kill()` 仅移除当前会话的工作目录，不会销毁 VM（同租户的其他 Sandbox 仍需使用）。要完全销毁租户 VM，使用 `Sandbox.destroy_tenant("tenant-name")`。
 
 ### `terra.AsyncSandbox`
 
@@ -116,7 +144,8 @@ metrics = await sb.metrics()
 
 ### `terra.Pool`
 
-预热池管理 — 预先启动空闲 VM，claim 时热插 layer 即可用。
+预热池管理 — 预先启动空闲 VM，acquire 时返回池 VM 内的 Sandbox 会话。
+同一池的多次 acquire 共享同一 VM，各自拥有独立工作目录。
 
 ```python
 from terra.pool import Pool
@@ -131,13 +160,14 @@ pool = Pool(layers=["python312", "base"], size=2, net=True)
 # 查询状态
 st = pool.status()  # {"idle": 3, "claimed": 0, "total": 3}
 
-# 认领一个就绪沙箱
-sb = pool.acquire()         # → Sandbox（已然启动，layer 已就绪）
-sb.exec(["python3", "-c", "print(42)"])
+# 认领就绪沙箱——返回 Sandbox（已启动，层已就绪）
+sb1 = pool.acquire()         # → Sandbox（在共享池 VM 中）
+sb2 = pool.acquire()         # → 另一个 Sandbox（同一 VM，不同工作目录）
+sb1.exec(["python3", "-c", "print(42)"])
 
 # 归还 / 注销
-pool.release(sb)            # 归还池，可再次认领
-sb.kill()                   # 永久注销
+pool.release(sb1)            # 归还池，可再次认领
+sb2.kill()                   # 永久注销会话
 
 # 动态缩放
 pool.grow(2)                # 追加 2 个 VM
@@ -247,7 +277,7 @@ SDK 用户通常无需手动管理 daemon——`Sandbox` / `Pool` 在首次使�
 
 | 命令组 | 子命令 | 说明 |
 |---|---|---|
-| `sandbox` | `create`, `ls`, `info`, `exec`, `cp`, `resize`, `metrics`, `kill` | 高层沙箱操作（推荐入口） |
+| `sandbox` | `create`, `ls`, `info`, `exec`, `cp`, `resize`, `metrics`, `kill`, `destroy-tenant` | 高层沙箱操作（推荐入口，租户优先） |
 | `template` | `ls`, `create`, `info`, `remove` | 命名模板管理 |
 | `image` | `build kernel`, `build rootfs`, `build initramfs`, `ls`, `info`, `remove` | guest 镜像管理（内核/rootfs/initramfs 合并） |
 | `layer` | `ls`, `create`, `info`, `remove` | 文件系统层管理 |
@@ -283,15 +313,16 @@ terra image build rootfs -n alpine                           # 构建 alpine bas
 
 # 2) 高层沙箱（推荐日常使用）
 terra template create -n py312 --kernel k612 --rootfs alpine --layers python312,base
-terra sandbox create --template py312 --net                 # 创建沙箱
-terra sandbox ls                                            # 列出沙箱
-terra sandbox exec <id> -- python3 --version                # 执行命令
-terra sandbox metrics <id>                                  # 查看资源
-terra sandbox kill <id>                                     # 销毁沙箱
+terra sandbox create --tenant research-team --template py312 --net    # 租户优先沙箱
+terra sandbox ls                                                      # 列出沙箱
+terra sandbox exec tenant-research-team/sb-a3f2 -- python3 --version  # 执行命令
+terra sandbox metrics tenant-research-team/sb-a3f2                    # 查看资源
+terra sandbox kill tenant-research-team/sb-a3f2                       # 终止会话（保留 VM）
+terra sandbox destroy-tenant research-team                            # 销毁 VM + 全部会话
 
 # 3) 预热池（批量任务）
 terra pool create -n mypool --size 3                        # 创建 3 个预热 VM 的池
-terra pool claim --template py312                           # 认领一个就绪沙箱
+terra pool claim --template py312                           # 认领就绪 Sandbox
 terra pool release <vm-name>                                # 归还池
 terra pool scale --size 5                                   # 缩放池大小
 
@@ -311,18 +342,19 @@ terra daemon stop                                           # 优雅停止
 
 ### 命令参考
 
-**sandbox** — 高层沙箱
+**sandbox** — 高层沙箱（租户优先）
 
 ```
-terra sandbox create --template <name> [--kernel <var>] [--cpu N] [--memory MB]
+terra sandbox create --tenant <name> --template <name> [--kernel <var>] [--cpu N] [--memory MB]
                      [--net] [--env KEY=VALUE] [--timeout SEC] [--name <id>]
 terra sandbox ls
-terra sandbox info <id>
+terra sandbox info <id>          # id 格式：tenant-<tenant>/sb-<hex>
 terra sandbox exec <id> [--cwd PATH] [--env KEY=VALUE] [--timeout SEC] -- COMMAND...
 terra sandbox cp <src> <dst>    # 本地路径 或 <sandbox-id>:/path
 terra sandbox resize <id> --cpu N --memory MB
 terra sandbox metrics <id>
-terra sandbox kill <id>
+terra sandbox kill <id>          # 终止会话（不销毁 VM）
+terra sandbox destroy-tenant <tenant-name>  # 销毁租户 VM 及全部会话
 ```
 
 **template** — 命名模板
