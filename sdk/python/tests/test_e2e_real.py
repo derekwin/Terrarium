@@ -50,6 +50,59 @@ ENGINE = REPO / "target/release/engine"
 SOCKET = "/tmp/terra-sdk-e2e.sock"
 
 
+def _build_irfs_virtiofs() -> None:
+    """Build virtiofs initramfs via terrarium_fs (replaces shell script)."""
+    import tempfile
+
+    import terrarium_fs
+
+    src = _irfs_src_rootfs()
+    init = str(REPO / "images" / "rootfs" / "init-virtiofs")
+    out = str(IRFS_VIRTIOFS)
+    out_path = Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    terrarium_fs.build_initramfs_virtiofs(src, init, out)
+
+
+def _build_irfs_agent() -> None:
+    """Build agent initramfs via terrarium_fs (replaces shell script)."""
+    import terrarium_fs
+
+    src = _irfs_src_rootfs()
+    gp = REPO / "target" / "x86_64-unknown-linux-musl" / "release" / "guest-proxy"
+    if not gp.exists():
+        subprocess.run(
+            [
+                "cargo", "build", "--release",
+                "--target", "x86_64-unknown-linux-musl",
+                "-p", "guest-proxy",
+            ],
+            cwd=REPO, check=True,
+        )
+    init = str(REPO / "images" / "rootfs" / "init-agent")
+    out = str(REPO / "target" / "guest" / "initramfs-agent.cpio.gz")
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    terrarium_fs.build_initramfs_agent(src, str(gp), init, out)
+
+
+def _irfs_src_rootfs() -> str:
+    """Return a directory with bin/busybox and musl libs."""
+    import tempfile
+
+    rootfs = REPO / "target" / "guest" / "rootfs"
+    if (rootfs / "bin" / "busybox").exists():
+        return str(rootfs)
+
+    # Extract from alpine.cpio
+    extract_dir = tempfile.mkdtemp(prefix="terrarium-src-")
+    cmd = (
+        f"zcat '{INITRAMFS}' 2>/dev/null || cat '{INITRAMFS}'"
+        f" | (cd '{extract_dir}' && cpio -idm --quiet)"
+    )
+    subprocess.run(cmd, shell=True, check=True)
+    return extract_dir
+
+
 def _find_virtiofsd() -> str | None:
     for c in (
         os.environ.get("TERRA_VIRTIOFSD"),
@@ -193,10 +246,7 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
         marker.mkdir(parents=True)
         (marker / "hello.py").write_text('print("hello from marker layer")\n')
         if not IRFS_VIRTIOFS.exists():
-            subprocess.run(
-                ["bash", "images/build-initramfs-virtiofs.sh"],
-                cwd=REPO, check=True,
-            )
+            _build_irfs_virtiofs()
 
     if Path(SOCKET).exists():
         Path(SOCKET).unlink()
@@ -446,7 +496,7 @@ def test_warm_attach_detach() -> None:
         return
     agent_irfs = REPO / "target/guest/initramfs-agent.cpio.gz"
     if not agent_irfs.exists():
-        subprocess.run(["bash", "images/build-initramfs-agent.sh"], cwd=REPO, check=True)
+        _build_irfs_agent()
     vm = create(
         "sdk-w1", str(KERNEL),
         initramfs=str(agent_irfs),
@@ -480,7 +530,7 @@ def test_warm_pool() -> None:
         return
     agent_irfs = REPO / "target/guest/initramfs-agent.cpio.gz"
     if not agent_irfs.exists():
-        subprocess.run(["bash", "images/build-initramfs-agent.sh"], cwd=REPO, check=True)
+        _build_irfs_agent()
 
     created = client.pool_create(2, kernel=str(KERNEL))
     assert created["count"] == 2, created

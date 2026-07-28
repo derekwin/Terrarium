@@ -14,7 +14,9 @@ pub mod erofs;
 pub mod layer;
 
 // Re-export the public API for convenience.
-pub use cpio::{extract_cpio_layer, pack_cpio_rootfs};
+pub use cpio::{
+    build_initramfs_agent, build_initramfs_virtiofs, extract_cpio_layer, pack_cpio_rootfs,
+};
 pub use erofs::{is_mounted, mount_erofs};
 pub use layer::{
     build_erofs_layer, list_layers, remove_layer, resolve_layer, validate_layer_name, LayerConfig,
@@ -70,6 +72,38 @@ fn extract_cpio_layer_py(cpio_path: String, output_dir: String) -> PyResult<()> 
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
+/// Build a warm-pool agent initramfs (FS-M4).
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+#[pyo3(name = "build_initramfs_agent")]
+fn build_initramfs_agent_py(
+    src_rootfs_dir: String,
+    guest_proxy_binary: String,
+    init_template: String,
+    output: String,
+) -> PyResult<String> {
+    crate::cpio::build_initramfs_agent(
+        &src_rootfs_dir,
+        &guest_proxy_binary,
+        &init_template,
+        &output,
+    )
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// Build a virtiofs bootstrap initramfs (FS-M1).
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+#[pyo3(name = "build_initramfs_virtiofs")]
+fn build_initramfs_virtiofs_py(
+    src_rootfs_dir: String,
+    init_template: String,
+    output: String,
+) -> PyResult<String> {
+    crate::cpio::build_initramfs_virtiofs(&src_rootfs_dir, &init_template, &output)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
 /// Resolve a layer name to a usable lowerdir path.
 #[cfg(feature = "pyo3")]
 #[pyfunction]
@@ -105,6 +139,8 @@ fn terrarium_fs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(remove_layer_py, m)?)?;
     m.add_function(wrap_pyfunction!(pack_cpio_rootfs_py, m)?)?;
     m.add_function(wrap_pyfunction!(extract_cpio_layer_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_initramfs_agent_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_initramfs_virtiofs_py, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_layer_py, m)?)?;
     m.add_function(wrap_pyfunction!(validate_layer_name_py, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

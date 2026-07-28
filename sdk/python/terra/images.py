@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -61,7 +62,10 @@ def ensure(name: str) -> Path:
             builder = repo / _BUILDERS[name]
             if not builder.exists():
                 raise ImageError(f"builder missing: {builder}")
-            subprocess.run(["bash", str(builder)], cwd=repo, check=True)
+            if name in ("initramfs-virtiofs.cpio.gz", "initramfs-agent.cpio.gz"):
+                _build_initramfs_via_rust(repo, name, built)
+            else:
+                subprocess.run(["bash", str(builder)], cwd=repo, check=True)
         # Refresh the managed copy when the repo image is newer —
         # stale images silently miss later fixes (learned the hard way).
         if not managed.exists() or built.stat().st_mtime > managed.stat().st_mtime:
@@ -170,6 +174,65 @@ def resolve_rootfs(name_or_path: str) -> Path:
         f"rootfs image {name_or_path!r} not found under {paths.rootfs_dir()} "
         f"(see `terra rootfs ls`)"
     )
+
+
+def _build_initramfs_via_rust(repo: Path, name: str, output: Path) -> None:
+    """Build an initramfs using terrarium_fs (replaces shell scripts)."""
+    import terrarium_fs
+
+    src_rootfs = _ensure_src_rootfs(repo)
+
+    if name == "initramfs-agent.cpio.gz":
+        gp = _ensure_guest_proxy(repo)
+        init = str(repo / "images" / "rootfs" / "init-agent")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        terrarium_fs.build_initramfs_agent(src_rootfs, gp, init, str(output))
+    elif name == "initramfs-virtiofs.cpio.gz":
+        init = str(repo / "images" / "rootfs" / "init-virtiofs")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        terrarium_fs.build_initramfs_virtiofs(src_rootfs, init, str(output))
+
+
+def _ensure_src_rootfs(repo: Path) -> str:
+    """Return a directory with bin/busybox and musl libs.
+
+    Uses target/guest/rootfs if it exists; otherwise extracts alpine.cpio
+    to a temp dir.
+    """
+    rootfs_dir = repo / "target" / "guest" / "rootfs"
+    if (rootfs_dir / "bin" / "busybox").exists():
+        return str(rootfs_dir)
+
+    alpine = repo / "target" / "guest" / "alpine.cpio"
+    if not alpine.exists():
+        raise ImageError(
+            f"no rootfs source: need {rootfs_dir} or {alpine} "
+            f"(run build-rootfs.sh first)"
+        )
+
+    extract_dir = tempfile.mkdtemp(prefix="terrarium-src-")
+    # Extract alpine.cpio — may be gzipped or raw.
+    cmd = (
+        f"zcat '{alpine}' 2>/dev/null || cat '{alpine}'"
+        f" | (cd '{extract_dir}' && cpio -idm --quiet)"
+    )
+    subprocess.run(cmd, shell=True, check=True)
+    return extract_dir
+
+
+def _ensure_guest_proxy(repo: Path) -> str:
+    """Return the guest-proxy binary path; build it if missing."""
+    gp = repo / "target" / "x86_64-unknown-linux-musl" / "release" / "guest-proxy"
+    if not gp.exists():
+        subprocess.run(
+            [
+                "cargo", "build", "--release",
+                "--target", "x86_64-unknown-linux-musl",
+                "-p", "guest-proxy",
+            ],
+            cwd=repo, check=True,
+        )
+    return str(gp)
 
 
 def build_layer(src_dir: str, name: str) -> Path:

@@ -258,14 +258,104 @@ def _run_builder(script: str) -> str | None:
 _BUILDER_SCRIPTS = {
     "kernel": "images/build-kernel.sh",
     "rootfs": "images/build-rootfs.sh",
-    "initramfs": "images/build-initramfs-virtiofs.sh",
-    "agent-initramfs": "images/build-initramfs-agent.sh",
 }
+
+
+def _cmd_image_build_initramfs(args) -> int:
+    """Build initramfs via terrarium_fs (Rust), replacing shell scripts."""
+    import shutil
+    import tempfile
+
+    import terrarium_fs
+
+    name = getattr(args, "name", None)
+    repo = Path.cwd()
+    if not (repo / "images" / "build.sh").exists():
+        return _err("must be run from the Terrarium repo root")
+
+    src_rootfs = _ensure_initramfs_src_rootfs(repo)
+    if args.what == "agent-initramfs":
+        init_template = repo / "images" / "rootfs" / "init-agent"
+        gp = _ensure_initramfs_guest_proxy(repo)
+        output_name = "initramfs-agent.cpio.gz"
+        build_fn = lambda out: terrarium_fs.build_initramfs_agent(
+            src_rootfs, gp, str(init_template), out,
+        )
+    else:  # initramfs (virtiofs)
+        init_template = repo / "images" / "rootfs" / "init-virtiofs"
+        output_name = "initramfs-virtiofs.cpio.gz"
+        build_fn = lambda out: terrarium_fs.build_initramfs_virtiofs(
+            src_rootfs, str(init_template), out,
+        )
+
+    if name:
+        # Named variant: build into temp dir, then move to managed images.
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / output_name
+            build_fn(str(out))
+            dest = paths.rootfs_dir() / name
+            if dest.exists():
+                shutil.rmtree(dest)
+            dest.mkdir(parents=True)
+            shutil.move(str(out), str(dest / output_name))
+            print(f"built: {dest / output_name}")
+            return 0
+
+    out = repo / "target" / "guest" / output_name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    build_fn(str(out))
+    return 0
+
+
+def _ensure_initramfs_src_rootfs(repo: Path) -> str:
+    """Return a directory with bin/busybox and musl libs."""
+    import subprocess
+
+    rootfs_dir = repo / "target" / "guest" / "rootfs"
+    if (rootfs_dir / "bin" / "busybox").exists():
+        return str(rootfs_dir)
+
+    alpine = repo / "target" / "guest" / "alpine.cpio"
+    if not alpine.exists():
+        raise FileNotFoundError(
+            f"no rootfs source: need {rootfs_dir} or {alpine} "
+            f"(run build-rootfs.sh first)"
+        )
+
+    extract_dir = tempfile.mkdtemp(prefix="terrarium-src-")
+    cmd = (
+        f"zcat '{alpine}' 2>/dev/null || cat '{alpine}'"
+        f" | (cd '{extract_dir}' && cpio -idm --quiet)"
+    )
+    subprocess.run(cmd, shell=True, check=True)
+    return extract_dir
+
+
+def _ensure_initramfs_guest_proxy(repo: Path) -> str:
+    """Return the guest-proxy binary path; build it if missing."""
+    import subprocess
+
+    gp = repo / "target" / "x86_64-unknown-linux-musl" / "release" / "guest-proxy"
+    if not gp.exists():
+        subprocess.run(
+            [
+                "cargo", "build", "--release",
+                "--target", "x86_64-unknown-linux-musl",
+                "-p", "guest-proxy",
+            ],
+            cwd=repo, check=True,
+        )
+    return str(gp)
 
 
 def cmd_image_build(args):
     if getattr(args, "from_layer", None):
         return _pack_layer_as_rootfs(args.from_layer, args.name)
+
+    # Initramfs builds use terrarium_fs (Rust), not shell scripts.
+    if args.what in ("initramfs", "agent-initramfs"):
+        return _cmd_image_build_initramfs(args)
+
     script = _BUILDER_SCRIPTS[args.what]
     if not Path(script).exists():
         return _err(f"{script} not found — run from the Terrarium repo root")
