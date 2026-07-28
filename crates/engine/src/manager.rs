@@ -31,18 +31,26 @@ pub struct VmManager {
     pool: Vec<PoolSlot>,
     /// Next pool VM id.
     pool_next_id: u32,
+    /// Directory for snapshot artifacts (default: "/tmp").
+    snapshot_dir: String,
 }
 
 impl VmManager {
-    /// Create a new VM manager with the given adapter.
-    pub fn new(adapter: Arc<dyn VmAdapter>) -> Self {
+    /// Create a new VM manager with the given adapter and snapshot directory.
+    pub fn new(adapter: Arc<dyn VmAdapter>, snapshot_dir: String) -> Self {
         Self {
             adapter,
             vms: HashMap::new(),
             net_vms: std::collections::HashSet::new(),
             pool: Vec::new(),
             pool_next_id: 0,
+            snapshot_dir,
         }
+    }
+
+    /// Return the directory used for snapshot artifacts.
+    pub fn snapshot_dir(&self) -> &str {
+        &self.snapshot_dir
     }
 
     /// Whether a VM was created with networking enabled.

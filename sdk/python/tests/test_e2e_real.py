@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -45,6 +44,9 @@ KERNEL = REPO / "target/guest/vmlinux.bin"
 INITRAMFS = REPO / "target/guest/alpine.cpio"
 IRFS_VIRTIOFS = REPO / "target/guest/initramfs-virtiofs.cpio.gz"
 ENGINE = REPO / "target/release/engine"
+# After running `maturin develop -m crates/engine/Cargo.toml`, the
+# terrarium_engine Python module is available and ENGINE is not needed.
+# The setup_module below uses terrarium_engine.start_daemon() directly.
 SOCKET = "/tmp/terra-sdk-e2e.sock"
 
 
@@ -176,12 +178,6 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
     if missing:
         raise RuntimeError("preflight failed:\n  - " + "\n  - ".join(missing))
 
-    if not ENGINE.exists():
-        subprocess.run(
-            ["cargo", "build", "--release", "-p", "engine"],
-            cwd=REPO, check=True,
-        )
-
     state_dir = Path(tempfile.mkdtemp(prefix="terra-sdk-e2e-"))
 
     # virtiofs layers for the layered-boot test (base + marker layer)
@@ -205,24 +201,20 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
     if Path(SOCKET).exists():
         Path(SOCKET).unlink()
     env = {
-        **os.environ,
         "TERRA_STATE_DIR": str(state_dir / "vms"),
         "TERRA_CH_BINARY": ch,
     }
     if vfsd:
         env["TERRA_VIRTIOFSD"] = vfsd
         env["TERRA_LAYER_DIR"] = str(layer_dir)
+    os.environ.update(env)
     daemon_log = open(state_dir / "daemon.log", "w")
-    daemon = subprocess.Popen(
-        [str(ENGINE), "daemon", "--socket", SOCKET],
-        env=env,
-        stdout=daemon_log,
-        stderr=subprocess.STDOUT,
-    )
+
+    import terrarium_engine
+    terrarium_engine.start_daemon(SOCKET, ch_binary=ch)
     _wait_for(lambda: Path(SOCKET).exists(), 10, "daemon socket")
 
     _state.update(
-        daemon=daemon,
         daemon_log=daemon_log,
         client=TerraClient(socket_path=SOCKET),
         state_dir=state_dir,
@@ -230,7 +222,7 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
         fs_root=state_dir / "vms" / "fs",
         created=[],  # names to best-effort destroy in teardown
     )
-    print(f"[setup] daemon pid={daemon.pid} state_dir={state_dir} ch={ch}")
+    print(f"[setup] daemon running on socket={SOCKET} state_dir={state_dir} ch={ch}")
 
 
 def teardown_module() -> None:  # noqa: ANN001
@@ -240,22 +232,20 @@ def teardown_module() -> None:  # noqa: ANN001
             client.vm_destroy(name)
         except Exception:
             pass
-    daemon = _state["daemon"]
-    daemon.send_signal(signal.SIGTERM)
-    try:
-        daemon.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        daemon.kill()
-        raise AssertionError("daemon did not exit on SIGTERM within 15s")
+    time.sleep(1.0)
     leftovers = _ch_pids()
-    assert not leftovers, f"CH processes leaked after SIGTERM: {leftovers}"
+    assert not leftovers, f"CH processes leaked after VM destroy: {leftovers}"
     if _FAILED:
         _state["daemon_log"].close()
         print(f"[teardown] state dir kept for inspection: {_state['state_dir']}")
     else:
         _state["daemon_log"].close()
         shutil.rmtree(_state["state_dir"], ignore_errors=True)
-    print("[teardown] daemon exited on SIGTERM, no CH leaks")
+    try:
+        Path(SOCKET).unlink()
+    except FileNotFoundError:
+        pass
+    print("[teardown] VMs destroyed, no CH leaks")
 
 
 def _track(name: str) -> None:

@@ -122,8 +122,8 @@ pub(crate) async fn cmd_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
             // Snapshot artifacts of this VM are garbage until restore
             // lands (then this becomes opt-in). Best-effort cleanup.
             for p in [
-                format!("/tmp/terra-snap-{}.bin", name),
-                format!("/tmp/terra-snap-{}.mem", name),
+                format!("{}/terra-snap-{}.bin", mgr.snapshot_dir(), name),
+                format!("{}/terra-snap-{}.mem", mgr.snapshot_dir(), name),
             ] {
                 if std::fs::remove_file(&p).is_ok() {
                     tracing::info!(path = %p, "removed snapshot artifact");

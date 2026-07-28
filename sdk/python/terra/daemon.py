@@ -7,15 +7,18 @@
         client = TerraClient(socket_path=d.socket)
         ...
 
-Everything (engine binary, CH, virtiofsd, state/layer dirs, socket) is
-resolved and injected automatically — zero environment variables needed.
+The engine daemon runs in-process via PyO3 FFI (terrarium_engine Rust
+crate). No subprocess spawning. Requires ``maturin develop`` to have
+been run first in the crate workspace.
+
+Everything (CH, virtiofsd, state/layer dirs, socket) is resolved and
+injected automatically — zero environment variables needed.
 """
 
 from __future__ import annotations
 
 import os
-import signal
-import subprocess
+import socket as _socket
 import time
 from pathlib import Path
 
@@ -28,7 +31,7 @@ class DaemonError(RuntimeError):
 
 
 class Daemon:
-    """Manage an engine daemon process with a fully managed environment."""
+    """Manage an engine daemon via in-process Rust FFI (PyO3)."""
 
     def __init__(
         self,
@@ -52,67 +55,57 @@ class Daemon:
         self._layer_dir = layer_dir or self.config.layer_dir
         self._state_dir = state_dir or self.config.state_dir
         self._log = log
-        self._proc: subprocess.Popen | None = None
         self._log_file = None
 
-    def start(self, timeout: float = 15.0) -> "Daemon":
-        engine = assets.ensure_engine()
-        env = {
-            **os.environ,
+    def start(self, timeout: float = 5.0) -> "Daemon":
+        ch_binary = self._ch or str(assets.ensure_ch())
+        env_updates = {
             **self.config.env(),
             "TERRA_STATE_DIR": self._state_dir or str(paths.state_dir()),
-            "TERRA_CH_BINARY": self._ch or str(assets.ensure_ch()),
+            "TERRA_CH_BINARY": ch_binary,
             "TERRA_LAYER_DIR": self._layer_dir or str(paths.layers_dir()),
         }
         vfsd = self._vfsd or str(assets.ensure_virtiofsd())
-        env["TERRA_VIRTIOFSD"] = vfsd
+        env_updates["TERRA_VIRTIOFSD"] = vfsd
         if self._kernel:
-            env["TERRA_KERNEL"] = self._kernel
+            env_updates["TERRA_KERNEL"] = self._kernel
+        os.environ.update(env_updates)
 
         if Path(self.socket).exists():
             try:
                 Path(self.socket).unlink()
             except PermissionError:
-                # Someone else's (e.g. root's) daemon owns this socket —
-                # use a private one instead of failing.
                 self.socket = str(paths.run_dir() / f"terra-{os.getpid()}.sock")
         if self._log:
             self._log_file = open(self._log, "w")
-            out, err = self._log_file, subprocess.STDOUT
-        else:
-            out = err = subprocess.DEVNULL
-        args = [str(engine), "daemon", "--socket", self.socket]
-        if self.tcp:
-            args += ["--tcp", self.tcp]
-        self._proc = subprocess.Popen(
-            args,
-            env=env, stdout=out, stderr=err,
-        )
+
+        import terrarium_engine
+
+        terrarium_engine.start_daemon(self.socket, ch_binary=ch_binary)
+
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if Path(self.socket).exists():
+            try:
+                s = _socket.socket(_socket.AF_UNIX)
+                s.connect(self.socket)
+                s.close()
                 return self
-            if self._proc.poll() is not None:
-                raise DaemonError(f"engine daemon exited early (rc={self._proc.returncode})")
-            time.sleep(0.2)
+            except (ConnectionRefusedError, FileNotFoundError):
+                time.sleep(0.1)
         raise DaemonError(f"daemon socket did not appear within {timeout}s")
 
     def stop(self, timeout: float = 15.0) -> None:
-        if self._proc is None:
-            return
-        self._proc.send_signal(signal.SIGTERM)
         try:
-            self._proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self._proc.kill()
-            self._proc.wait(timeout=5)
-        self._proc = None
+            s = _socket.socket(_socket.AF_UNIX)
+            s.settimeout(5)
+            s.connect(self.socket)
+            s.sendall(b'{"command":"shutdown","name":"all"}\n')
+            s.close()
+        except Exception:
+            pass
         if self._log_file:
             self._log_file.close()
-
-    @property
-    def pid(self) -> int | None:
-        return self._proc.pid if self._proc else None
+            self._log_file = None
 
     def __enter__(self) -> "Daemon":
         return self.start()
@@ -133,8 +126,8 @@ def session(**daemon_kwargs):
         with terra.session() as c:
             print(c.vm_exec(...))
 
-    The daemon starts on entry and is torn down (SIGTERM, VMs cleaned)
-    on exit. Keyword args are forwarded to Daemon().
+    The daemon starts on entry and is torn down on exit. Keyword args
+    are forwarded to Daemon().
     """
     with Daemon(**daemon_kwargs) as d:
         yield TerraClient(socket_path=d.socket)

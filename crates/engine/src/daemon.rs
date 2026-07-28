@@ -38,7 +38,7 @@ pub async fn run(
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!(socket = %socket_path, "Daemon listening");
 
-    let manager = Arc::new(Mutex::new(VmManager::new(adapter)));
+    let manager = Arc::new(Mutex::new(VmManager::new(adapter, "/tmp".to_string())));
     let token: Option<String> = std::env::var("TERRA_TOKEN").ok().filter(|s| !s.is_empty());
 
     // Handle SIGTERM/SIGINT for graceful shutdown.

@@ -136,11 +136,13 @@ def cmd_net_down(args):
 # image commands (host-side)
 # ---------------------------------------------------------------------------
 def cmd_daemon_start(args):
-    """Start a daemon as a detached background process (same Python, no sudo)."""
+    """Start a daemon as a detached background process.
+
+    Spawns a Python subprocess that calls Daemon.start(), which runs
+    the engine in a Rust background thread via PyO3 FFI.
+    """
     import subprocess
 
-    # Single instance: a second daemon would unlink and steal the socket,
-    # leaving the first one alive but unreachable (silent split-brain).
     existing = _daemon_pids()
     if existing:
         print(f"daemon already running (pid={existing[0]}) — stop it first: terra daemon stop")
@@ -534,7 +536,16 @@ def cmd_daemon_ls(args):
 
 
 def _daemon_pids() -> list[int]:
-    """Live engine pids (zombies excluded) — any start method."""
+    """Live daemon pids (zombies excluded) — any start method."""
+    pidfile = _daemon_pidfile()
+    if pidfile.exists():
+        try:
+            pid = int(pidfile.read_text().strip())
+            stat = Path(f"/proc/{pid}/stat").read_text().split()[2]
+            if stat != "Z":
+                return [pid]
+        except (OSError, ValueError):
+            pass
     import subprocess
 
     out = subprocess.run(["pgrep", "-x", "engine"], capture_output=True, text=True)
