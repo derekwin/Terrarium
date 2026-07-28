@@ -25,6 +25,10 @@ from . import direct
 from .direct import create, list_vms, connect
 from . import sandbox
 from .sandbox import Sandbox
+from . import async_sandbox
+from .async_sandbox import AsyncSandbox
+from . import pool
+from .pool import Pool
 
 __all__ = [
     "TerraClient",
@@ -39,6 +43,10 @@ __all__ = [
     "direct",
     "sandbox",
     "Sandbox",
+    "async_sandbox",
+    "AsyncSandbox",
+    "pool",
+    "Pool",
     "create",
     "connect",
     "list_vms",
