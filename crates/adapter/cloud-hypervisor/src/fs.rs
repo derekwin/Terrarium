@@ -7,9 +7,9 @@ use std::collections::HashSet;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::time::{sleep, Instant};
 use terrarium_fs::layer::resolve_layer;
 use terrarium_fs::LayerConfig;
+use tokio::time::{sleep, Instant};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -212,5 +212,3 @@ pub fn teardown_fs(fs: &mut FsStack) {
         }
     }
 }
-
-

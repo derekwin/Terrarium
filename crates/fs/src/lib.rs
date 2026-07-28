@@ -4,6 +4,10 @@
 //! pack/extract. Zero dependency on the CH adapter or engine crate.
 //!
 //! Also exposed as a Python extension module via PyO3 (maturin).
+// The #[pyfunction] proc macro expansion triggers this lint on the
+// generated wrapper; function-level #[allow] does not propagate through
+// proc macros, so a crate-level attribute is needed.
+#![allow(clippy::useless_conversion)]
 
 pub mod cpio;
 pub mod erofs;
@@ -17,22 +21,92 @@ pub use layer::{
 };
 
 // ---------------------------------------------------------------------------
-// PyO3 module stub
+// PyO3 bindings — built with `maturin develop --features pyo3`
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "pyo3")]
-use pyo3::types::PyModuleMethods;
+use pyo3::prelude::*;
+
+/// Build an EROFS layer image from a source directory.
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+#[pyo3(name = "build_erofs_layer")]
+fn build_erofs_layer_py(src_dir: String, name: String, output_dir: String) -> PyResult<String> {
+    crate::layer::build_erofs_layer(&src_dir, &name, &output_dir)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// List available layer names under `layer_dir`.
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+#[pyo3(name = "list_layers")]
+fn list_layers_py(layer_dir: String) -> Vec<String> {
+    crate::layer::list_layers(&layer_dir)
+}
+
+/// Remove a layer by name from `layer_dir`.
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+#[pyo3(name = "remove_layer")]
+fn remove_layer_py(name: String, layer_dir: String) -> PyResult<()> {
+    crate::layer::remove_layer(&name, &layer_dir).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// Pack a layer directory into a bootable cpio.gz rootfs image.
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+#[pyo3(name = "pack_cpio_rootfs")]
+fn pack_cpio_rootfs_py(layer_dir: String, name: String, output_dir: String) -> PyResult<String> {
+    crate::cpio::pack_cpio_rootfs(&layer_dir, &name, &output_dir)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// Extract a cpio.gz archive into a directory.
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+#[pyo3(name = "extract_cpio_layer")]
+fn extract_cpio_layer_py(cpio_path: String, output_dir: String) -> PyResult<()> {
+    crate::cpio::extract_cpio_layer(&cpio_path, &output_dir)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+/// Resolve a layer name to a usable lowerdir path.
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+#[pyo3(name = "resolve_layer")]
+fn resolve_layer_py(layer_dir: String, fs_root: String, name: String) -> PyResult<String> {
+    let config = crate::layer::LayerConfig {
+        layer_dir,
+        fs_root,
+        mounted_layers: std::sync::Arc::new(
+            std::sync::Mutex::new(std::collections::HashSet::new()),
+        ),
+    };
+    crate::layer::resolve_layer(&config, &name)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+}
+
+/// Validate a layer name against the allowed character set.
+#[cfg(feature = "pyo3")]
+#[pyfunction]
+#[pyo3(name = "validate_layer_name")]
+fn validate_layer_name_py(name: String) -> PyResult<()> {
+    crate::layer::validate_layer_name(&name).map_err(pyo3::exceptions::PyValueError::new_err)
+}
 
 /// Python module for Terrarium filesystem operations.
 ///
-/// Built with `maturin develop` / `pip install -e crates/fs`.
+/// Built with `maturin develop --features pyo3` / `pip install -e crates/fs`.
 #[cfg(feature = "pyo3")]
-#[pyo3::pymodule]
-#[pyo3(name = "_fs")]
-pub fn terrarium_fs_py(
-    _py: pyo3::Python<'_>,
-    m: &pyo3::Bound<'_, pyo3::types::PyModule>,
-) -> pyo3::PyResult<()> {
+#[pymodule]
+fn terrarium_fs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(build_erofs_layer_py, m)?)?;
+    m.add_function(wrap_pyfunction!(list_layers_py, m)?)?;
+    m.add_function(wrap_pyfunction!(remove_layer_py, m)?)?;
+    m.add_function(wrap_pyfunction!(pack_cpio_rootfs_py, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_cpio_layer_py, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_layer_py, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_layer_name_py, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
