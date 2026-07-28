@@ -1,0 +1,23 @@
+[package]
+name = "terrarium-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "terrarium_fs"
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+pyo3 = ["dep:pyo3"]
+
+[dependencies]
+adapter-traits = { path = "../adapter/traits" }
+libc = "0.2"
+regex = "1"
+pyo3 = { version = "0.22", optional = true }
+serde = { workspace = true }
+tokio = { version = "1", features = ["time"] }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"

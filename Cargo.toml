@@ -11,6 +11,7 @@ members = [
     "crates/network",
     "crates/protocol",
     "crates/uds-http",
+    "crates/fs",
 ]
 
 [workspace.package]

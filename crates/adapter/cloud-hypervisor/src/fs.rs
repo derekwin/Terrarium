@@ -8,6 +8,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
+use terrarium_fs::layer::resolve_layer;
+use terrarium_fs::LayerConfig;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,6 +58,11 @@ pub async fn compose_fs(
             "fs.layers must not be empty".to_string(),
         ));
     }
+    let layer_cfg = LayerConfig {
+        layer_dir: config.layer_dir.clone(),
+        fs_root: config.fs_root.clone(),
+        mounted_layers: config.mounted_layers.clone(),
+    };
     let mut lowers: Vec<String> = Vec::new();
     for layer in &fs_spec.layers {
         if !layer
@@ -67,7 +74,7 @@ pub async fn compose_fs(
                 layer
             )));
         }
-        lowers.push(resolve_layer(config, layer)?);
+        lowers.push(resolve_layer(&layer_cfg, layer)?);
     }
     // OverlayFS lowerdir is right-to-left priority: our layers list is
     // highest-priority-first, base last — join as-is.
@@ -206,105 +213,4 @@ pub fn teardown_fs(fs: &mut FsStack) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Private helpers
-// ---------------------------------------------------------------------------
 
-/// Resolve a layer name to a usable lowerdir path.
-///
-/// Resolution order: `<layer_dir>/<name>` directory first, then
-/// `<layer_dir>/<name>.erofs` image (mounted on first use). EROFS
-/// mounts are shared by all VMs and kept for the daemon's lifetime.
-fn resolve_layer(config: &FsConfig, name: &str) -> Result<String, AdapterError> {
-    let dir = format!("{}/{}", config.layer_dir, name);
-    if std::path::Path::new(&dir).is_dir() {
-        return Ok(dir);
-    }
-    let image = format!("{}/{}.erofs", config.layer_dir, name);
-    if !std::path::Path::new(&image).exists() {
-        return Err(AdapterError::not_found(format!(
-            "layer '{}' not found under {} (neither directory nor .erofs image)",
-            name, config.layer_dir
-        )));
-    }
-    let mnt = format!("{}/layers-mnt/{}", config.fs_root, name);
-    let mtime = std::fs::metadata(&image)
-        .and_then(|m| m.modified())
-        .map(|t| format!("{:?}", t))
-        .unwrap_or_default();
-    let sidecar = format!("{}.mtime", mnt);
-    let mounted_as = std::fs::read_to_string(&sidecar).unwrap_or_default();
-    if is_mounted(&mnt) {
-        if mounted_as == mtime {
-            return Ok(mnt);
-        }
-        tracing::warn!(%mnt, "layer image rebuilt, remounting");
-        let _ = Command::new("umount").arg(&mnt).output();
-        let _ = Command::new("fusermount").args(["-u", &mnt]).output();
-    }
-    let mut set = config
-        .mounted_layers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if set.contains(name) {
-        return Ok(mnt);
-    }
-    std::fs::create_dir_all(&mnt).map_err(|e| format!("mkdir {}: {}", mnt, e))?;
-    mount_erofs(&image, &mnt)?;
-    let _ = std::fs::write(&sidecar, &mtime);
-    set.insert(name.to_string());
-    Ok(mnt)
-}
-
-/// Whether `mnt` is an active mountpoint according to /proc/mounts.
-fn is_mounted(mnt: &str) -> bool {
-    std::fs::read_to_string("/proc/mounts")
-        .map(|c| c.lines().any(|l| l.split(' ').nth(1) == Some(mnt)))
-        .unwrap_or(false)
-}
-
-/// Mount an EROFS image read-only at `mnt`. Kernel loop mount when
-/// privileged, erofsfuse fallback otherwise.
-fn mount_erofs(image: &str, mnt: &str) -> Result<(), AdapterError> {
-    let kernel = Command::new("mount")
-        .args(["-o", "loop,ro", "-t", "erofs", image, mnt])
-        .output();
-    if let Ok(out) = kernel {
-        if out.status.success() {
-            tracing::info!(%image, %mnt, "EROFS layer mounted (kernel)");
-            return Ok(());
-        }
-    }
-    let fuse_bin = std::env::var("TERRA_EROFSFUSE")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            for c in [
-                "erofsfuse".to_string(),
-                format!(
-                    "{}/.local/share/terra/bin/erofsfuse",
-                    std::env::var("HOME").unwrap_or_default()
-                ),
-                "/usr/bin/erofsfuse".to_string(),
-            ] {
-                if std::path::Path::new(&c).exists() || c == "erofsfuse" {
-                    return c;
-                }
-            }
-            "erofsfuse".into()
-        });
-    let out = Command::new(&fuse_bin)
-        .args([image, mnt])
-        .output()
-        .map_err(|e| format!("mount failed (need root) and erofsfuse not found: {}", e))?;
-    if !out.status.success() {
-        return Err(format!(
-            "erofsfuse {}: {}",
-            image,
-            String::from_utf8_lossy(&out.stderr).trim()
-        )
-        .into());
-    }
-    tracing::info!(%image, %mnt, "EROFS layer mounted (erofsfuse)");
-    Ok(())
-}
