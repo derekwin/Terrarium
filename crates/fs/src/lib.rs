@@ -41,9 +41,9 @@ fn build_erofs_layer_py(src_dir: String, name: String, output_dir: String) -> Py
 /// List available layer names under `layer_dir`.
 #[cfg(feature = "pyo3")]
 #[pyfunction]
-#[pyo3(name = "list_layers")]
-fn list_layers_py(layer_dir: String) -> Vec<String> {
-    crate::layer::list_layers(&layer_dir)
+#[pyo3(name = "list_layers", signature = (layer_dir, show_all = true))]
+fn list_layers_py(layer_dir: String, show_all: bool) -> Vec<String> {
+    crate::layer::list_layers(&layer_dir, show_all)
 }
 
 /// Remove a layer by name from `layer_dir`.

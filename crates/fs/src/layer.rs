@@ -115,9 +115,10 @@ pub fn build_erofs_layer(src_dir: &str, name: &str, output_dir: &str) -> Result<
 
 /// List available layer names under `layer_dir`.
 ///
-/// Returns directory names and stripped `.erofs` filenames, filtering
-/// out system-internal names.
-pub fn list_layers(layer_dir: &str) -> Vec<String> {
+/// Returns directory names and stripped `.erofs` filenames.
+/// When `show_all` is `false`, system-internal names (base, ubuntu, .system)
+/// are filtered out.
+pub fn list_layers(layer_dir: &str, show_all: bool) -> Vec<String> {
     let system: HashSet<&'static str> = SYSTEM_LAYER_NAMES.iter().copied().collect();
     let dir = Path::new(layer_dir);
     let mut names: Vec<String> = match std::fs::read_dir(dir) {
@@ -131,7 +132,7 @@ pub fn list_layers(layer_dir: &str) -> Vec<String> {
                     n
                 }
             })
-            .filter(|n| !system.contains(n.as_str()))
+            .filter(|n| show_all || !system.contains(n.as_str()))
             .collect(),
         Err(_) => return Vec::new(),
     };

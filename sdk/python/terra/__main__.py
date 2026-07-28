@@ -811,15 +811,6 @@ def _build_layer_from_image(args) -> int:
 
 def _build_layer_via_vm(args) -> int:
     """Build a tool layer by configuring inside a builder VM."""
-    # Preflight: networked builds need a privileged daemon
-    if not args.no_net and os.geteuid() != 0:
-        return _err(
-            "Networked builder VM requires root privileges",
-            cause="This build uses a networked builder VM (downloads), which needs "
-            "CAP_NET_ADMIN for tap device creation",
-            fix='sudo env "PATH=$PATH" terra daemon start  (then retry)\n'
-            "     or: add --no-net for an offline build",
-        )
     system_map = {"alpine": "base", "ubuntu": "ubuntu"}
     system = system_map.get(args.rootfs)
     if system is None:
