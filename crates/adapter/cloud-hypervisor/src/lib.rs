@@ -13,11 +13,12 @@ mod process;
 
 use adapter_traits::{AdapterError, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmSpec};
 use async_trait::async_trait;
-use config::ChConfig;
 use std::sync::Arc;
 
 pub use client::ChClient;
+pub use config::ChConfig;
 pub use error::ClientError;
+pub use fs::FsStack;
 
 // ---------------------------------------------------------------------------
 // Adapter
