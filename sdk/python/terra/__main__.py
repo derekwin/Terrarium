@@ -335,6 +335,9 @@ def cmd_image_layer_build(args):
             '  either: sudo env "PATH=$PATH" terra daemon start   (then retry)\n'
             "  or:     add --no-net for an offline build"
         )
+    system = {"alpine": "base", "ubuntu": "ubuntu"}.get(args.rootfs)
+    if system is None:
+        return _err(f"unsupported rootfs {args.rootfs!r} — supported: alpine, ubuntu")
     client = _client(args)
     name = args.name
     builder = f"lb-{name}"
@@ -347,7 +350,7 @@ def cmd_image_layer_build(args):
             initramfs=args.initramfs,
             cpus=1,
             memory_mb=512,
-            layers=[args.base],
+            layers=[system],
             upper=builder,
             net=not args.no_net,
         )
@@ -686,7 +689,8 @@ def main() -> int:
     src.add_argument("--from-image", action="store_true", help="base layer from guest rootfs")
     src.add_argument("--from-distro", action="store_true",
                      help="build a distro system layer (images/distro/<name>.conf)")
-    c.add_argument("--base", default="base")
+    c.add_argument("--rootfs", default="alpine",
+                   help="system the layer is built on: alpine (musl) or ubuntu (glibc)")
     c.add_argument("--kernel", default="target/guest/vmlinux.bin")
     c.add_argument("--initramfs", default="target/guest/initramfs-virtiofs.cpio.gz")
     c.add_argument("--no-net", action="store_true")

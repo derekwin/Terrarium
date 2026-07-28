@@ -57,7 +57,7 @@ pip install -e sdk/python
 sudo env "PATH=$PATH" terra daemon start                       # engine daemon (root enables NAT networking)
 terra kernel create -n k612 --version 6.12      # build a guest kernel
 terra layer create -n ubuntu --from-distro        # build a distro base layer
-terra layer create -n python312 --script images/examples/python312.sh
+terra layer create -n python312 --rootfs alpine --script images/examples/python312.sh
 terra pool create --size 3                      # warm pool (grow/shrink live)
 terra daemon config                             # engine, pool, net, layers at a glance
 terra vm create dev --kernel k612 --layers python312 --net
