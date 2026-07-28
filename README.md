@@ -43,6 +43,29 @@ Terrarium is a scheduling and control layer for agent execution environments. It
 The engine is decoupled from backends via two trait families:
 `VmAdapter` (Cloud Hypervisor) and `SandboxAdapter` (Sandlock, OpenShell).
 
+## Repository Structure
+
+```
+terrarium/
+├── README.md / README_zh.md
+├── LICENSE / NOTICE / THIRD-PARTY
+├── crates/
+│   ├── engine/               # Engine daemon: socket protocol, VM lifecycle, pool management (PyO3 lib)
+│   ├── adapter/
+│   │   ├── traits/           # VmAdapter / SandboxAdapter traits, VmSpec, FsSpec, error types
+│   │   ├── cloud-hypervisor/ # CH adapter: virtiofs, hotplug, network, landlock
+│   │   ├── sandlock/         # Sandlock adapter (Landlock ABI capability gating)
+│   │   └── openshell/        # OpenShell adapter
+│   ├── fs/                   # Filesystem crate: EROFS, cpio, layer build/list/remove (PyO3 bindings)
+│   ├── protocol/             # Shared Command / Response types (single source of truth)
+│   ├── guest-proxy/          # In-guest agent: vsock relay, exec, mount, umount
+│   ├── network/              # Tap / NAT / dnsmasq DHCP, tc QoS
+│   └── mcp/                  # MCP server (stdio JSON-RPC, 13 user-facing tools)
+├── sdk/python/               # Python SDK (terra package: client, VM, direct, daemon, assets, images)
+├── images/                   # Guest kernel / rootfs / initramfs build scripts and examples
+└── docs/                     # Protocol, SDK, MCP docs and design ADRs
+```
+
 ## Quick Start
 
 Install the CLI and SDK:
@@ -56,8 +79,8 @@ pip install -e sdk/python
 ```bash
 sudo env "PATH=$PATH" terra daemon start                       # engine daemon (root enables NAT networking)
 terra kernel create -n k612 --version 6.12      # build a guest kernel
-terra layer create -n ubuntu --from-distro        # build a distro base layer
-terra layer create -n python312 --rootfs alpine --script images/examples/python312.sh
+terra rootfs create -n ubuntu                     # build a distro base system
+terra layer create -n python312 --rootfs alpine --script images/examples/python312.sh --kernel k612
 terra pool create --size 3                      # warm pool (grow/shrink live)
 terra daemon config                             # engine, pool, net, layers at a glance
 terra vm create dev --kernel k612 --layers python312 --net

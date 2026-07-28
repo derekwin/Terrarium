@@ -43,6 +43,29 @@ Terrarium 是 Agent 执行环境的调度控制层。它将硬件级 VM 隔离�
 引擎通过两组 trait 与后端解耦：`VmAdapter`（Cloud Hypervisor）与
 `SandboxAdapter`（Sandlock、OpenShell）。
 
+## 仓库结构
+
+```
+terrarium/
+├── README.md / README_zh.md
+├── LICENSE / NOTICE / THIRD-PARTY
+├── crates/
+│   ├── engine/               # 引擎 daemon：socket 协议、VM 生命周期、池管理（PyO3 库）
+│   ├── adapter/
+│   │   ├── traits/           # VmAdapter / SandboxAdapter trait、VmSpec、FsSpec、错误类型
+│   │   ├── cloud-hypervisor/ # CH adapter：virtiofs、热插、网络、landlock
+│   │   ├── sandlock/         # Sandlock adapter（Landlock ABI 能力门控）
+│   │   └── openshell/        # OpenShell adapter
+│   ├── fs/                   # 文件系统 crate：EROFS、cpio、层构建/列举/删除（PyO3 绑定）
+│   ├── protocol/             # 共享 Command / Response 类型（单一事实源）
+│   ├── guest-proxy/          # guest 内代理：vsock 中继、exec、mount、umount
+│   ├── network/              # Tap / NAT / dnsmasq DHCP、tc QoS
+│   └── mcp/                  # MCP server（stdio JSON-RPC，13 个用户面工具）
+├── sdk/python/               # Python SDK（terra 包：client、VM、direct、daemon、assets、images）
+├── images/                   # Guest 内核 / rootfs / initramfs 构建脚本与示例
+└── docs/                     # 协议、SDK、MCP 文档与设计 ADR
+```
+
 ## 快速上手
 
 安装 CLI 与 SDK：
@@ -56,8 +79,8 @@ pip install -e sdk/python
 ```bash
 sudo env "PATH=$PATH" terra daemon start                       # 引擎 daemon（root 才有 NAT 网络）
 terra kernel create -n k612 --version 6.12      # 构建 guest 内核
-terra layer create -n ubuntu --from-distro        # 构建发行版系统层
-terra layer create -n python312 --rootfs alpine --script images/examples/python312.sh
+terra rootfs create -n ubuntu                     # 构建发行版系统
+terra layer create -n python312 --rootfs alpine --script images/examples/python312.sh --kernel k612
 terra pool create --size 3                      # 预热池（大小实时可调）
 terra daemon config                             # 引擎/池/网络/层一览
 terra vm create dev --kernel k612 --layers python312 --net

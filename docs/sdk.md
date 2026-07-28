@@ -83,17 +83,19 @@ default_memory_mb / default_layers / default_net / token`。
 `--kernel k612 --rootfs alpine`。`rootfs ls` 只显示系统镜像；
 两个引导器镜像（virtiofs/agent）是内部基础设施——带 `--layers`
 时引导器自动选择，用户无需关心）
-- `kernel ls/create -n <名> --version/remove -n`、`rootfs` 同构
-- `layer ls/create -n <名> [--from-dir|--script|--from-image]/remove -n`
+- `kernel ls/create -n <名> --version/remove -n`
+- `rootfs ls/create -n <名> [alpine|ubuntu]/remove -n`
+- `layer ls/create -n <名> (--from-dir|--script|--from-image) --rootfs <alpine|ubuntu> [--kernel <名>]/remove -n`
+（`--rootfs` 必填，指定构建在哪个系统上；`--script` 构建需显式指定 `--kernel`，无默认值）
 - `pool ls/create/remove/claim/release`（池大小**运行时可调**：
 create 追加、remove 缩减，无需重启 daemon）
 - `net ls/create/remove`、`daemon start/ls/stop/destroy/config [--tcp]`
 
-
-层与镜像统一为「托管目录命名工件」：`layer create -n base
---from-image` 把 guest rootfs 铺成 `layers/<name>/`；`layer create
--n <名> --script` 把做中建的层打进同一目录（`<名>.erofs`）；
-`layer ls` 列出全部。
+层与镜像统一为「托管目录命名工件」：`layer create -n <名> --from-image`
+把系统 rootfs 铺成 `layers/<name>/`（且 `layer ls` 只显示附加层，系统层隐藏）；
+`layer create -n <名> --script` 在 builder VM 中「做中建」，增量打包为
+`<名>.erofs`。系统 base 本身通过 `rootfs create` 创建，不走 `layer
+create`。
 
 **目录即标识**：工件分区存放——内核在 `images/kernels/<name>/
 vmlinux.bin`，rootfs/initramfs 在 `images/rootfs/...`（旧布局自动
