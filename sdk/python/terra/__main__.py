@@ -587,7 +587,12 @@ def cmd_layer_create(args):
     if args.from_image:
         args2 = argparse.Namespace(name=args.name, force=True)
         return cmd_image_base(args2)
-    return cmd_image_layer_build(args)  # --script path (build-by-doing)
+    # --script path (build-by-doing) requires kernel + initramfs
+    if not args.kernel:
+        return _err("--kernel is required with --script (e.g. --kernel k612)")
+    if not args.initramfs:
+        return _err("--initramfs is required with --script (e.g. --initramfs initramfs-virtiofs)")
+    return cmd_image_layer_build(args)
 
 
 def cmd_net_create(args):
@@ -772,10 +777,10 @@ def main() -> int:
     src.add_argument("--from-dir", help="pack an existing directory")
     src.add_argument("--script", help="build-by-doing: run setup in a builder VM")
     src.add_argument("--from-image", action="store_true", help="base layer from guest rootfs")
-    c.add_argument("--rootfs", default="alpine",
+    c.add_argument("--rootfs", required=True,
                    help="system the layer is built on: alpine (musl) or ubuntu (glibc)")
-    c.add_argument("--kernel", default="target/guest/vmlinux.bin")
-    c.add_argument("--initramfs", default="target/guest/initramfs-virtiofs.cpio.gz")
+    c.add_argument("--kernel", help="kernel for builder VM (required with --script)")
+    c.add_argument("--initramfs", help="initramfs for builder VM (required with --script)")
     c.add_argument("--no-net", action="store_true")
     c.add_argument("--timeout", type=int, default=600)
     c.set_defaults(f=cmd_layer_create)
