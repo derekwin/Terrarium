@@ -5,14 +5,19 @@
 
 pub mod api;
 pub mod client;
+mod config;
 mod error;
+mod fs;
 
+use crate::fs::{compose_fs, teardown_fs, FsStack};
 use adapter_traits::{
-    AdapterError, FsSpec, NetworkQos, Snapshot, UpperPolicy, VmAdapter, VmCapabilities, VmHandle,
-    VmInfo, VmName, VmSpec,
+    AdapterError, FsSpec, NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle, VmInfo,
+    VmName, VmSpec,
 };
 use async_trait::async_trait;
+use config::ChConfig;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
@@ -24,142 +29,15 @@ pub use error::ClientError;
 // ---------------------------------------------------------------------------
 
 pub struct ChAdapter {
-    ch_binary: String,
-    virtiofsd_binary: String,
-    layer_dir: String,
-    fs_root: String,
-    /// EROFS layer images already mounted (shared across VMs; layers are
-    /// immutable, mounts live for the daemon's lifetime).
-    mounted_layers: std::sync::Mutex<std::collections::HashSet<String>>,
+    config: Arc<ChConfig>,
 }
 
 impl ChAdapter {
     pub fn new(ch_binary: impl Into<String>) -> Self {
-        let fs_base = std::env::var("TERRA_STATE_DIR")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "/tmp/terra-disks".into());
         Self {
-            ch_binary: ch_binary.into(),
-            // qemu's virtiofsd (apt) and rust-vmm's (cargo) share the CLI.
-            virtiofsd_binary: std::env::var("TERRA_VIRTIOFSD")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "virtiofsd".into()),
-            layer_dir: std::env::var("TERRA_LAYER_DIR")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "/var/lib/terra/layers".into()),
-            fs_root: format!("{}/fs", fs_base),
-            mounted_layers: std::sync::Mutex::new(std::collections::HashSet::new()),
+            config: Arc::new(ChConfig::from_env(ch_binary)),
         }
     }
-
-    /// Resolve a layer name to a usable lowerdir path.
-    ///
-    /// Resolution order: `<layer_dir>/<name>` directory first, then
-    /// `<layer_dir>/<name>.erofs` image (mounted on first use). EROFS
-    /// mounts are shared by all VMs and kept for the daemon's lifetime.
-    fn resolve_layer(&self, name: &str) -> Result<String, AdapterError> {
-        let dir = format!("{}/{}", self.layer_dir, name);
-        if std::path::Path::new(&dir).is_dir() {
-            return Ok(dir);
-        }
-        let image = format!("{}/{}.erofs", self.layer_dir, name);
-        if !std::path::Path::new(&image).exists() {
-            return Err(AdapterError::not_found(format!(
-                "layer '{}' not found under {} (neither directory nor .erofs image)",
-                name, self.layer_dir
-            )));
-        }
-        let mnt = format!("{}/layers-mnt/{}", self.fs_root, name);
-        // Already mounted? The mount may be STALE: a rebuilt image at the
-        // same path keeps serving the old inode via the old loop mount.
-        // Track the image mtime in a sidecar (the erofs itself is
-        // read-only, so it can't live in the mountpoint).
-        let mtime = std::fs::metadata(&image)
-            .and_then(|m| m.modified())
-            .map(|t| format!("{:?}", t))
-            .unwrap_or_default();
-        let sidecar = format!("{}.mtime", mnt);
-        let mounted_as = std::fs::read_to_string(&sidecar).unwrap_or_default();
-        if is_mounted(&mnt) {
-            if mounted_as == mtime {
-                return Ok(mnt);
-            }
-            // Stale mount of a superseded image — tear it down.
-            tracing::warn!(%mnt, "layer image rebuilt, remounting");
-            let _ = Command::new("umount").arg(&mnt).output();
-            let _ = Command::new("fusermount").args(["-u", &mnt]).output();
-        }
-        let mut set = self
-            .mounted_layers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if set.contains(name) {
-            return Ok(mnt);
-        }
-        std::fs::create_dir_all(&mnt).map_err(|e| format!("mkdir {}: {}", mnt, e))?;
-        mount_erofs(&image, &mnt)?;
-        let _ = std::fs::write(&sidecar, &mtime);
-        set.insert(name.to_string());
-        Ok(mnt)
-    }
-}
-
-/// Whether `mnt` is an active mountpoint according to /proc/mounts.
-fn is_mounted(mnt: &str) -> bool {
-    std::fs::read_to_string("/proc/mounts")
-        .map(|c| c.lines().any(|l| l.split(' ').nth(1) == Some(mnt)))
-        .unwrap_or(false)
-}
-
-/// Mount an EROFS image read-only at `mnt`. Kernel loop mount when
-/// privileged, erofsfuse fallback otherwise.
-fn mount_erofs(image: &str, mnt: &str) -> Result<(), AdapterError> {
-    // Try kernel mount first (root path — best performance).
-    let kernel = Command::new("mount")
-        .args(["-o", "loop,ro", "-t", "erofs", image, mnt])
-        .output();
-    if let Ok(out) = kernel {
-        if out.status.success() {
-            tracing::info!(%image, %mnt, "EROFS layer mounted (kernel)");
-            return Ok(());
-        }
-    }
-    // Unprivileged fallback: erofsfuse (env, PATH, managed bin, system).
-    let fuse_bin = std::env::var("TERRA_EROFSFUSE")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            for c in [
-                "erofsfuse".to_string(),
-                format!(
-                    "{}/.local/share/terra/bin/erofsfuse",
-                    std::env::var("HOME").unwrap_or_default()
-                ),
-                "/usr/bin/erofsfuse".to_string(),
-            ] {
-                if std::path::Path::new(&c).exists() || c == "erofsfuse" {
-                    return c;
-                }
-            }
-            "erofsfuse".into()
-        });
-    let out = Command::new(&fuse_bin)
-        .args([image, mnt])
-        .output()
-        .map_err(|e| format!("mount failed (need root) and erofsfuse not found: {}", e))?;
-    if !out.status.success() {
-        return Err(format!(
-            "erofsfuse {}: {}",
-            image,
-            String::from_utf8_lossy(&out.stderr).trim()
-        )
-        .into());
-    }
-    tracing::info!(%image, %mnt, "EROFS layer mounted (erofsfuse)");
-    Ok(())
 }
 
 #[async_trait]
@@ -207,7 +85,7 @@ struct ChVmHandle {
     /// Device id of a hot-plugged fs device (needed for remove-device).
     fs_device_id: std::sync::Mutex<Option<String>>,
     /// Fs composition config cloned from the adapter (for hot-plug).
-    fs_config: ChAdapter,
+    config: Arc<ChConfig>,
 }
 
 /// Next free vsock CID (0/1/2 reserved: hypervisor/host/local).
@@ -223,21 +101,6 @@ fn tap_name(name: &str) -> String {
     t
 }
 
-/// A composed layered rootfs: overlayfs mount + virtiofsd. As non-root
-/// it runs inside a private user/mount namespace (killing the supervisor
-/// tears down the mount too); as root it mounts directly (userns uid
-/// mapping would make other users' layer files unwritable-nobody).
-struct FsStack {
-    supervisor: std::process::Child,
-    socket: String,
-    /// Working dir root for this VM (upper/work/merged).
-    dir: String,
-    /// Persistent upperdirs live outside `dir` and survive Drop.
-    persistent: bool,
-    /// True when composed inside a private namespace (non-root path).
-    in_namespace: bool,
-}
-
 impl ChVmHandle {
     async fn spawn(spec: &VmSpec, adapter: &ChAdapter) -> Result<Self, AdapterError> {
         let name = spec.name.clone();
@@ -247,7 +110,7 @@ impl ChVmHandle {
         // Compose the layered rootfs first — CH needs the virtiofsd
         // socket at boot.
         let fs = match spec.fs {
-            Some(ref fs_spec) => Some(compose_fs(fs_spec, name.as_ref(), adapter).await?),
+            Some(ref fs_spec) => Some(compose_fs(fs_spec, name.as_ref(), &adapter.config).await?),
             None => None,
         };
         let fs_socket = fs.as_ref().map(|f| f.socket.as_str());
@@ -277,13 +140,13 @@ impl ChVmHandle {
 
         // CH stderr goes to a per-VM log file — invisible deaths (like
         // landlock denials) must be diagnosable.
-        let log_dir = format!("{}/logs", adapter.fs_root);
+        let log_dir = format!("{}/logs", adapter.config.fs_root);
         let _ = std::fs::create_dir_all(&log_dir);
         let log_path = format!("{}/{}.log", log_dir, name);
         let log_file = std::fs::File::create(&log_path)
             .map_err(|e| format!("create CH log {}: {}", log_path, e))?;
 
-        let mut child = Command::new(&adapter.ch_binary)
+        let mut child = Command::new(&adapter.config.ch_binary)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -313,163 +176,9 @@ impl ChVmHandle {
             client,
             fs: std::sync::Mutex::new(fs),
             fs_device_id: std::sync::Mutex::new(None),
-            fs_config: ChAdapter {
-                ch_binary: adapter.ch_binary.clone(),
-                virtiofsd_binary: adapter.virtiofsd_binary.clone(),
-                layer_dir: adapter.layer_dir.clone(),
-                fs_root: adapter.fs_root.clone(),
-                mounted_layers: std::sync::Mutex::new(std::collections::HashSet::new()),
-            },
+            config: adapter.config.clone(),
         })
     }
-}
-
-/// Compose a layered rootfs: resolve layer names under the layer dir,
-/// overlayfs-mount them with a per-VM upperdir, and serve the result via
-/// virtiofsd — all inside one `unshare -Urm` supervisor so no root is
-/// required and teardown is just killing the process.
-async fn compose_fs(
-    fs_spec: &FsSpec,
-    name: &str,
-    adapter: &ChAdapter,
-) -> Result<FsStack, AdapterError> {
-    if fs_spec.layers.is_empty() {
-        return Err(AdapterError::invalid_argument(
-            "fs.layers must not be empty".to_string(),
-        ));
-    }
-    let mut lowers: Vec<String> = Vec::new();
-    for layer in &fs_spec.layers {
-        if !layer
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-        {
-            return Err(AdapterError::invalid_argument(format!(
-                "invalid layer name {:?}",
-                layer
-            )));
-        }
-        // Resolves plain dirs directly and mounts .erofs images on demand.
-        lowers.push(adapter.resolve_layer(layer)?);
-    }
-    // OverlayFS lowerdir is right-to-left priority: our layers list is
-    // highest-priority-first, base last — join as-is.
-    let lowerdir = lowers.join(":");
-
-    let dir = format!("{}/{}", adapter.fs_root, name);
-    let (upper, persistent) = match &fs_spec.upper {
-        UpperPolicy::Ephemeral => (format!("{}/upper", dir), false),
-        UpperPolicy::Persistent(pname) => {
-            if !pname
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-            {
-                return Err(AdapterError::invalid_argument(format!(
-                    "invalid upper name {:?}",
-                    pname
-                )));
-            }
-            (format!("{}/uppers/{}", adapter.fs_root, pname), true)
-        }
-    };
-    let work = format!("{}/work", dir);
-    let merged = format!("{}/merged", dir);
-    for d in [&upper, &work, &merged] {
-        std::fs::create_dir_all(d).map_err(|e| format!("mkdir {}: {}", d, e))?;
-    }
-
-    let socket = format!("/tmp/terra-{}-fs.sock", name);
-    let _ = std::fs::remove_file(&socket);
-    // qemu virtiofsd creates a locked pid file next to the socket —
-    // clear leftovers from previous (possibly crashed) stacks.
-    let _ = std::fs::remove_file(format!("{}.pid", socket));
-
-    // Root path: plain mount + virtiofsd directly. In a user namespace,
-    // files owned by other uids appear as nobody and become unwritable —
-    // exactly the failure root daemons hit with user-created layers.
-    // SAFETY: geteuid is always safe to call.
-    let in_namespace = unsafe { libc::geteuid() } != 0;
-    let mut child = if in_namespace {
-        let script = format!(
-            "set -e; mount -t overlay overlay -o lowerdir={},upperdir={},workdir={} {}; \
-             exec {} --socket-path={} --shared-dir={} --sandbox=none --cache=always",
-            lowerdir, upper, work, merged, adapter.virtiofsd_binary, socket, merged
-        );
-        Command::new("unshare")
-            .args(["-Urm", "bash", "-c", &script])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("spawn unshare supervisor: {}", e))?
-    } else {
-        let mount = Command::new("mount")
-            .args([
-                "-t",
-                "overlay",
-                "overlay",
-                "-o",
-                &format!("lowerdir={},upperdir={},workdir={}", lowerdir, upper, work),
-                &merged,
-            ])
-            .output()
-            .map_err(|e| format!("mount overlay: {}", e))?;
-        if !mount.status.success() {
-            return Err(format!(
-                "mount overlay: {}",
-                String::from_utf8_lossy(&mount.stderr).trim()
-            )
-            .into());
-        }
-        Command::new(&adapter.virtiofsd_binary)
-            .args([
-                &format!("--socket-path={}", socket),
-                &format!("--shared-dir={}", merged),
-                "--sandbox=none",
-                "--cache=always",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("spawn virtiofsd: {}", e))?
-    };
-
-    // Wait for the virtiofsd socket; surface supervisor stderr on failure.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if std::path::Path::new(&socket).exists() {
-            break;
-        }
-        if let Ok(Some(status)) = child.try_wait() {
-            let mut err = String::new();
-            use std::io::Read;
-            if let Some(mut e) = child.stderr.take() {
-                let _ = e.read_to_string(&mut err);
-            }
-            return Err(format!(
-                "fs supervisor exited ({}) before virtiofsd was ready: {}",
-                status,
-                err.trim()
-            )
-            .into());
-        }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("virtiofsd socket timeout".into());
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    tracing::info!(name = %name, layers = ?fs_spec.layers, %persistent, "Layered rootfs composed");
-    Ok(FsStack {
-        supervisor: child,
-        socket,
-        dir,
-        persistent,
-        in_namespace,
-    })
 }
 
 #[async_trait]
@@ -539,7 +248,7 @@ impl VmHandle for ChVmHandle {
             ));
         }
         // 1) compose layers + start virtiofsd on the host
-        let stack = compose_fs(fs_spec, self.name.as_ref(), &self.fs_config).await?;
+        let stack = compose_fs(fs_spec, self.name.as_ref(), &self.config).await?;
         // 2) hot-plug the virtiofs device
         let device_id = self
             .client
@@ -688,32 +397,6 @@ impl ChVmHandle {
         serde_json::from_str(&resp).map_err(|e| {
             AdapterError::internal(format!("guest-proxy response parse: {} ({})", e, resp))
         })
-    }
-}
-
-/// Tear down a composed fs stack: kill the supervisor (the overlayfs
-/// mount and virtiofsd die with its namespace) and clean work dirs.
-fn teardown_fs(fs: &mut FsStack) {
-    let _ = fs.supervisor.kill();
-    let _ = fs.supervisor.wait();
-    let _ = std::fs::remove_file(&fs.socket);
-    if !fs.in_namespace {
-        // Root path: the overlayfs mount is not tied to a namespace —
-        // unmount explicitly.
-        let _ = Command::new("umount")
-            .arg(format!("{}/merged", fs.dir))
-            .output();
-    }
-    let _ = std::fs::remove_file(format!("{}.pid", fs.socket));
-    if !fs.persistent {
-        // overlayfs creates its internal work/work dir with mode 0000 —
-        // restore owner permissions before removing.
-        let _ = Command::new("chmod")
-            .args(["-R", "u+rwX", &fs.dir])
-            .output();
-        if let Err(e) = std::fs::remove_dir_all(&fs.dir) {
-            tracing::warn!(dir = %fs.dir, error = %e, "fs work dir cleanup failed");
-        }
     }
 }
 
