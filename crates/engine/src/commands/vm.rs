@@ -47,13 +47,9 @@ pub(crate) async fn cmd_list(mgr: &VmManager) -> Response {
 }
 
 pub(crate) async fn cmd_info(mgr: &VmManager, cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing 'name' field"),
-    };
-    let vm = match mgr.get(&name) {
-        Some(v) => v,
-        None => return Response::err(format!("VM '{}' not found", name)),
+    let (vm, name) = match super::get_vm(mgr, &cmd) {
+        Ok(v) => v,
+        Err(r) => return r,
     };
     let details = match vm.info().await {
         Ok(d) => d,
@@ -69,13 +65,9 @@ pub(crate) async fn cmd_info(mgr: &VmManager, cmd: Command) -> Response {
 }
 
 pub(crate) async fn cmd_resize(mgr: &VmManager, cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing 'name' field"),
-    };
-    let vm = match mgr.get(&name) {
-        Some(v) => v,
-        None => return Response::err(format!("VM '{}' not found", name)),
+    let (vm, _name) = match super::get_vm(mgr, &cmd) {
+        Ok(v) => v,
+        Err(r) => return r,
     };
 
     let cpus: Option<u32> = cmd.cpus.map(|c| c as u32);

@@ -11,8 +11,24 @@ mod snapshot;
 mod vm;
 
 use crate::manager::VmManager;
-use adapter_traits::{VmName, VmSpec};
-pub use terrarium_protocol::{Command, Response};
+use adapter_traits::{VmHandle, VmName, VmSpec};
+pub(crate) use terrarium_protocol::{Command, Response};
+
+/// Extract VM name from a command and look up the VM handle.
+/// Returns an error if the name is missing or the VM is not found.
+pub(crate) fn get_vm<'a>(
+    mgr: &'a VmManager,
+    cmd: &Command,
+) -> Result<(&'a dyn VmHandle, String), Response> {
+    let name = cmd
+        .name
+        .clone()
+        .ok_or_else(|| Response::err("Missing 'name' field"))?;
+    let vm = mgr
+        .get(&name)
+        .ok_or_else(|| Response::err(format!("VM '{}' not found", name)))?;
+    Ok((vm, name))
+}
 
 /// System base layers: if the caller's layer list doesn't end with one,
 /// the configured `system` (default "base") is auto-appended.

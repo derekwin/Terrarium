@@ -2,17 +2,13 @@ use crate::manager::VmManager;
 use terrarium_protocol::{Command, Response};
 
 pub(crate) async fn cmd_snapshot(mgr: &VmManager, cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing 'name' field"),
-    };
-    let vm = match mgr.get(&name) {
-        Some(v) => v,
-        None => return Response::err(format!("VM '{}' not found", name)),
+    let (vm, name) = match super::get_vm(mgr, &cmd) {
+        Ok(v) => v,
+        Err(r) => return r,
     };
     let _path = cmd
         .snapshot_path
-        .unwrap_or_else(|| format!("/tmp/terra-snap-{}.bin", name));
+        .unwrap_or_else(|| format!("{}/terra-snap-{}.bin", mgr.snapshot_dir(), name));
 
     match vm.snapshot().await {
         Ok(snap) => Response::ok(serde_json::json!({"snapshot_path": snap.path})),

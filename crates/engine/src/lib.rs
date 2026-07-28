@@ -1,3 +1,6 @@
+// The #[pyfunction] proc macro expansion triggers this lint on the
+// generated wrapper; function-level #[allow] does not propagate through
+// proc macros, so a crate-level attribute is needed.
 #![allow(clippy::useless_conversion)]
 
 pub mod commands;
