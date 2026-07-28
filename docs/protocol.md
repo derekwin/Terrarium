@@ -37,7 +37,15 @@ TCP + token 时，客户端先发送一行 token，再发送命令行。
 
 | command | 字段 | 说明 |
 |---|---|---|
-| `exec` | `name`, `args`, `timeout_secs?` | 经 guest-proxy（vsock）在 VM 内执行，返回 `{stdout, stderr, exit_code}`。默认 60s，上限 3600s |
+| `exec` | `name`, `args`, `timeout_secs?`, `exec_mode?` | 经 guest-proxy（vsock）在 VM 内执行，返回 `{stdout, stderr, exit_code}`。`exec_mode` 可选 `"blocking"`（默认）或 `"background"`（返回 `{session_id}`）。默认 60s，上限 3600s |
+
+### 执行会话（background exec）
+
+| command | 字段 | 说明 |
+|---|---|---|
+| `session_status` | `session_id` | 查询后台执行会话状态，返回 `{session_id, vm_name, args, status, exit_code, stdout, stderr}` |
+| `session_kill` | `session_id` | 终止后台执行会话，返回 `{session_id, status: "killed"}` |
+| `session_list` | — | 列出全部执行会话，返回 `{sessions: [{session_id, vm_name, status}], count}` |
 
 ### 文件系统（分层 virtiofs）
 

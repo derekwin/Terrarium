@@ -1,31 +1,196 @@
 # Python SDK 接口文档
 
-安装：`pip install -e sdk/python`（同时获得 `python -m terra` 与 `terra` 命令）。
+安装：`pip install -e .`（从仓库根目录，同时获得 `python -m terra` 与 `terra` 命令）。
+
+## 层次化 API
+
+Terrarium SDK 提供三层 API，从高层到低层：
+
+| 层次 | 类 / 函数 | 适用场景 |
+|---|---|---|
+| **高层沙箱** | `terra.Sandbox`, `terra.AsyncSandbox` | 开箱即用，自动起 daemon，context manager 自动回收 |
+| **池 / 模板** | `terra.Pool`, `terra.Template` | 预热池 + 命名环境组合，适合批量任务 |
+| **底层直连** | `terra.TerraClient`, `terra.create()` | 原生 VM 操作，完全控制 |
 
 ## 三种使用方式
 
 ```python
 import terra
 
-# 1) 直连（临时 VM）：什么都不用管，首次调用自动起托管引擎
+# 1) 高层沙箱（推荐）：自动起 daemon，自动回收
+from terra.sandbox import Sandbox
+
+with Sandbox(template="py312", network=True) as sb:
+    result = sb.exec(["python3", "-c", "print(2+2)"])
+    print(result.stdout)          # ExecResult(exit_code=0, stdout="4\n", ...)
+
+# 2) 直连（临时 VM）：首次调用自动起托管引擎
 vm = terra.create(layers=["python312", "base"])
 vm.exec(["python3", "--version"])
 vm.destroy()
 
-# 2) 远程客户端：一行 connect，之后代码与直连完全一致
+# 3) 远程客户端：一行 connect，之后代码与直连完全一致
 terra.connect("tcp://server:19099", token="secret")
 vm = terra.create(layers=["python312", "base"])   # 底层走 pool_claim
 vm.destroy()                                       # 底层走 pool_release
-
-# 3) 自己做管理员：一个 Python 脚本就是 daemon 程序
-from terra.daemon import Daemon
-from terra.config import HostConfig
-Daemon(config=HostConfig(layer_dir="/var/lib/terra/layers",
-                         pool_size=4, token="secret"),
-       tcp="0.0.0.0:19099").start()
 ```
 
-## API
+## 高层 API
+
+### `terra.Sandbox`
+
+统一的沙箱抽象，自动创建 VM、管理生命周期。
+
+```python
+from terra.sandbox import Sandbox
+from terra.exceptions import ExecError, SandboxTimeoutError
+
+# 从模板创建（推荐）
+sb = Sandbox(template="py312", network=True)
+
+# 从显式 layers 创建
+sb = Sandbox(layers=["python312", "base"], kernel="k612", cpu=2, memory_mb=512)
+
+# 属性
+print(sb.id)        # 唯一标识（sandbox-xxxxxxxx）
+print(sb.status)    # "running" / "stopped" / "paused"
+print(sb.backend)   # "ch" (Cloud Hypervisor)
+
+# exec — blocking 执行，返回 ExecResult
+result = sb.exec(["python3", "-c", "print(1+1)"])
+print(result.stdout, result.stderr, result.exit_code, result.duration_ms)
+
+# check=True — 非零退出码自动抛 ExecError
+try:
+    sb.exec(["false"], check=True)
+except ExecError as e:
+    print(f"exit={e.exec_result.exit_code} stderr={e.exec_result.stderr}")
+
+# 自定义 cwd / env / timeout
+result = sb.exec(["ls", "-la"], cwd="/tmp", env={"LANG": "C.UTF-8"}, timeout=30)
+
+# 文件操作（通过 sb.files）
+sb.files.write("/workdir/hello.txt", "Hello from host!")
+content = sb.files.read("/workdir/hello.txt")
+sb.files.upload("./local_file.txt", "/workdir/uploaded.txt")
+sb.files.download("/workdir/data.txt", "./downloaded.txt")
+files = sb.files.list("/workdir")              # → list[FileInfo]
+sb.files.mkdir("/workdir/sub")
+print(sb.files.exists("/workdir/sub"))         # → True
+sb.files.remove("/workdir/sub")
+
+# 在线扩缩 / 指标
+sb.resize(cpu=4, memory_mb=1024)
+metrics = sb.metrics()   # {cpu_count: 4, memory_mb: 1024}
+
+# 生命周期
+sb.kill()                # 停止并注销（幂等）
+
+# Context manager — 自动 kill
+with Sandbox(template="py312") as sb:
+    print(sb.exec(["uname", "-a"]).stdout)
+```
+
+### `terra.AsyncSandbox`
+
+`Sandbox` 的 asyncio 版本，通过线程池执行阻塞操作，保持 event loop 不阻塞。
+
+```python
+from terra.async_sandbox import AsyncSandbox
+
+# 推荐：async 工厂方法
+sb = await AsyncSandbox.create(template="py312")
+
+# Async context manager
+async with await AsyncSandbox.create(template="py312") as sb:
+    result = await sb.exec(["python3", "--version"])
+    print(result.stdout)
+
+# API 与 Sandbox 一致，所有方法都是 async
+status = sb.status
+await sb.exec(["ls"], timeout=10)
+await sb.kill()
+await sb.resize(cpu=2)
+metrics = await sb.metrics()
+```
+
+### `terra.Pool`
+
+预热池管理 — 预先启动空闲 VM，claim 时热插 layer 即可用。
+
+```python
+from terra.pool import Pool
+from terra.sandbox import Sandbox
+
+# 从模板创建池
+pool = Pool(template="py312", size=3)   # 3 个预热 VM
+
+# 显式 layers
+pool = Pool(layers=["python312", "base"], size=2, net=True)
+
+# 查询状态
+st = pool.status()  # {"idle": 3, "claimed": 0, "total": 3}
+
+# 认领一个就绪沙箱
+sb = pool.acquire()         # → Sandbox（已然启动，layer 已就绪）
+sb.exec(["python3", "-c", "print(42)"])
+
+# 归还 / 注销
+pool.release(sb)            # 归还池，可再次认领
+sb.kill()                   # 永久注销
+
+# 动态缩放
+pool.grow(2)                # 追加 2 个 VM
+```
+
+### `terra.Template`
+
+命名环境组合 — 内核 + base distro + 工具 layer 的持久化配置。
+
+```python
+from terra.template import Template
+
+# 从已有 layer 创建模板
+t = Template.from_layers(
+    base="alpine",                     # alpine → musl；ubuntu → glibc
+    layers=["python312", "base"],      # 工具层，高优先级在前
+    kernel="k612",
+    name="py312",
+)
+
+# 列举 / 加载 / 删除
+names = Template.list()               # → ["py312"]
+t = Template.load("py312")
+print(t.base, t.layers, t.kernel)
+Template.remove("py312")
+```
+
+### `terra.exceptions` — 异常体系
+
+```python
+from terra.exceptions import (
+    TerraError,           # 基类：sandbox_id, engine_error
+    EngineError,          # daemon 层（启动、协议、传输）
+    BuildError,           # layer / image 构建失败
+    SandboxError,         # 沙箱相关错误基类
+    SandboxTimeoutError,  # 操作超时
+    SandboxStateError,    # 沙箱状态无效（已停止、已归还等）
+    ResourceError,        # 资源耗尽（OOM、磁盘满）
+    ExecError,            # exec 非零退出码（含 exec_result 属性）
+)
+
+try:
+    sb.exec(["false"], check=True)
+except ExecError as e:
+    print(e.exec_result.exit_code)   # 1
+    print(e.exec_result.stderr)      # ""
+except SandboxTimeoutError:
+    print("timed out")
+except TerraError as e:
+    print(f"engine: {e.engine_error} on {e.sandbox_id}")
+```
+
+## 底层 API
 
 ### 模块级（直连，`terra.direct`）
 
@@ -45,7 +210,7 @@ Daemon(config=HostConfig(layer_dir="/var/lib/terra/layers",
 方法：`vm_create / vm_list / vm_info / vm_resize / vm_shutdown /
 vm_kill / vm_destroy / vm_exec(name, args, timeout_secs=60)` /
 `vm_attach_fs / vm_detach_fs` / `pool_create / pool_list / pool_claim /
-pool_release`。错误统一抛 `TerraError`（含引擎错误文本）。
+pool_release`。错误统一抛 `TerraError`。
 
 ### `Vm`
 
@@ -64,7 +229,9 @@ default_memory_mb / default_layers / default_net / token`。
 
 `Daemon(config=None, socket=None, tcp=None, ...)`——启动引擎（自动
 解析引擎二进制：环境变量 → 托管 bin → repo 构建 → PATH → 制品 URL），
-`start()/stop()`，可作上下文管理器。socket 被他人占用时自动改用私有 socket。
+`start()/stop()`，可作上下文管理器。
+
+SDK 用户通常无需手动管理 daemon——`Sandbox` / `Pool` 在首次使用时自动启动托管引擎。
 
 ### `terra.assets` / `terra.images` / `terra.paths`
 
@@ -76,32 +243,162 @@ default_memory_mb / default_layers / default_net / token`。
 
 ## `python -m terra`（CLI）
 
-资源分组 + 统一动词（`ls / create / remove [-n 名字]`）：
+### 命令分组
 
-- `vm ls/create/remove/info/exec/resize/shutdown/kill/attach-fs/detach-fs`
-（`--kernel`/`--rootfs` 均可传绝对路径或 ls 出来的变体名，如
-`--kernel k612 --rootfs alpine`。`rootfs ls` 只显示系统镜像；
-两个引导器镜像（virtiofs/agent）是内部基础设施——带 `--layers`
-时引导器自动选择，用户无需关心）
-- `kernel ls/create -n <名> --version/remove -n`
-- `rootfs ls/create -n <名> [alpine|ubuntu]/remove -n`
-- `layer ls/create -n <名> (--from-dir|--script|--from-image) --rootfs <alpine|ubuntu> [--kernel <名>]/remove -n`
-（`--rootfs` 必填，指定构建在哪个系统上；`--script` 构建需显式指定 `--kernel`，无默认值）
-- `pool ls/create/remove/claim/release`（池大小**运行时可调**：
-create 追加、remove 缩减，无需重启 daemon）
-- `net ls/create/remove`、`daemon start/ls/stop/destroy/config [--tcp]`
+| 命令组 | 子命令 | 说明 |
+|---|---|---|
+| `sandbox` | `create`, `ls`, `info`, `exec`, `cp`, `resize`, `metrics`, `kill` | 高层沙箱操作（推荐入口） |
+| `template` | `ls`, `create`, `info`, `remove` | 命名模板管理 |
+| `image` | `build kernel`, `build rootfs`, `build initramfs`, `ls`, `info`, `remove` | guest 镜像管理（内核/rootfs/initramfs 合并） |
+| `layer` | `ls`, `create`, `info`, `remove` | 文件系统层管理 |
+| `vm` | `create`, `ls`, `info`, `exec`, `resize`, `attach`, `detach`, `shutdown`, `kill`, `destroy` | 底层 VM 操作 |
+| `pool` | `create`, `ls`, `claim`, `release`, `scale`, `remove` | 预热池管理 |
+| `net` | `create`, `ls`, `remove` | NAT 网络管理 |
+| `daemon` | `start`, `status`, `config`, `logs [-f]`, `stop`, `destroy` | 引擎 daemon 生命周期 |
 
-层与镜像统一为「托管目录命名工件」：`layer create -n <名> --from-image`
-把系统 rootfs 铺成 `layers/<name>/`（且 `layer ls` 只显示附加层，系统层隐藏）；
-`layer create -n <名> --script` 在 builder VM 中「做中建」，增量打包为
-`<名>.erofs`。系统 base 本身通过 `rootfs create` 创建，不走 `layer
-create`。
+### 全局选项
 
-**目录即标识**：工件分区存放——内核在 `images/kernels/<name>/
-vmlinux.bin`，rootfs/initramfs 在 `images/rootfs/...`（旧布局自动
-迁移）。使用时只写名字，内部按约定解析：
-`terra.create(kernel="k612")` / `vm create --kernel k612`。
-rootfs 同理（`rootfs create -n alpine321` 产 `images/rootfs/alpine321/`）。
+- `--json`：机器可读 JSON 输出
+- `--socket <path|tcp://host:port>`：指定 daemon 连接地址
+- `-v` / `--verbose`：详细输出（dict 按 JSON 格式打印）
 
-连接：`--socket <path|tcp://host:port>` 或 `TERRA_SOCKET` /
-`TERRA_TOKEN`。
+### 退出码
+
+| 码 | 含义 |
+|---|---|
+| 0 | 成功 |
+| 1 | 一般错误 |
+| 2 | 用法错误（参数不合法） |
+| 3 | daemon 错误（未运行、连接拒绝、权限不足） |
+| 4 | 未找到（VM、sandbox、image 等不存在） |
+| 5 | 超时 |
+
+### 典型工作流
+
+```bash
+# 1) 首次搭建
+sudo env "PATH=$PATH" terra daemon start                    # 启动引擎（root 才有 NAT 网络）
+terra image build kernel -n k612 --version 6.12              # 构建内核
+terra image build rootfs -n alpine                           # 构建 alpine base rootfs
+
+# 2) 高层沙箱（推荐日常使用）
+terra template create -n py312 --kernel k612 --rootfs alpine --layers python312,base
+terra sandbox create --template py312 --net                 # 创建沙箱
+terra sandbox ls                                            # 列出沙箱
+terra sandbox exec <id> -- python3 --version                # 执行命令
+terra sandbox metrics <id>                                  # 查看资源
+terra sandbox kill <id>                                     # 销毁沙箱
+
+# 3) 预热池（批量任务）
+terra pool create -n mypool --size 3                        # 创建 3 个预热 VM 的池
+terra pool claim --template py312                           # 认领一个就绪沙箱
+terra pool release <vm-name>                                # 归还池
+terra pool scale --size 5                                   # 缩放池大小
+
+# 4) 直接 VM（精细控制）
+terra vm create dev --kernel k612 --layers base --net
+terra vm exec dev -- python3 --version
+terra vm attach dev --layers python312                      # 热插 layer
+terra vm detach dev                                         # 卸载 layer
+terra vm destroy dev
+
+# 5) daemon 运维
+terra daemon status                                         # 查看状态
+terra daemon logs -f                                        # 实时日志
+terra daemon config                                         # 引擎/池/网络/层一览
+terra daemon stop                                           # 优雅停止
+```
+
+### 命令参考
+
+**sandbox** — 高层沙箱
+
+```
+terra sandbox create --template <name> [--kernel <var>] [--cpu N] [--memory MB]
+                     [--net] [--env KEY=VALUE] [--timeout SEC] [--name <id>]
+terra sandbox ls
+terra sandbox info <id>
+terra sandbox exec <id> [--cwd PATH] [--env KEY=VALUE] [--timeout SEC] -- COMMAND...
+terra sandbox cp <src> <dst>    # 本地路径 或 <sandbox-id>:/path
+terra sandbox resize <id> --cpu N --memory MB
+terra sandbox metrics <id>
+terra sandbox kill <id>
+```
+
+**template** — 命名模板
+
+```
+terra template ls
+terra template create -n <name> --kernel <var> --rootfs alpine|ubuntu [--layers L1,L2]
+terra template info <name>
+terra template remove <name>
+```
+
+**image** — guest 镜像（内核/rootfs/initramfs 统一入口）
+
+```
+terra image ls
+terra image build kernel -n <name> --version <ver>
+terra image build rootfs -n <name>         # alpine 或 ubuntu
+terra image build initramfs --type virtiofs|agent [-n <name>]
+terra image info <name>
+terra image remove -n <name>
+```
+
+**layer** — 文件系统层
+
+```
+terra layer ls
+terra layer create -n <name> --rootfs alpine|ubuntu (--from-dir|--script|--from-image) [--kernel <var>]
+terra layer info <name>
+terra layer remove -n <name>
+```
+
+**vm** — 底层 VM
+
+```
+terra vm create <name> --kernel <var> [--layers L1,L2] [--net] [--cpus N] [--memory MB]
+terra vm ls
+terra vm info <name>
+terra vm exec <name> [--timeout SEC] -- COMMAND...
+terra vm resize <name> --cpus N --memory-bytes B
+terra vm attach <name> --layers L1,L2   # 替代旧 attach-fs
+terra vm detach <name>                  # 替代旧 detach-fs
+terra vm shutdown|kill|destroy <name>
+```
+
+**pool** — 预热池
+
+```
+terra pool create -n <name> --size N [--kernel <var>] [--net]
+terra pool ls
+terra pool claim --template <name>  或  --layers L1,L2
+terra pool release <name>
+terra pool scale --size N
+terra pool remove <name>
+```
+
+**net** — NAT 网络
+
+```
+terra net create [-n <name>]
+terra net ls
+terra net remove <name>
+```
+
+**daemon** — 引擎 daemon
+
+```
+terra daemon start [--daemonize] [--tcp host:port]
+terra daemon status
+terra daemon config
+terra daemon logs [-f]
+terra daemon stop
+terra daemon destroy
+```
+
+### 向后兼容
+
+`vm attach-fs` / `vm detach-fs` 作为隐藏别名保留，功能同 `vm attach` / `vm detach`。
+`daemon ls` 已重命名为 `daemon status`。
+`kernel`、`rootfs` 顶层命令已合并入 `image` 命令组。

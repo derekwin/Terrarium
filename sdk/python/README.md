@@ -7,9 +7,8 @@ warm pool, in-guest exec.
 ## Install
 
 ```bash
-pip install -e sdk/python            # from the repo
-# pip install terra-sdk[ch]          # Cloud Hypervisor backend (marker extra)
-# pip install terra-sdk[sandlock]    # + sandlock python bindings
+pip install -e .                     # from the repo root
+# or: pip install -e sdk/python      # from the sdk/python directory
 ```
 
 You do **not** need to install host binaries yourself. On first use the SDK
@@ -37,31 +36,41 @@ single-process scenarios, not the production shape.
 ## Quickstart
 
 ```python
-from terra.daemon import Daemon
-from terra.client import TerraClient
+# High-level Sandbox API (recommended) — auto-starts daemon, auto-cleanup
+from terra.sandbox import Sandbox
+
+with Sandbox(template="py312", network=True) as sb:
+    result = sb.exec(["python3", "-c", "print(2+2)"])
+    print(result.stdout)              # "4\n"
+    sb.files.write("/workdir/hello.txt", "Hello, Terrarium!")
+
+# Warm pool — pre-booted VMs with instant claims
+from terra.pool import Pool
+
+pool = Pool(template="py312", size=3)
+sb = pool.acquire()
+print(sb.exec(["python3", "--version"]).stdout)
+pool.release(sb)
+
+# Direct VM — full control
 from terra.vm import create
 
-with Daemon():                       # engine daemon, fully managed env
-    client = TerraClient()
-
-    # warm pool: idle VMs with hot-plugged layered rootfs
-    client.pool_create(1)
-    claim = client.pool_claim(["base"])
-    print(client.vm_exec(claim["name"], ["ls", "/newroot"]))
-    client.pool_release(claim["name"])
-
-    # plain VM
-    vm = create("dev", "/path/to/vmlinux.bin",
-                initramfs="/path/to/initramfs-virtiofs.cpio.gz",
-                layers=["python", "base"])
-    print(vm.info())
-    vm.exec(["ls", "/"])
-    vm.shutdown()
+vm = create("dev", "/path/to/vmlinux.bin",
+            initramfs="/path/to/initramfs-virtiofs.cpio.gz",
+            layers=["python", "base"])
+print(vm.info())
+vm.exec(["ls", "/"])
+vm.shutdown()
 ```
 
 ## API map
 
-- `terra.daemon.Daemon` — engine daemon lifecycle (zero env vars)
+- `terra.sandbox.Sandbox` — high-level sandbox: exec, files (read/write/upload/download/list), resize, metrics, context manager
+- `terra.async_sandbox.AsyncSandbox` — async wrapper for asyncio applications
+- `terra.pool.Pool` — warm pool management: acquire/release/status/grow
+- `terra.template.Template` — named environment compositions: from_layers/list/load/remove/build
+- `terra.exceptions` — structured exception hierarchy: TerraError, ExecError, SandboxTimeoutError, etc.
+- `terra.daemon.Daemon` — engine daemon lifecycle (auto-started by Sandbox/Pool, zero env vars)
 - `terra.client.TerraClient` — VM + pool + exec protocol client
 - `terra.vm` — `create()`, `list_vms()`, `Vm` objects
 - `terra.assets` — binary management (`ensure_ch`, `ensure_virtiofsd`, ...)

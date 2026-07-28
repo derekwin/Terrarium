@@ -50,64 +50,65 @@ terrarium/
 ├── README.md / README_zh.md
 ├── LICENSE / NOTICE / THIRD-PARTY
 ├── crates/
-│   ├── engine/               # 引擎 daemon：socket 协议、VM 生命周期、池管理（PyO3 库）
+│   ├── engine/               # 引擎 daemon：PyO3 库，7 个命令子模块
 │   ├── adapter/
 │   │   ├── traits/           # VmAdapter / SandboxAdapter trait、VmSpec、FsSpec、错误类型
-│   │   ├── cloud-hypervisor/ # CH adapter：virtiofs、热插、网络、landlock
+│   │   ├── cloud-hypervisor/ # CH adapter：5 模块（FS/VM 解耦）、virtiofs、热插、网络、landlock
 │   │   ├── sandlock/         # Sandlock adapter（Landlock ABI 能力门控）
 │   │   └── openshell/        # OpenShell adapter
-│   ├── fs/                   # 文件系统 crate：EROFS、cpio、层构建/列举/删除（PyO3 绑定）
+│   ├── fs/                   # 独立文件系统 crate：EROFS、cpio、层构建/列举/删除（PyO3 绑定）
 │   ├── protocol/             # 共享 Command / Response 类型（单一事实源）
 │   ├── guest-proxy/          # guest 内代理：vsock 中继、exec、mount、umount
 │   ├── network/              # Tap / NAT / dnsmasq DHCP、tc QoS
 │   └── mcp/                  # MCP server（stdio JSON-RPC，13 个用户面工具）
-├── sdk/python/               # Python SDK（terra 包：client、VM、direct、daemon、assets、images）
+├── sdk/python/               # Python SDK（terra 包：Sandbox、Pool、Template、client、daemon、assets、images）
 ├── images/                   # Guest 内核 / rootfs / initramfs 构建脚本与示例
 └── docs/                     # 协议、SDK、MCP 文档与设计 ADR
 ```
 
 ## 快速上手
 
-安装 CLI 与 SDK：
+从仓库根目录安装：
 
 ```bash
-pip install -e sdk/python
+pip install -e .
 ```
 
-**CLI**——资源分组，动词统一为 `ls / create / remove`：
+**Sandbox API**——推荐的高层入口（自动起 daemon，context manager 自动回收）：
+
+```python
+from terra.sandbox import Sandbox
+
+with Sandbox(template="py312", network=True) as sb:
+    result = sb.exec(["python3", "-c", "print(2+2)"])
+    print(result.stdout)              # "4\n"
+    sb.files.write("/workdir/hello.txt", "Hello, Terrarium!")
+    print(sb.files.read("/workdir/hello.txt"))
+```
+
+**预热池**——预启动空转 VM，claim 时热插层即用：
+
+```python
+from terra.pool import Pool
+
+pool = Pool(template="py312", size=3)  # 3 个预热 VM
+sb = pool.acquire()                    # 秒级就绪
+print(sb.exec(["python3", "--version"]).stdout)
+pool.release(sb)                       # 归还池
+```
+
+**CLI**——资源分组，动词统一：
 
 ```bash
-sudo env "PATH=$PATH" terra daemon start                       # 引擎 daemon（root 才有 NAT 网络）
-terra kernel create -n k612 --version 6.12      # 构建 guest 内核
-terra rootfs create -n ubuntu                     # 构建发行版系统
+sudo env "PATH=$PATH" terra daemon start                     # 引擎 daemon（root 才有 NAT 网络）
+terra image build kernel -n k612 --version 6.12               # 构建 guest 内核
+terra image build rootfs -n alpine                             # 构建发行版系统
 terra layer create -n python312 --rootfs alpine --script images/examples/python312.sh --kernel k612
-terra pool create --size 3                      # 预热池（大小实时可调）
-terra daemon config                             # 引擎/池/网络/层一览
-terra vm create dev --kernel k612 --layers python312 --net
-terra vm exec dev -- python3 --version
-terra vm remove dev
-```
-
-**Python**——直连模式，随手开临时 VM：
-
-```python
-import terra
-
-vm = terra.create(layers=["python312", "base"])
-print(vm.exec(["python3", "-c", "import numpy; print(numpy.__version__)"]))
-vm.destroy()
-```
-
-**客户端-服务器**——代码不变，一行 connect，由服务器预热池兑现：
-
-```python
-import terra
-
-terra.connect("tcp://server:19099", token="secret")
-
-vm = terra.create(layers=["python312", "base"])
-print(vm.exec(["python3", "--version"]))
-vm.destroy()
+terra template create -n py312 --kernel k612 --rootfs alpine --layers python312,base
+terra sandbox create --template py312 --net                    # 一行创建沙箱
+terra pool create -n mypool --size 3                           # 预热池
+terra pool claim --template py312                              # 认领就绪 VM
+terra daemon config                                            # 引擎/池/网络/层一览
 ```
 
 **MCP**——将 agent 指向 stdio server：
@@ -118,12 +119,14 @@ vm.destroy()
 
 ## 特性
 
+- **高层 Sandbox API**——`terra.Sandbox` / `terra.AsyncSandbox`，自动起 daemon，context manager 自动清理，支持文件操作（读/写/上传/下载/列举）、资源指标、在线扩缩。配合命名模板实现可复现环境。
 - **分层文件系统**——只读 EROFS 层在宿主侧星型组合（任意搭配、页缓存共享），经 virtiofs 暴露。发行版系统层来自配置驱动 pipeline（内置 alpine 与 ubuntu，新增仅需三行配置）。工具层通过在真实 VM 中配置环境、打包增量来构建——环境自证可用。
-- **预热池**——预启动的空转 VM；认领时热插所需层并返回就绪 VM，任务结束归还复用。
-- **guest 内执行**——经 guest agent 在 VM 内执行命令，支持单命令超时。
+- **预热池**——预启动的空转 VM；认领时热插所需层并返回就绪 VM，任务结束归还复用。支持动态 `grow()` / `scale` 实时调整池大小。
+- **命名模板**——`terra.template.Template` 持久化内核 + 基础系统 + 工具层组合，CLI 与 SDK 统一通过名称引用。
+- **guest 内执行**——blocking 与 background 两种模式，经 guest agent 在 VM 内执行命令。支持会话追踪（`session_status`、`session_kill`、`session_list`）、单命令超时、结构化 `ExecResult`。
 - **网络**——`--net` 一键 NAT 联网（DHCP 即用），生命周期经 `terra net` 管理。
 - **动态扩缩**——CPU、内存免重启在线调整。
-- **零配置 Python SDK**——托管目录、二进制与镜像自动解析、可编程宿主配置（`HostConfig`）。
+- **零配置 Python SDK**——托管目录、二进制与镜像自动解析、daemon 自动启动、可编程宿主配置（`HostConfig`）。
 
 ## 文档
 
@@ -136,6 +139,7 @@ vm.destroy()
 
 - ✅ CH 基座、引擎 daemon、Adapter 层、Python SDK
 - ✅ virtiofs 分层文件系统、预热池、NAT 网络、工具层「做中建」
+- ✅ 高层 Sandbox / Pool / Template API，异常体系，async 支持
 - 🔲 池自动扩缩、快照容错、密度基准、可观测性
 
 ## 许可证

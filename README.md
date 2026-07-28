@@ -50,64 +50,65 @@ terrarium/
 ├── README.md / README_zh.md
 ├── LICENSE / NOTICE / THIRD-PARTY
 ├── crates/
-│   ├── engine/               # Engine daemon: socket protocol, VM lifecycle, pool management (PyO3 lib)
+│   ├── engine/               # Engine daemon: PyO3-backed lib with 7 command submodules
 │   ├── adapter/
 │   │   ├── traits/           # VmAdapter / SandboxAdapter traits, VmSpec, FsSpec, error types
-│   │   ├── cloud-hypervisor/ # CH adapter: virtiofs, hotplug, network, landlock
+│   │   ├── cloud-hypervisor/ # CH adapter: 5 modules (FS/VM decoupled), virtiofs, hotplug, network, landlock
 │   │   ├── sandlock/         # Sandlock adapter (Landlock ABI capability gating)
 │   │   └── openshell/        # OpenShell adapter
-│   ├── fs/                   # Filesystem crate: EROFS, cpio, layer build/list/remove (PyO3 bindings)
+│   ├── fs/                   # Independent filesystem crate: EROFS, cpio, layer build/list/remove (PyO3 bindings)
 │   ├── protocol/             # Shared Command / Response types (single source of truth)
 │   ├── guest-proxy/          # In-guest agent: vsock relay, exec, mount, umount
 │   ├── network/              # Tap / NAT / dnsmasq DHCP, tc QoS
 │   └── mcp/                  # MCP server (stdio JSON-RPC, 13 user-facing tools)
-├── sdk/python/               # Python SDK (terra package: client, VM, direct, daemon, assets, images)
+├── sdk/python/               # Python SDK (terra package: Sandbox, Pool, Template, client, daemon, assets, images)
 ├── images/                   # Guest kernel / rootfs / initramfs build scripts and examples
 └── docs/                     # Protocol, SDK, MCP docs and design ADRs
 ```
 
 ## Quick Start
 
-Install the CLI and SDK:
+Install from the repository root:
 
 ```bash
-pip install -e sdk/python
+pip install -e .
 ```
 
-**CLI** — resource groups with uniform `ls / create / remove` verbs:
+**Sandbox API** — the recommended high-level entry point (auto-starts daemon, context-manager cleanup):
+
+```python
+from terra.sandbox import Sandbox
+
+with Sandbox(template="py312", network=True) as sb:
+    result = sb.exec(["python3", "-c", "print(2+2)"])
+    print(result.stdout)              # "4\n"
+    sb.files.write("/workdir/hello.txt", "Hello, Terrarium!")
+    print(sb.files.read("/workdir/hello.txt"))
+```
+
+**Warm pool** — pre-booted idle VMs, layers hot-plugged on claim:
+
+```python
+from terra.pool import Pool
+
+pool = Pool(template="py312", size=3)  # 3 pre-booted VMs
+sb = pool.acquire()                    # ready instantly
+print(sb.exec(["python3", "--version"]).stdout)
+pool.release(sb)                       # back to idle
+```
+
+**CLI** — resource groups with uniform verbs:
 
 ```bash
-sudo env "PATH=$PATH" terra daemon start                       # engine daemon (root enables NAT networking)
-terra kernel create -n k612 --version 6.12      # build a guest kernel
-terra rootfs create -n ubuntu                     # build a distro base system
+sudo env "PATH=$PATH" terra daemon start                     # engine daemon (root enables NAT networking)
+terra image build kernel -n k612 --version 6.12               # build a guest kernel
+terra image build rootfs -n alpine                             # build a distro base system
 terra layer create -n python312 --rootfs alpine --script images/examples/python312.sh --kernel k612
-terra pool create --size 3                      # warm pool (grow/shrink live)
-terra daemon config                             # engine, pool, net, layers at a glance
-terra vm create dev --kernel k612 --layers python312 --net
-terra vm exec dev -- python3 --version
-terra vm remove dev
-```
-
-**Python** — direct mode for throwaway VMs:
-
-```python
-import terra
-
-vm = terra.create(layers=["python312", "base"])
-print(vm.exec(["python3", "-c", "import numpy; print(numpy.__version__)"]))
-vm.destroy()
-```
-
-**Client–server** — same code, one connect line, fulfilled by the server's warm pool:
-
-```python
-import terra
-
-terra.connect("tcp://server:19099", token="secret")
-
-vm = terra.create(layers=["python312", "base"])
-print(vm.exec(["python3", "--version"]))
-vm.destroy()
+terra template create -n py312 --kernel k612 --rootfs alpine --layers python312,base
+terra sandbox create --template py312 --net                    # one-command sandbox
+terra pool create -n mypool --size 3                           # warm pool
+terra pool claim --template py312                              # claim a ready VM
+terra daemon config                                            # engine, pool, net, layers at a glance
 ```
 
 **MCP** — point your agent at the stdio server:
@@ -118,12 +119,14 @@ vm.destroy()
 
 ## Features
 
+- **High-level Sandbox API** — `terra.Sandbox` / `terra.AsyncSandbox` with automatic daemon start, context-manager cleanup, file operations (read/write/upload/download/list), metrics, and online resize. Works with named templates for reproducible environments.
 - **Layered filesystem** — read-only EROFS layers star-composed on the host (arbitrary combinations, shared page cache), exposed via virtiofs. Distro base layers come from a config-driven pipeline (alpine and ubuntu ship today; more are a 3-line config). Tool layers are built by configuring a real VM and packing the delta, so environments are runnable by construction.
-- **Warm pool** — pre-booted idle VMs; claiming hot-plugs the requested layers and returns a ready VM. Pool VMs release back to idle for reuse.
-- **In-guest exec** — command execution inside VMs through the guest agent, with per-command timeouts.
+- **Warm pool** — pre-booted idle VMs; claiming hot-plugs the requested layers and returns a ready VM. Pool VMs release back to idle for reuse. Dynamic `grow()` / `scale` for live size adjustment.
+- **Named templates** — `terra.template.Template` persists kernel + base distro + tool layer compositions. `template create` / `template ls` / `template remove` managed from CLI or SDK.
+- **In-guest exec** — blocking and background execution inside VMs through the guest agent, with session tracking (`session_status`, `session_kill`, `session_list`), per-command timeouts, and structured `ExecResult`.
 - **Networking** — one-flag NAT networking (`--net`) with DHCP; lifecycle managed via `terra net`.
 - **Dynamic resize** — CPU and memory online adjustment without reboot.
-- **Zero-config Python SDK** — managed directories, automatic binary and image resolution, programmable host configuration (`HostConfig`).
+- **Zero-config Python SDK** — managed directories, automatic binary and image resolution, daemon auto-start, programmable host configuration (`HostConfig`).
 
 ## Documentation
 
@@ -136,6 +139,7 @@ vm.destroy()
 
 - ✅ CH base, engine daemon, adapter layer, Python SDK
 - ✅ virtiofs layered filesystem, warm pool, NAT networking, layer build-by-doing
+- ✅ High-level Sandbox / Pool / Template API, exception hierarchy, async support
 - 🔲 Pool auto-scaling, snapshot fault tolerance, density benchmarks, observability
 
 ## License
