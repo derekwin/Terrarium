@@ -19,6 +19,8 @@ from pathlib import Path
 
 from . import images, paths
 from .client import TerraClient, TerraError
+from .sandbox import Sandbox
+from .pool import Pool
 
 
 def _client(args) -> TerraClient:
@@ -30,13 +32,52 @@ def _client(args) -> TerraClient:
     return TerraClient(addr)
 
 
-def _print(resp) -> int:
-    print(json.dumps(resp, indent=2, ensure_ascii=False))
+def _output(data, args) -> int:
+    """Print *data* in human-readable or JSON format depending on --json."""
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
+    _print_human(data)
     return 0
 
 
-def _err(msg: str) -> int:
-    print(f"ERROR: {msg}", file=sys.stderr)
+def _print(data) -> int:
+    """Legacy compat: always JSON (used by old code paths)."""
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _print_human(data) -> None:
+    """Print *data* in a human-readable format (key-value / list)."""
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if isinstance(v, list):
+                print(f"{k}:")
+                for item in v:
+                    if isinstance(item, dict):
+                        print(f"  {json.dumps(item, ensure_ascii=False)}")
+                    else:
+                        print(f"  {item}")
+            elif isinstance(v, dict):
+                print(f"{k}:")
+                for k2, v2 in v.items():
+                    print(f"  {k2}: {v2}")
+            else:
+                print(f"{k}: {v}")
+    elif isinstance(data, list):
+        for item in data:
+            print(item)
+    else:
+        print(data)
+
+
+def _err(msg: str, *, cause: str = "", fix: str = "") -> int:
+    """Print a structured error with what / why / how."""
+    print(f"Error: {msg}", file=sys.stderr)
+    if cause:
+        print(f"Cause: {cause}", file=sys.stderr)
+    if fix:
+        print(f"Fix:   {fix}", file=sys.stderr)
     return 1
 
 
@@ -44,11 +85,11 @@ def _err(msg: str) -> int:
 # daemon commands
 # ---------------------------------------------------------------------------
 def cmd_list(args):
-    return _print(_client(args).vm_list())
+    return _output(_client(args).vm_list(), args)
 
 
 def cmd_info(args):
-    return _print(_client(args).vm_info(args.name))
+    return _output(_client(args).vm_info(args.name), args)
 
 
 def cmd_create(args):
@@ -79,57 +120,61 @@ def cmd_create(args):
         upper=args.upper,
         net=args.net,
     )
-    return _print(resp)
+    return _output(resp, args)
 
 
 def cmd_exec(args):
-    return _print(_client(args).vm_exec(args.name, args.args, timeout_secs=args.timeout))
+    return _output(_client(args).vm_exec(args.name, args.args, timeout_secs=args.timeout), args)
 
 
 def cmd_resize(args):
     c = _client(args)
     if args.cpus is None and args.memory_bytes is None:
-        return _err("resize needs --cpus and/or --memory-bytes")
-    return _print(c.vm_resize(args.name, cpus=args.cpus, memory_bytes=args.memory_bytes))
+        return _err(
+            "Nothing to resize",
+            cause="Neither --cpus nor --memory-bytes was specified",
+            fix="Provide at least one: --cpus N and/or --memory-bytes N",
+        )
+    return _output(c.vm_resize(args.name, cpus=args.cpus, memory_bytes=args.memory_bytes), args)
 
 
 def _simple(method: str):
     def f(args):
-        return _print(getattr(_client(args), method)(args.name))
+        return _output(getattr(_client(args), method)(args.name), args)
 
     return f
 
 
 def cmd_pool_create(args):
-    return _print(_client(args).pool_create(args.size, kernel=args.kernel, net=args.net))
+    return _output(_client(args).pool_create(args.size, kernel=args.kernel, net=args.net), args)
 
 
 def cmd_pool_list(args):
-    return _print(_client(args).pool_list())
+    return _output(_client(args).pool_list(), args)
 
 
 def cmd_pool_claim(args):
-    return _print(_client(args).pool_claim(args.layers))
+    return _output(_client(args).pool_claim(args.layers), args)
 
 
 def _simple_pool_release(args):
-    return _print(_client(args).pool_release(args.name))
+    return _output(_client(args).pool_release(args.name), args)
 
 
 def cmd_attach_fs(args):
-    return _print(_client(args).vm_attach_fs(args.name, args.layers))
+    return _output(_client(args).vm_attach_fs(args.name, args.layers), args)
 
 
 def _simple_detach(args):
-    return _print(_client(args).vm_detach_fs(args.name))
+    return _output(_client(args).vm_detach_fs(args.name), args)
 
 
 def cmd_net_list(args):
-    return _print(_client(args)._send({"command": "net_list"}))
+    return _output(_client(args)._send({"command": "net_list"}), args)
 
 
 def cmd_net_down(args):
-    return _print(_client(args)._send({"command": "net_down"}))
+    return _output(_client(args)._send({"command": "net_down"}), args)
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +235,11 @@ def cmd_image_build_kernel(args) -> int:
     version = args.version or ""
     script = _BUILDER_SCRIPTS["kernel"]
     if not Path(script).exists():
-        return _err(f"{script} not found — run from the Terrarium repo root")
+        return _err(
+            f"Build script not found: {script}",
+            cause="Must be run from the Terrarium repository root",
+            fix="Run this command from the repo root directory",
+        )
 
     with tempfile.TemporaryDirectory() as td:
         r = subprocess.run(
@@ -223,7 +272,11 @@ def cmd_image_build_initramfs(args) -> int:
     name = getattr(args, "name", None)
     repo = Path.cwd()
     if not (repo / "images" / "build.sh").exists():
-        return _err("must be run from the Terrarium repo root")
+        return _err(
+            "Not in Terrarium repo root",
+            cause="The images/build.sh script was not found",
+            fix="Run this command from the Terrarium repository root directory",
+        )
 
     src_rootfs = _ensure_initramfs_src_rootfs(repo)
     if args.type == "agent":
@@ -291,7 +344,11 @@ def cmd_image_remove(args) -> int:
                 rpath.unlink()
                 print(f"removed rootfs: {rpath}")
                 return 0
-    return _err(f"image not found: {name}")
+    return _err(
+        f"Image not found: {name}",
+        cause="No kernel or rootfs image with this name exists",
+        fix="List available images: terra image ls",
+    )
 
 
 def cmd_daemon_start(args):
@@ -343,7 +400,11 @@ def _build_rootfs(args) -> int:
         img = images.ensure("alpine.cpio")
         print(f"rootfs ready: {img}")
         return 0
-    return _err(f"unsupported rootfs {name!r} — supported: alpine, ubuntu (more coming later)")
+    return _err(
+        f"Unsupported rootfs: {name!r}",
+        cause="Only 'alpine' (musl) and 'ubuntu' (glibc) are supported",
+        fix=f"Use --name alpine or --name ubuntu",
+    )
 
 
 def _pack_layer_as_rootfs(layer_name: str, out_name: str) -> int:
@@ -468,14 +529,19 @@ def cmd_image_layer_build(args):
     # two ways out before burning a builder VM.
     if not args.no_net and os.geteuid() != 0:
         return _err(
-            "this build uses a networked builder VM (downloads), which needs "
-            "CAP_NET_ADMIN.\n"
-            '  either: sudo env "PATH=$PATH" terra daemon start   (then retry)\n'
-            "  or:     add --no-net for an offline build"
+            "Networked builder VM requires root privileges",
+            cause="This build uses a networked builder VM (downloads), which needs "
+            "CAP_NET_ADMIN for tap device creation",
+            fix='sudo env "PATH=$PATH" terra daemon start  (then retry)\n'
+            "     or: add --no-net for an offline build",
         )
     system = {"alpine": "base", "ubuntu": "ubuntu"}.get(args.rootfs)
     if system is None:
-        return _err(f"unsupported rootfs {args.rootfs!r} — supported: alpine, ubuntu")
+        return _err(
+            f"Unsupported rootfs: {args.rootfs!r}",
+            cause="Only 'alpine' (musl) and 'ubuntu' (glibc) are supported",
+            fix="Use --rootfs alpine or --rootfs ubuntu",
+        )
     client = _client(args)
     name = args.name
     builder = f"lb-{name}"
@@ -606,7 +672,11 @@ def _remove_path(path: Path) -> int:
     import shutil
 
     if not path.exists():
-        return _err(f"not found: {path}")
+        return _err(
+            f"Not found: {path}",
+            cause="The specified resource does not exist",
+            fix="List available items with the corresponding 'ls' command",
+        )
     if path.is_dir():
         shutil.rmtree(path)
     else:
@@ -645,12 +715,16 @@ def cmd_layer_create(args):
         return cmd_image_base(args2)
     # --script path (build-by-doing) requires kernel; initramfs auto-resolved
     if not args.kernel:
-        return _err("--kernel is required with --script (e.g. --kernel k612)")
+        return _err(
+            "Missing --kernel for script-based layer build",
+            cause="--script needs a builder VM, which requires a kernel",
+            fix="Provide --kernel (e.g. --kernel k612)",
+        )
     return cmd_image_layer_build(args)
 
 
 def cmd_net_create(args):
-    return _print(_client(args)._send({"command": "net_up"}))
+    return _output(_client(args)._send({"command": "net_up"}), args)
 
 
 def _daemon_pidfile() -> Path:
@@ -701,7 +775,11 @@ def _daemon_stop(sig) -> int:
     pids = _daemon_pids()
     if not pids:
         _daemon_pidfile().unlink(missing_ok=True)
-        return _err("no engine daemon running")
+        return _err(
+            "No engine daemon running",
+            cause="No daemon process or PID file found",
+            fix="If you want to ensure a clean state, try: terra daemon destroy",
+        )
     for pid in pids:
         os.kill(pid, sig)
         print(f"sent {_signal.Signals(sig).name} to daemon (pid={pid})")
@@ -754,9 +832,75 @@ def cmd_daemon_config(args):
 
 
 # ---------------------------------------------------------------------------
+# sandbox commands (high-level unified API)
+# ---------------------------------------------------------------------------
+def cmd_sandbox_create(args):
+    """Create a sandbox using the high-level SDK."""
+    try:
+        sb = Sandbox(
+            template=args.template,
+            layers=args.layers or None,
+            kernel=args.kernel,
+            cpu=args.cpu,
+            memory_mb=args.memory,
+            network=bool(args.network),
+            timeout=args.timeout,
+        )
+        return _output(
+            {
+                "name": sb.id,
+                "status": sb.status,
+                "backend": sb.backend,
+            },
+            args,
+        )
+    except Exception as e:
+        return _err(str(e))
+
+
+def cmd_sandbox_ls(args):
+    """List running sandboxes."""
+    c = _client(args)
+    try:
+        vms = c.vm_list()
+        sandbox_vms = [
+            v for v in vms.get("vms", []) if v.get("name", "").startswith("sandbox-")
+        ]
+        return _output(
+            {"sandboxes": sandbox_vms, "count": len(sandbox_vms)},
+            args,
+        )
+    except TerraError as e:
+        return _err(str(e))
+
+
+# ---------------------------------------------------------------------------
 def main() -> int:
-    p = argparse.ArgumentParser(prog="terra", description="Terrarium CLI (python -m terra)")
+    p = argparse.ArgumentParser(
+        prog="terra",
+        description="Terrarium CLI (python -m terra)",
+        epilog="""\
+Common workflows:
+  First time setup:
+    terra image build kernel -n k612 --version 6.12
+    terra image build rootfs -n alpine
+
+  Quick sandbox:
+    terra sandbox create --template python312
+
+  Warm pool:
+    terra pool create --size 3
+    terra pool claim --layers python312 base
+
+  Direct VM:
+    terra vm create dev --kernel k612 --layers base --net
+    terra vm exec dev -- python3 --version
+    terra vm remove dev
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument("--socket", help="daemon socket path or tcp://host:port")
+    p.add_argument("--json", action="store_true", help="machine-readable JSON output")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # --- unified resource groups: vm/image/layer/pool/net/daemon ---
@@ -799,11 +943,19 @@ def main() -> int:
         else:
             sp.set_defaults(f=_simple(method))
 
-    sp = vms.add_parser("attach-fs")
+    sp = vms.add_parser("attach", help="hot-plug layers to a running VM")
     sp.add_argument("name")
     sp.add_argument("--layers", nargs="+", required=True)
     sp.set_defaults(f=cmd_attach_fs)
-    sp = vms.add_parser("detach-fs")
+    sp = vms.add_parser("detach", help="hot-unplug layers from a running VM")
+    sp.add_argument("name")
+    sp.set_defaults(f=_simple_detach)
+    # Backward-compat hidden aliases
+    sp = vms.add_parser("attach-fs", help=argparse.SUPPRESS)
+    sp.add_argument("name")
+    sp.add_argument("--layers", nargs="+", required=True)
+    sp.set_defaults(f=cmd_attach_fs)
+    sp = vms.add_parser("detach-fs", help=argparse.SUPPRESS)
     sp.add_argument("name")
     sp.set_defaults(f=_simple_detach)
 
@@ -887,23 +1039,35 @@ def main() -> int:
     gs.add_parser("stop").set_defaults(f=cmd_daemon_stop)
     gs.add_parser("destroy").set_defaults(f=cmd_daemon_destroy)
 
+    g = sub.add_parser("sandbox", help="high-level sandbox operations (recommended)")
+    gs = g.add_subparsers(dest="action", required=True)
+    c = gs.add_parser("create")
+    c.add_argument("--template", help="template name")
+    c.add_argument("--layers", nargs="*")
+    c.add_argument("--kernel")
+    c.add_argument("--cpu", type=int, default=1)
+    c.add_argument("--memory", type=int, default=256)
+    c.add_argument("--network", action="store_true")
+    c.add_argument("--timeout", type=int, default=600)
+    c.set_defaults(f=cmd_sandbox_create)
+    gs.add_parser("ls").set_defaults(f=cmd_sandbox_ls)
+
     args = p.parse_args()
     try:
         return args.f(args)
     except TerraError as e:
         return _err(str(e))
     except (FileNotFoundError, ConnectionRefusedError):
-        hint = (
-            "no engine daemon found — start one first:\n"
-            "  terra daemon start\n"
-            "  (or: python -c 'from terra.daemon import Daemon; Daemon().start()')\n"
-            "  or point at an existing one: --socket <path|tcp://host:port> or TERRA_SOCKET"
+        return _err(
+            "Cannot connect to engine daemon",
+            cause=f"No daemon running at {paths.default_socket()}",
+            fix="Run 'terra daemon start' to start the engine",
         )
-        return _err(hint)
     except PermissionError:
         return _err(
-            "socket exists but is not usable by this user (owned by root?) — "
-            "socket unusable by this user — start your own daemon: terra daemon start"
+            "Socket permission denied",
+            cause=f"Socket at {paths.default_socket()} is owned by another user (root?)",
+            fix="Start your own daemon: terra daemon start",
         )
     except KeyboardInterrupt:
         return 130
