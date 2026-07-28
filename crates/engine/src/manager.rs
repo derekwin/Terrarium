@@ -6,7 +6,7 @@
 //! docs/plans/ for the filesystem design).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use adapter_traits::{AdapterError, VmAdapter, VmHandle, VmName, VmSpec};
 
@@ -21,10 +21,22 @@ pub struct PoolSlot {
     pub layers: Vec<String>,
 }
 
+/// Information about a background exec session.
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    pub session_id: String,
+    pub vm_name: String,
+    pub args: Vec<String>,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+}
+
 /// Central VM registry for the controller.
 pub struct VmManager {
     adapter: Arc<dyn VmAdapter>,
-    vms: HashMap<VmName, Box<dyn VmHandle>>,
+    vms: HashMap<VmName, Arc<dyn VmHandle>>,
     /// VMs created with networking enabled.
     net_vms: std::collections::HashSet<String>,
     /// Warm pool slots (idle agent VMs ready for hot-plug assignment).
@@ -33,6 +45,8 @@ pub struct VmManager {
     pool_next_id: u32,
     /// Directory for snapshot artifacts (default: "/tmp").
     snapshot_dir: String,
+    /// Background exec sessions.
+    sessions: Arc<Mutex<HashMap<String, SessionInfo>>>,
 }
 
 impl VmManager {
@@ -45,6 +59,7 @@ impl VmManager {
             pool: Vec::new(),
             pool_next_id: 0,
             snapshot_dir,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -78,7 +93,7 @@ impl VmManager {
         if net {
             self.net_vms.insert(name.to_string());
         }
-        self.vms.insert(name, handle);
+        self.vms.insert(name, Arc::from(handle));
         Ok(())
     }
 
@@ -200,6 +215,11 @@ impl VmManager {
         self.vms.get(name).map(|v| v.as_ref())
     }
 
+    /// Get an `Arc` clone of a handle (for background tasks).
+    pub fn get_handle(&self, name: &str) -> Option<Arc<dyn VmHandle>> {
+        self.vms.get(name).cloned()
+    }
+
     /// List all VM names.
     pub fn list_names(&self) -> Vec<&str> {
         self.vms.keys().map(|s| s.as_ref()).collect()
@@ -253,7 +273,10 @@ impl VmManager {
         for name in names {
             let remove = {
                 if let Some(handle) = self.vms.get_mut(&name) {
-                    !handle.is_alive()
+                    match Arc::get_mut(handle) {
+                        Some(h) => !h.is_alive(),
+                        None => false,
+                    }
                 } else {
                     false
                 }
@@ -267,5 +290,82 @@ impl VmManager {
             }
         }
         dead
+    }
+
+    /// Start a background exec session. Returns immediately with a session_id.
+    /// The actual execution runs in a spawned task that updates session status on completion.
+    pub async fn exec_background(
+        &mut self,
+        name: &str,
+        args: &[String],
+        timeout_secs: u64,
+        session_id: &str,
+    ) -> Result<(), AdapterError> {
+        let handle = self
+            .get_handle(name)
+            .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
+
+        let args = args.to_vec();
+        let sid = session_id.to_string();
+        let vm_name = name.to_string();
+        let sessions = self.sessions.clone();
+
+        sessions.lock().unwrap().insert(
+            sid.clone(),
+            SessionInfo {
+                session_id: sid.clone(),
+                vm_name: vm_name.clone(),
+                args: args.clone(),
+                status: "running".to_string(),
+                exit_code: None,
+                stdout: None,
+                stderr: None,
+            },
+        );
+
+        tokio::spawn(async move {
+            let result = handle.exec(&args, timeout_secs).await;
+            let mut sessions = sessions.lock().unwrap();
+            if let Some(info) = sessions.get_mut(&sid) {
+                match result {
+                    Ok(r) => {
+                        info.status = "completed".to_string();
+                        info.exit_code = Some(r.exit_code);
+                        info.stdout = Some(r.stdout);
+                        info.stderr = Some(r.stderr);
+                    }
+                    Err(e) => {
+                        info.status = "failed".to_string();
+                        info.stderr = Some(e.to_string());
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Get the status of a background exec session.
+    pub fn session_status(&self, session_id: &str) -> Option<SessionInfo> {
+        self.sessions.lock().unwrap().get(session_id).cloned()
+    }
+
+    /// Kill a background exec session (marks it as killed).
+    /// Returns true if the session was found and marked, false if not found.
+    pub fn session_kill(&self, session_id: &str) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(info) = sessions.get_mut(session_id) {
+            if info.status == "running" {
+                info.status = "killed".to_string();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// List all session IDs with their status.
+    pub fn session_list(&self) -> Vec<SessionInfo> {
+        self.sessions.lock().unwrap().values().cloned().collect()
     }
 }

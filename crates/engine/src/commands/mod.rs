@@ -7,6 +7,7 @@ mod exec;
 mod fs;
 mod network;
 mod pool;
+mod session;
 mod snapshot;
 mod vm;
 
@@ -57,6 +58,9 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "pool_list" => pool::cmd_pool_list(mgr),
         "pool_claim" => pool::cmd_pool_claim(mgr, cmd).await,
         "pool_release" => pool::cmd_pool_release(mgr, cmd).await,
+        "session_status" => session::cmd_session_status(mgr, cmd),
+        "session_kill" => session::cmd_session_kill(mgr, cmd),
+        "session_list" => session::cmd_session_list(mgr),
         _ => Response::err(format!("Unknown command: {}", cmd.command)),
     }
 }

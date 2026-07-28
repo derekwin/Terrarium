@@ -73,6 +73,14 @@ pub struct Command {
     // exec: per-command timeout in seconds (default 60, capped at 3600)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+
+    // exec: execution mode ("blocking" or "background"; default "blocking")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_mode: Option<String>,
+
+    // session commands: session_id for session_status / session_kill
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl Command {
@@ -98,6 +106,8 @@ impl Command {
             memory_bytes: None,
             pool_size: None,
             timeout_secs: None,
+            exec_mode: None,
+            session_id: None,
         }
     }
 
@@ -192,6 +202,18 @@ impl Command {
     /// Builder: set exec timeout in seconds.
     pub fn with_timeout_secs(mut self, secs: u64) -> Self {
         self.timeout_secs = Some(secs);
+        self
+    }
+
+    /// Builder: set exec mode ("blocking" or "background").
+    pub fn with_exec_mode(mut self, mode: &str) -> Self {
+        self.exec_mode = Some(mode.to_string());
+        self
+    }
+
+    /// Builder: set session ID (for session_status / session_kill).
+    pub fn with_session_id(mut self, id: &str) -> Self {
+        self.session_id = Some(id.to_string());
         self
     }
 
