@@ -530,7 +530,6 @@ def cmd_image_build_initramfs(args) -> int:
     """Build initramfs via terrarium_fs (Rust), replacing shell scripts."""
     import terrarium_fs
 
-    name = getattr(args, "name", None)
     repo = Path.cwd()
     if not (repo / "images" / "build.sh").exists():
         return _err(
@@ -556,21 +555,14 @@ def cmd_image_build_initramfs(args) -> int:
                 src_rootfs, str(init_template), out,
             )
 
-    if name:
-        with tempfile.TemporaryDirectory() as td:
-            out = Path(td) / output_name
-            build_fn(str(out))
-            dest = paths.rootfs_dir() / name
-            if dest.exists():
-                shutil.rmtree(dest)
-            dest.mkdir(parents=True)
-            shutil.move(str(out), str(dest / output_name))
-            print(f"built: {dest / output_name}")
-            return EXIT_OK
-
-    out = repo / "target" / "guest" / output_name
-    out.parent.mkdir(parents=True, exist_ok=True)
-    build_fn(str(out))
+    # Always store in managed rootfs directory as a flat file
+    dest = paths.rootfs_dir() / output_name
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / output_name
+        build_fn(str(out))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(out), str(dest))
+        print(f"built: {dest}")
     return EXIT_OK
 
 
