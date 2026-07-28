@@ -55,6 +55,7 @@ class DaemonManager:
             return
         self._start_daemon()
         self._wait_ready(timeout)
+        self._fix_socket_owner()
 
     def health_check(self) -> bool:
         """Return *True* if the daemon is responsive."""
@@ -117,3 +118,13 @@ class DaemonManager:
             f"Daemon did not start within {timeout}s",
             engine_error="startup timeout",
         )
+
+    def _fix_socket_owner(self) -> None:
+        """When daemon is started via sudo, chown socket to original user."""
+        uid = os.environ.get("SUDO_UID")
+        gid = os.environ.get("SUDO_GID")
+        if uid and gid:
+            try:
+                os.chown(self.socket_path, int(uid), int(gid))
+            except OSError:
+                pass  # best-effort: socket might already be usable
