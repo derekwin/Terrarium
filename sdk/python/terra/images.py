@@ -144,7 +144,7 @@ def resolve_kernel(name_or_path: str) -> Path:
         return _migrate_artifact("vmlinux.bin")
     raise ImageError(
         f"kernel variant {name_or_path!r} not found — build one with "
-        f"`terra kernel create -n {name_or_path} --version <ver>`"
+        f"`terra image build kernel -n {name_or_path} --version <ver>`"
     )
 
 

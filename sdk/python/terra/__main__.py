@@ -135,6 +135,165 @@ def cmd_net_down(args):
 # ---------------------------------------------------------------------------
 # image commands (host-side)
 # ---------------------------------------------------------------------------
+def cmd_image_ls(args) -> int:
+    """List all images: kernels, rootfs, initramfs."""
+    kdir = paths.kernels_dir()
+    rdir = paths.rootfs_dir()
+
+    print("kernels:")
+    if kdir.is_dir():
+        for e in sorted(kdir.iterdir()):
+            if e.is_dir() and (e / "vmlinux.bin").exists():
+                print(f"  {e.name}")
+    else:
+        print("  (none)")
+
+    print("rootfs:")
+    seen = set()
+    if rdir.is_dir():
+        for e in sorted(rdir.iterdir()):
+            if e.name in _INFRA_IMAGES:
+                continue
+            alias = _ROOTFS_ALIASES.get(e.name)
+            if alias:
+                if alias not in seen:
+                    print(f"  {alias}")
+                    seen.add(alias)
+            elif e.suffix == ".cpio":
+                print(f"  {e.stem}")
+            elif e.name.endswith(".cpio.gz"):
+                print(f"  {e.name[:-len('.cpio.gz')]}")
+            else:
+                print(f"  {e.name}")
+    else:
+        print("  (none)")
+
+    print("initramfs:")
+    if rdir.is_dir():
+        for e in sorted(rdir.iterdir()):
+            if e.name in _INFRA_IMAGES:
+                alias = _ROOTFS_ALIASES.get(e.name)
+                label = alias if alias else e.name
+                print(f"  {label}")
+    else:
+        print("  (none)")
+    return 0
+
+
+def cmd_image_build_kernel(args) -> int:
+    """Build a kernel image: bash images/build-kernel.sh <version> <config> <output_dir>."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    name = args.name
+    version = args.version or ""
+    script = _BUILDER_SCRIPTS["kernel"]
+    if not Path(script).exists():
+        return _err(f"{script} not found — run from the Terrarium repo root")
+
+    with tempfile.TemporaryDirectory() as td:
+        r = subprocess.run(
+            ["bash", script, version, "", td]
+        )
+        if r.returncode:
+            return r.returncode
+        src = Path(td) / "vmlinux.bin"
+        dest = paths.kernels_dir() / name
+        shutil.rmtree(dest, ignore_errors=True)
+        dest.mkdir(parents=True)
+        target = dest / "vmlinux.bin"
+        shutil.move(str(src), str(target))
+        print(f"built: {target}")
+        return 0
+
+
+def cmd_image_build_rootfs(args) -> int:
+    """Build a bootable system rootfs. Supported: alpine, ubuntu."""
+    return _build_rootfs(args)
+
+
+def cmd_image_build_initramfs(args) -> int:
+    """Build initramfs via terrarium_fs (Rust), replacing shell scripts."""
+    import shutil
+    import tempfile
+
+    import terrarium_fs
+
+    name = getattr(args, "name", None)
+    repo = Path.cwd()
+    if not (repo / "images" / "build.sh").exists():
+        return _err("must be run from the Terrarium repo root")
+
+    src_rootfs = _ensure_initramfs_src_rootfs(repo)
+    if args.type == "agent":
+        init_template = repo / "images" / "rootfs" / "init-agent"
+        gp = _ensure_initramfs_guest_proxy(repo)
+        output_name = "initramfs-agent.cpio.gz"
+        build_fn = lambda out: terrarium_fs.build_initramfs_agent(
+            src_rootfs, gp, str(init_template), out,
+        )
+    else:  # virtiofs
+        init_template = repo / "images" / "rootfs" / "init-virtiofs"
+        output_name = "initramfs-virtiofs.cpio.gz"
+        build_fn = lambda out: terrarium_fs.build_initramfs_virtiofs(
+            src_rootfs, str(init_template), out,
+        )
+
+    if name:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / output_name
+            build_fn(str(out))
+            dest = paths.rootfs_dir() / name
+            if dest.exists():
+                shutil.rmtree(dest)
+            dest.mkdir(parents=True)
+            shutil.move(str(out), str(dest / output_name))
+            print(f"built: {dest / output_name}")
+            return 0
+
+    out = repo / "target" / "guest" / output_name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    build_fn(str(out))
+    return 0
+
+
+def cmd_image_remove(args) -> int:
+    """Remove any image — checks kernels_dir and rootfs_dir."""
+    import shutil
+
+    name = args.name
+    # Check kernels_dir
+    kpath = paths.kernels_dir() / name
+    if kpath.exists():
+        if kpath.is_dir():
+            shutil.rmtree(kpath)
+        else:
+            kpath.unlink()
+        print(f"removed kernel: {kpath}")
+        return 0
+    # Check rootfs_dir — try name directly, and with known extensions
+    rdir = paths.rootfs_dir()
+    for cand_name in (name, f"{name}.cpio", f"{name}.cpio.gz", f"{name}.img"):
+        rpath = rdir / cand_name
+        if rpath.exists():
+            if rpath.is_dir():
+                shutil.rmtree(rpath)
+            else:
+                rpath.unlink()
+            print(f"removed rootfs: {rpath}")
+            return 0
+    # Check aliases
+    for alias_img, alias_name in _ROOTFS_ALIASES.items():
+        if alias_name == name:
+            rpath = rdir / alias_img
+            if rpath.exists():
+                rpath.unlink()
+                print(f"removed rootfs: {rpath}")
+                return 0
+    return _err(f"image not found: {name}")
+
+
 def cmd_daemon_start(args):
     """Start a daemon as a detached background process.
 
@@ -168,8 +327,8 @@ def cmd_daemon_start(args):
     return 0
 
 
-def cmd_rootfs_create(args) -> int:
-    """Create a bootable system rootfs. Currently supported: alpine, ubuntu."""
+def _build_rootfs(args) -> int:
+    """Internal: create a bootable system rootfs. Supported: alpine, ubuntu."""
     import subprocess
 
     name = args.name
@@ -261,55 +420,10 @@ _BUILDER_SCRIPTS = {
 }
 
 
-def _cmd_image_build_initramfs(args) -> int:
-    """Build initramfs via terrarium_fs (Rust), replacing shell scripts."""
-    import shutil
-    import tempfile
-
-    import terrarium_fs
-
-    name = getattr(args, "name", None)
-    repo = Path.cwd()
-    if not (repo / "images" / "build.sh").exists():
-        return _err("must be run from the Terrarium repo root")
-
-    src_rootfs = _ensure_initramfs_src_rootfs(repo)
-    if args.what == "agent-initramfs":
-        init_template = repo / "images" / "rootfs" / "init-agent"
-        gp = _ensure_initramfs_guest_proxy(repo)
-        output_name = "initramfs-agent.cpio.gz"
-        build_fn = lambda out: terrarium_fs.build_initramfs_agent(
-            src_rootfs, gp, str(init_template), out,
-        )
-    else:  # initramfs (virtiofs)
-        init_template = repo / "images" / "rootfs" / "init-virtiofs"
-        output_name = "initramfs-virtiofs.cpio.gz"
-        build_fn = lambda out: terrarium_fs.build_initramfs_virtiofs(
-            src_rootfs, str(init_template), out,
-        )
-
-    if name:
-        # Named variant: build into temp dir, then move to managed images.
-        with tempfile.TemporaryDirectory() as td:
-            out = Path(td) / output_name
-            build_fn(str(out))
-            dest = paths.rootfs_dir() / name
-            if dest.exists():
-                shutil.rmtree(dest)
-            dest.mkdir(parents=True)
-            shutil.move(str(out), str(dest / output_name))
-            print(f"built: {dest / output_name}")
-            return 0
-
-    out = repo / "target" / "guest" / output_name
-    out.parent.mkdir(parents=True, exist_ok=True)
-    build_fn(str(out))
-    return 0
-
-
 def _ensure_initramfs_src_rootfs(repo: Path) -> str:
     """Return a directory with bin/busybox and musl libs."""
     import subprocess
+    import tempfile
 
     rootfs_dir = repo / "target" / "guest" / "rootfs"
     if (rootfs_dir / "bin" / "busybox").exists():
@@ -346,63 +460,6 @@ def _ensure_initramfs_guest_proxy(repo: Path) -> str:
             cwd=repo, check=True,
         )
     return str(gp)
-
-
-def cmd_image_build(args):
-    if getattr(args, "from_layer", None):
-        return _pack_layer_as_rootfs(args.from_layer, args.name)
-
-    # Initramfs builds use terrarium_fs (Rust), not shell scripts.
-    if args.what in ("initramfs", "agent-initramfs"):
-        return _cmd_image_build_initramfs(args)
-
-    script = _BUILDER_SCRIPTS[args.what]
-    if not Path(script).exists():
-        return _err(f"{script} not found — run from the Terrarium repo root")
-    import subprocess
-    import tempfile
-
-    name = getattr(args, "name", None)
-    if name:
-        # Named variant: build into a temp dir, then move the artifact
-        # into the managed images dir under its name.
-        with tempfile.TemporaryDirectory() as td:
-            extra = []
-            if args.what == "kernel":
-                # build-kernel.sh [version] [config] [output_dir];
-                # empty strings fall back to the script's defaults.
-                r = subprocess.run(
-                    ["bash", script, args.version or "", "", td]
-                )
-                if r.returncode:
-                    return r.returncode
-                src = Path(td) / "vmlinux.bin"
-            else:  # rootfs
-                out_dir = Path(td) / "rootfs"
-                r = subprocess.run(["bash", script, args.type, str(out_dir)])
-                if r.returncode:
-                    return r.returncode
-                src = out_dir
-            import shutil
-
-            dest = (
-                paths.kernels_dir() / name
-                if args.what == "kernel"
-                else paths.rootfs_dir() / name
-            )
-            if dest.exists():
-                shutil.rmtree(dest)
-            dest.mkdir(parents=True)
-            target = dest / src.name if src.is_file() else dest / "rootfs"
-            shutil.move(str(src), str(target))
-            print(f"built: {target}")
-            return 0
-
-    extra = [args.version] if getattr(args, "version", None) else []
-    if args.what == "rootfs" and getattr(args, "type", None):
-        extra = [args.type]
-    r = subprocess.run(["bash", script, *extra])
-    return r.returncode
 
 
 def cmd_image_layer_build(args):
@@ -532,15 +589,14 @@ def _rootfs_variants() -> list[str]:
     return out
 
 
-def cmd_kernel_ls(args):
-    # Print the identifiers users type: --kernel <name>
+def _kernel_list(args) -> int:
     for e in sorted(paths.kernels_dir().iterdir()):
         if e.is_dir() and (e / "vmlinux.bin").exists():
             print(e.name)
     return 0
 
 
-def cmd_rootfs_ls(args):
+def _rootfs_list(args) -> int:
     for line in _rootfs_variants():
         print(line)
     return 0
@@ -559,11 +615,11 @@ def _remove_path(path: Path) -> int:
     return 0
 
 
-def cmd_kernel_remove(args):
+def _kernel_remove(args) -> int:
     return _remove_path(paths.kernels_dir() / args.name)
 
 
-def cmd_rootfs_remove(args):
+def _rootfs_remove(args) -> int:
     return _remove_path(paths.rootfs_dir() / args.name)
 
 
@@ -703,7 +759,7 @@ def main() -> int:
     p.add_argument("--socket", help="daemon socket path or tcp://host:port")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # --- unified resource groups: vm/kernel/rootfs/layer/pool/net/daemon ---
+    # --- unified resource groups: vm/image/layer/pool/net/daemon ---
     vm = sub.add_parser("vm", help="VM operations")
     vms = vm.add_subparsers(dest="action", required=True)
     vms.add_parser("ls").set_defaults(f=cmd_list)
@@ -751,20 +807,31 @@ def main() -> int:
     sp.add_argument("name")
     sp.set_defaults(f=_simple_detach)
 
-    for kind in ("kernel", "rootfs"):
-        g = sub.add_parser(kind, help=f"manage {kind} variants")
-        gs = g.add_subparsers(dest="action", required=True)
-        gs.add_parser("ls").set_defaults(f=cmd_kernel_ls if kind == "kernel" else cmd_rootfs_ls)
-        c = gs.add_parser("create")
-        c.add_argument("-n", "--name", required=True)
-        if kind == "kernel":
-            c.add_argument("--version")
-            c.set_defaults(f=cmd_image_build, what=kind)
-        else:
-            c.set_defaults(f=cmd_rootfs_create)
-        r = gs.add_parser("remove")
-        r.add_argument("-n", "--name", required=True)
-        r.set_defaults(f=cmd_kernel_remove if kind == "kernel" else cmd_rootfs_remove)
+    # --- image: unified guest images (kernels, rootfs, initramfs) ---
+    g = sub.add_parser("image", help="manage guest images (kernel, rootfs, initramfs)")
+    gs = g.add_subparsers(dest="action", required=True)
+    gs.add_parser("ls").set_defaults(f=cmd_image_ls)
+
+    b = gs.add_parser("build")
+    bs = b.add_subparsers(dest="what", required=True)
+
+    k = bs.add_parser("kernel")
+    k.add_argument("-n", "--name", required=True)
+    k.add_argument("--version", default="6.12")
+    k.set_defaults(f=cmd_image_build_kernel)
+
+    r = bs.add_parser("rootfs")
+    r.add_argument("-n", "--name", required=True, choices=["alpine", "ubuntu"])
+    r.set_defaults(f=cmd_image_build_rootfs)
+
+    i = bs.add_parser("initramfs")
+    i.add_argument("--type", required=True, choices=["virtiofs", "agent"])
+    i.add_argument("-n", "--name", help="variant name (optional)")
+    i.set_defaults(f=cmd_image_build_initramfs)
+
+    rm = gs.add_parser("remove")
+    rm.add_argument("-n", "--name", required=True)
+    rm.set_defaults(f=cmd_image_remove)
 
     g = sub.add_parser("layer", help="manage filesystem layers")
     gs = g.add_subparsers(dest="action", required=True)
