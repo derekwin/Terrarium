@@ -261,11 +261,3 @@ impl VmManager {
         dead
     }
 }
-
-impl Default for VmManager {
-    fn default() -> Self {
-        // Default requires an adapter. We panic if called without one —
-        // callers should use VmManager::new(adapter) explicitly.
-        panic!("VmManager requires an adapter; use VmManager::new()")
-    }
-}

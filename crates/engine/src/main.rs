@@ -3,7 +3,6 @@
 //! Manages VM lifecycle, sandbox placement, resource scheduling,
 //! warm pool management, and billing metering.
 
-mod cli;
 mod commands;
 mod daemon;
 mod manager;
@@ -74,18 +73,9 @@ async fn main() {
         return;
     }
 
-    // All other commands are CLI clients → connect to daemon
-    let socket = parse_socket_flag(&args);
-    let cmd = cli::build_command(&args);
-    let cmd_name = args[1].clone();
-
-    match cli::send_command(&socket, cmd) {
-        Ok(response) => cli::print_response(&cmd_name, response),
-        Err(e) => {
-            eprintln!("ERROR: {}", e);
-            std::process::exit(1);
-        }
-    }
+    // CLI client commands have been moved to the `terra` Python CLI.
+    // Use `terra vm create/exec/destroy ...` instead.
+    usage();
 }
 
 fn parse_socket_flag(args: &[String]) -> String {

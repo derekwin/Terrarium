@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/engine",
     "crates/guest-proxy",
-    "crates/cli",
     "crates/mcp",
     "crates/adapter/traits",
     "crates/adapter/cloud-hypervisor",
