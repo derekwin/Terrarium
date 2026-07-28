@@ -29,6 +29,8 @@ Usage::
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 from .client import TerraClient
 from .sandbox import Sandbox
 from .template import Template
@@ -105,7 +107,7 @@ class Pool:
 
         Returns a :class:`~terra.sandbox.Sandbox` that is ready to use.
         The sandbox has been pre-booted and the layers are already
-        attached.
+        attached. Pool sandboxes share the pool VM as their tenant VM.
 
         Raises
         ------
@@ -113,14 +115,21 @@ class Pool:
             When the pool is exhausted (no idle slots).
         """
         claim = self._client.pool_claim(self._layers)
+        session_id = f"sb-{uuid4().hex[:4]}"
+        workdir = f"/workdir/{session_id}"
         sb = Sandbox.__new__(Sandbox)
-        sb._name = claim["name"]
+        sb._tenant = "pool"
+        sb._session_id = session_id
+        sb._vm_name = claim["name"]
+        sb._workdir = workdir
         sb._client = self._client
         sb._alive = True
         sb._default_timeout = 600
         sb._backend = "ch"
+        sb._env = {}
+        sb._from_pool = True
         sb.metadata = {}
-        sb.env = {}
+        sb._client.vm_exec(sb._vm_name, ["mkdir", "-p", sb._workdir], timeout_secs=5)
         return sb
 
     def release(self, sandbox: Sandbox) -> None:
@@ -130,7 +139,7 @@ class Pool:
         :meth:`Sandbox.kill` if you want to permanently deregister
         the VM instead.
         """
-        self._client.pool_release(sandbox._name)
+        self._client.pool_release(sandbox._vm_name)
         sandbox._alive = False
 
     # ── status ─────────────────────────────────────────────────────

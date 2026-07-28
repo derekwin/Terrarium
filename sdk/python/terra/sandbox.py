@@ -1,17 +1,30 @@
-"""Sandbox — a unified API over VM creation, exec, lifecycle, and metrics.
+"""Sandbox — a session inside a tenant VM, sharing the VM with other sessions.
+
+VM = tenant isolation boundary, Sandbox = agent session inside a VM.
+Multiple Sandboxes share one VM per tenant. If a tenant has no VM,
+the first Sandbox creates it.
 
 Usage::
 
     from terra.sandbox import Sandbox
 
-    sb = Sandbox(template="py312", network=True)
-    result = sb.exec(["python3", "-c", "print(2+2)"], check=True)
-    print(result.stdout)
-    sb.kill()
+    # First sandbox for a tenant — creates the VM:
+    sb1 = Sandbox(tenant="my-org", template="py312")
 
-    # Or as a context manager — auto-kills on exit:
+    # Second sandbox — reuses the same VM, new session:
+    sb2 = Sandbox(tenant="my-org")
+    sb2.exec("python3 -c 'print(2+2)'")
+
+    # Both share the same VM, independent workdirs:
+    sb1.id  # "tenant-my-org/sb-a3f2"
+    sb2.id  # "tenant-my-org/sb-b1c4"
+
+    # Context manager — auto-kills session on exit:
     with Sandbox(template="py312") as sb:
         print(sb.exec(["python3", "--version"]).stdout)
+
+    # Destroy the whole tenant (all sandboxes):
+    Sandbox.destroy_tenant("my-org")
 """
 
 from __future__ import annotations
@@ -51,7 +64,7 @@ class FilesClient:
     """File operations inside a sandbox, bridged via :meth:`Sandbox.exec`.
 
     All paths are resolved relative to the guest's working directory
-    (``/workdir`` by default).  Use absolute paths when needed.
+    (``/workdir/<session>`` by default).  Use absolute paths when needed.
     """
 
     def __init__(self, sandbox: Sandbox):
@@ -116,12 +129,19 @@ class FilesClient:
 
 
 class Sandbox:
-    """A running Terrarium sandbox (VM) with a unified high-level API.
+    """A session inside a shared tenant VM.
+
+    Multiple Sandbox instances for the same tenant share a single VM
+    but have independent working directories and exec contexts.
 
     Parameters
     ----------
+    tenant:
+        Tenant identifier. Auto-generated if *None*.
+        Sandboxes with the same tenant share one VM.
     template:
         Named template to load (resolves ``layers``, ``kernel``).
+        Required for the first sandbox in a tenant.
         Mutually replaces explicit ``layers`` and ``kernel``.
     layers:
         Explicit virtiofs layer names, highest priority first, base last.
@@ -150,8 +170,9 @@ class Sandbox:
 
     def __init__(
         self,
-        template: str | None = None,
+        tenant: str | None = None,
         *,
+        template: str | None = None,
         layers: list[str] | None = None,
         kernel: str | None = None,
         backend: str = "auto",
@@ -162,64 +183,96 @@ class Sandbox:
         timeout: int = 600,
         metadata: dict | None = None,
     ):
-        # -- resolve template -------------------------------------------------
-        system_layer: str | None = None
-        if template:
-            t = Template.load(template)
-            system_layer = _SYSTEM_MAP.get(t.base, t.base)
-            if layers is None:
-                layers = t.layers + [system_layer]
-            if kernel is None and t.kernel:
-                kernel = t.kernel
-
-        if layers is None:
-            layers = ["base"]
-
-        # -- resolve kernel ---------------------------------------------------
-        if kernel:
-            from pathlib import Path as _Path
-
-            if _Path(kernel).exists():
-                kernel_path = str(_Path(kernel).expanduser())
-            else:
-                kernel_path = str(images.resolve_kernel(kernel))
-        else:
-            kernel_path = str(images.ensure("vmlinux.bin"))
-
-        # -- resolve initramfs ------------------------------------------------
-        initramfs = str(images.resolve_rootfs("virtiofs"))
+        # -- identity ---------------------------------------------------------
+        self._tenant: str = tenant or f"tenant-{uuid4().hex[:8]}"
+        self._session_id: str = f"sb-{uuid4().hex[:4]}"
+        self._vm_name: str = f"tenant-{self._tenant}"
 
         # -- auto-start daemon ------------------------------------------------
         dm = DaemonManager()
         dm.ensure_running()
 
-        # -- create VM --------------------------------------------------------
+        # -- check if tenant VM already exists ---------------------------------
         client = TerraClient()
-        self._name: str = f"sandbox-{uuid4().hex[:8]}"
+        vm_exists: bool = False
+        try:
+            info = client.vm_info(self._vm_name)
+            vm_exists = True
+        except ClientError:
+            vm_exists = False
 
-        client.vm_create(
-            self._name,
-            kernel_path,
-            initramfs=initramfs,
-            layers=layers,
-            cpus=cpu or 1,
-            memory_mb=memory_mb or 256,
-            net=bool(network),
-        )
+        if not vm_exists:
+            # First sandbox for this tenant → create VM.
+            if not template and not layers:
+                raise TerraError(
+                    "template or layers required for first sandbox in tenant",
+                    sandbox_id=self._vm_name,
+                )
 
+            # -- resolve template ----------------------------------------------
+            system_layer: str | None = None
+            if template:
+                t = Template.load(template)
+                system_layer = _SYSTEM_MAP.get(t.base, t.base)
+                if layers is None:
+                    layers = t.layers + [system_layer]
+                if kernel is None and t.kernel:
+                    kernel = t.kernel
+
+            if layers is None:
+                layers = ["base"]
+
+            # -- resolve kernel ------------------------------------------------
+            if kernel:
+                from pathlib import Path as _Path
+
+                if _Path(kernel).exists():
+                    kernel_path = str(_Path(kernel).expanduser())
+                else:
+                    kernel_path = str(images.resolve_kernel(kernel))
+            else:
+                kernel_path = str(images.ensure("vmlinux.bin"))
+
+            # -- create VM -----------------------------------------------------
+            initramfs = str(images.resolve_rootfs("virtiofs"))
+            client.vm_create(
+                self._vm_name,
+                kernel_path,
+                initramfs=initramfs,
+                layers=layers,
+                cpus=cpu or 1,
+                memory_mb=memory_mb or 256,
+                net=bool(network),
+            )
+        else:
+            # VM exists → validate it's running.
+            if info.get("state") not in ("Running",):
+                raise SandboxStateError(
+                    f"Tenant VM {self._vm_name} is not running",
+                    sandbox_id=self._vm_name,
+                )
+
+        # -- create per-sandbox workdir ----------------------------------------
+        self._workdir: str = f"/workdir/{self._session_id}"
         self._client = client
         self._alive: bool = True
         self._default_timeout = timeout
         self._backend: str = "ch"  # default; can be detected from info later
+        self._env: dict[str, str] = dict(env or {})
+        self._from_pool: bool = False
         self.metadata: dict = metadata or {}
-        self.env: dict[str, str] = env or {}
 
     # ── properties ─────────────────────────────────────────────────
 
     @property
     def id(self) -> str:
-        """Unique sandbox identifier (the VM name)."""
-        return self._name
+        """Full sandbox identifier: ``{vm_name}/{session_id}``."""
+        return f"{self._vm_name}/{self._session_id}"
+
+    @property
+    def vm(self) -> str:
+        """The tenant VM name this sandbox runs in."""
+        return self._vm_name
 
     @property
     def status(self) -> str:
@@ -227,7 +280,7 @@ class Sandbox:
         if not self._alive:
             return "stopped"
         try:
-            info = self._client.vm_info(self._name)
+            info = self._client.vm_info(self._vm_name)
         except ClientError:
             return "stopped"
         state: str = info.get("state", "")
@@ -241,6 +294,15 @@ class Sandbox:
     def backend(self) -> str:
         """Backend in use (``"ch"`` for Cloud Hypervisor)."""
         return self._backend
+
+    @property
+    def env(self) -> dict[str, str]:
+        """Default environment variables for :meth:`exec`."""
+        return self._env
+
+    @env.setter
+    def env(self, value: dict[str, str]) -> None:
+        self._env = dict(value)
 
     @property
     def files(self) -> FilesClient:
@@ -257,7 +319,7 @@ class Sandbox:
     def exec(
         self,
         command: str | list[str],
-        cwd: str = "/workdir",
+        cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout: int | None = None,
         check: bool = False,
@@ -269,9 +331,11 @@ class Sandbox:
         command:
             Command as a string (will be ``split()``) or list of args.
         cwd:
-            Working directory inside the guest.
+            Working directory inside the guest (defaults to the sandbox's
+            private workdir).
         env:
-            Extra environment variables prepended to the command.
+            Extra environment variables prepended to the command
+            (merged with sandbox-level *env*).
         timeout:
             Per-command timeout in seconds (defaults to sandbox-level *timeout*).
         check:
@@ -295,8 +359,8 @@ class Sandbox:
         """
         if not self._alive:
             raise SandboxStateError(
-                f"Sandbox {self._name} is not alive",
-                sandbox_id=self._name,
+                f"Sandbox {self.id} is killed",
+                sandbox_id=self.id,
             )
 
         # Normalise to list-of-strings.
@@ -305,34 +369,32 @@ class Sandbox:
         else:
             args = list(command)
 
-        # Inject cwd / env via shell wrapping when needed.
-        # (The guest agent does not yet accept cwd/env natively.)
-        prefix_parts: list[str] = []
-        if cwd != "/workdir":
-            prefix_parts.append(f"cd {cwd}")
+        # Set workdir to sandbox-specific directory unless overridden.
+        effective_cwd: str = cwd if cwd is not None else self._workdir
+
+        # Combine sandbox-level env + command-level env.
+        full_env: dict[str, str] = dict(self._env)
         if env:
-            for k, v in env.items():
-                prefix_parts.append(f"export {k}={v}")
-        elif self.env:
-            for k, v in self.env.items():
-                prefix_parts.append(f"export {k}={v}")
-        if prefix_parts:
-            # Combine into a single shell invocation.
-            inner = " ".join(args)
-            args = ["sh", "-c", " && ".join(prefix_parts + [inner])]
+            full_env.update(env)
+
+        if full_env:
+            prefix = " ".join(f"{k}={v}" for k, v in full_env.items())
+            args = ["sh", "-c", f"cd {effective_cwd} && {prefix} {' '.join(args)}"]
+        else:
+            args = ["sh", "-c", f"cd {effective_cwd} && {' '.join(args)}"]
 
         timeout_secs = timeout if timeout is not None else self._default_timeout
 
         try:
-            resp = self._client.vm_exec(self._name, args, timeout_secs)
+            resp = self._client.vm_exec(self._vm_name, args, timeout_secs)
         except ClientError as e:
             msg = str(e)
             if "timeout" in msg.lower():
                 raise SandboxTimeoutError(
-                    msg, sandbox_id=self._name, engine_error=msg
+                    msg, sandbox_id=self.id, engine_error=msg
                 ) from e
             raise TerraError(
-                msg, sandbox_id=self._name, engine_error=msg
+                msg, sandbox_id=self.id, engine_error=msg
             ) from e
 
         result = ExecResult(
@@ -347,7 +409,7 @@ class Sandbox:
             raise ExecError(
                 f"Command exited with {result.exit_code}",
                 exec_result=result,
-                sandbox_id=self._name,
+                sandbox_id=self.id,
             )
 
         return result
@@ -355,18 +417,35 @@ class Sandbox:
     # ── lifecycle ──────────────────────────────────────────────────
 
     def kill(self) -> None:
-        """Stop and deregister the sandbox immediately.
+        """Kill this sandbox session (does NOT destroy the shared tenant VM).
+
+        Only removes the sandbox workdir. Other sandboxes on the same
+        tenant VM continue running.
 
         Idempotent — safe to call multiple times.
         """
         if not self._alive:
             return
         try:
-            self._client.vm_destroy(self._name)
+            self._client.vm_exec(
+                self._vm_name, ["rm", "-rf", self._workdir], timeout_secs=5
+            )
         except ClientError:
             pass
-        finally:
-            self._alive = False
+        self._alive = False
+
+    @classmethod
+    def destroy_tenant(cls, tenant_id: str) -> None:
+        """Destroy the tenant VM and all its sandboxes.
+
+        Parameters
+        ----------
+        tenant_id:
+            The tenant identifier (the part after ``tenant-`` in the VM name).
+        """
+        client = TerraClient()
+        vm_name = f"tenant-{tenant_id}"
+        client.vm_destroy(vm_name)
 
     def metrics(self) -> dict:
         """Query current resource usage.
@@ -375,17 +454,17 @@ class Sandbox:
         """
         if not self._alive:
             raise SandboxStateError(
-                f"Sandbox {self._name} is not alive",
-                sandbox_id=self._name,
+                f"Sandbox {self.id} is killed",
+                sandbox_id=self.id,
             )
-        info = self._client.vm_info(self._name)
+        info = self._client.vm_info(self._vm_name)
         return {
             "cpu_count": info.get("cpus"),
             "memory_mb": info.get("memory_mb"),
         }
 
     def resize(self, cpu: int | None = None, memory_mb: int | None = None) -> None:
-        """Resize sandbox resources online (no reboot required).
+        """Resize the tenant VM's resources online (no reboot required).
 
         Parameters
         ----------
@@ -396,15 +475,15 @@ class Sandbox:
         """
         if not self._alive:
             raise SandboxStateError(
-                f"Sandbox {self._name} is not alive",
-                sandbox_id=self._name,
+                f"Sandbox {self.id} is killed",
+                sandbox_id=self.id,
             )
         kwargs: dict = {}
         if cpu is not None:
             kwargs["cpus"] = cpu
         if memory_mb is not None:
             kwargs["memory_bytes"] = memory_mb * 1024 * 1024
-        self._client.vm_resize(self._name, **kwargs)
+        self._client.vm_resize(self._vm_name, **kwargs)
 
     # ── context manager ────────────────────────────────────────────
 
@@ -416,7 +495,7 @@ class Sandbox:
 
     def __repr__(self) -> str:
         status = self.status if self._alive else "stopped"
-        return f"Sandbox(id={self._name!r}, status={status!r})"
+        return f"Sandbox(id={self.id!r}, vm={self._vm_name!r}, status={status!r})"
 
     def __del__(self) -> None:
         """Best-effort cleanup on GC."""
