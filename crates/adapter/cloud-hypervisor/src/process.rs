@@ -1,8 +1,8 @@
 //! CH process management — spawning, arg building, and startup helpers.
 
-use adapter_traits::{AdapterError, VmSpec};
-use crate::client::ChClient;
 use crate::api;
+use crate::client::ChClient;
+use adapter_traits::{AdapterError, VmSpec};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
