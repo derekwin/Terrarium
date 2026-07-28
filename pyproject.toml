@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "setuptools-rust>=1.10"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terrarium"
+version = "0.1.0"
+description = "Terrarium Engine — production-grade agent sandboxing"
+requires-python = ">=3.10"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    { name = "Terrarium Contributors" },
+]
+keywords = ["sandbox", "vm", "kvm", "cloud-hypervisor", "agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+]
+
+[project.scripts]
+terra = "terra.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["sdk/python"]
+include = ["terra*"]
+
+[[tool.setuptools-rust.ext-modules]]
+# Top-level Python extension module `terrarium_engine`
+# lib.name in crates/engine/Cargo.toml is "terrarium_engine"
+target = "terrarium_engine"
+path = "crates/engine/Cargo.toml"
+binding = "PyO3"
+
+[[tool.setuptools-rust.ext-modules]]
+# Top-level Python extension module `terrarium_fs`
+# lib.name in crates/fs/Cargo.toml is "terrarium_fs"
+# The crate's pyo3 dep is optional; must be enabled.
+target = "terrarium_fs"
+path = "crates/fs/Cargo.toml"
+binding = "PyO3"
+features = ["pyo3"]

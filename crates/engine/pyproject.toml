@@ -5,6 +5,7 @@ build-backend = "maturin"
 [project]
 name = "terrarium-engine"
 requires-python = ">=3.8"
+dynamic = ["version"]
 
 [tool.maturin]
 module-name = "terrarium_engine"

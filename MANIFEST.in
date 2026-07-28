@@ -1,0 +1,13 @@
+# Include Rust source files for source distributions
+include crates/engine/Cargo.toml crates/engine/src/**/*.rs
+include crates/fs/Cargo.toml crates/fs/src/**/*.rs
+include crates/adapter/**/Cargo.toml crates/adapter/**/src/**/*.rs
+include crates/network/Cargo.toml crates/network/src/**/*.rs
+include crates/protocol/Cargo.toml crates/protocol/src/**/*.rs
+include crates/guest-proxy/Cargo.toml crates/guest-proxy/src/**/*.rs
+include Cargo.toml Cargo.lock
+
+# Include SDK Python source
+include sdk/python/terra/**/*.py
+include sdk/python/pyproject.toml
+include sdk/python/README.md

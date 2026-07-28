@@ -1,3 +1,14 @@
+# NOTE: This pyproject.toml is for standalone SDK installs.
+# For unified builds (Rust extensions + SDK), use the root pyproject.toml:
+#   pip install -e .          # dev mode (editable)
+#   python -m build --wheel   # produces self-contained wheel
+#
+# Standalone SDK install (Python only, no Rust extensions):
+#   pip install -e sdk/python
+#
+# Individual crate maturin builds still work:
+#   cd crates/engine && maturin build --release
+#   cd crates/fs && maturin build --release
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

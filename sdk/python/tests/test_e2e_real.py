@@ -587,11 +587,9 @@ def test_layered_boot_erofs() -> None:
         return
     layer_dir = Path(_state["state_dir"]) / "layers"
     # build EROFS images from the dir layers, under distinct names
+    import terrarium_fs
     for src, name in ((layer_dir / "base", "ebase"), (layer_dir / "marker", "emarker")):
-        subprocess.run(
-            ["bash", "images/build-layer.sh", str(src), name, str(layer_dir)],
-            cwd=REPO, check=True, capture_output=True,
-        )
+        terrarium_fs.build_erofs_layer(str(src), name, str(layer_dir))
     vm = create(
         "sdk-fs2", str(KERNEL),
         initramfs=str(IRFS_VIRTIOFS),

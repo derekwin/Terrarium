@@ -11,3 +11,10 @@ __pycache__/
 *.egg-info/
 .omo/
 AGENTS.md
+
+# Built wheels
+dist/
+build/
+
+# Built .so files in SDK (from editable installs)
+sdk/python/*.so
