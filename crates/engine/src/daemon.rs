@@ -11,7 +11,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use adapter_cloud_hypervisor::ChAdapter;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::Mutex;
@@ -23,29 +22,27 @@ use terrarium_protocol::Response;
 /// Maximum size of a single JSON command line (64 KB).
 const MAX_COMMAND_LINE: usize = 64 * 1024;
 
-/// Default CH binary path. Can be overridden via TERRA_CH_BINARY env var.
-const DEFAULT_CH_BINARY: &str = "cloud-hypervisor";
-
 /// Run the controller in daemon mode.
 ///
 /// - `socket_path`: unix socket for local clients (chmod 0600)
 /// - `tcp_addr`: optional "host:port" for remote clients (token-gated)
-pub async fn run(socket_path: &str, tcp_addr: Option<&str>) -> std::io::Result<()> {
+/// - `adapter`: VMM adapter (testable with MockVmAdapter)
+pub async fn run(
+    socket_path: &str,
+    tcp_addr: Option<&str>,
+    adapter: Arc<dyn adapter_traits::VmAdapter>,
+) -> std::io::Result<()> {
     let _ = std::fs::remove_file(socket_path);
 
     let listener = UnixListener::bind(socket_path)?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!(socket = %socket_path, "Daemon listening");
 
-    let ch_binary = std::env::var("TERRA_CH_BINARY")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_CH_BINARY.to_string());
-    let adapter: Arc<dyn adapter_traits::VmAdapter> = Arc::new(ChAdapter::new(ch_binary));
     let manager = Arc::new(Mutex::new(VmManager::new(adapter)));
     let token: Option<String> = std::env::var("TERRA_TOKEN").ok().filter(|s| !s.is_empty());
 
     // Handle SIGTERM/SIGINT for graceful shutdown.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mgr_clone = Arc::clone(&manager);
     tokio::spawn(async move {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -56,7 +53,7 @@ pub async fn run(socket_path: &str, tcp_addr: Option<&str>) -> std::io::Result<(
         }
         tracing::info!("Received shutdown signal, stopping all VMs");
         mgr_clone.lock().await.shutdown_all().await;
-        std::process::exit(0);
+        let _ = shutdown_tx.send(true);
     });
 
     // Optional TCP listener for remote clients.
@@ -65,8 +62,12 @@ pub async fn run(socket_path: &str, tcp_addr: Option<&str>) -> std::io::Result<(
         tracing::info!(addr = %addr, token = token.is_some(), "TCP listener for remote clients");
         let mgr = Arc::clone(&manager);
         let token = token.clone();
+        let shutdown_rx_tcp = shutdown_rx.clone();
         tokio::spawn(async move {
             loop {
+                if *shutdown_rx_tcp.borrow() {
+                    break;
+                }
                 match tcp.accept().await {
                     Ok((stream, peer)) => {
                         let mgr = Arc::clone(&mgr);
@@ -88,6 +89,9 @@ pub async fn run(socket_path: &str, tcp_addr: Option<&str>) -> std::io::Result<(
     }
 
     loop {
+        if *shutdown_rx.borrow() {
+            break;
+        }
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let mgr = Arc::clone(&manager);
@@ -101,6 +105,8 @@ pub async fn run(socket_path: &str, tcp_addr: Option<&str>) -> std::io::Result<(
             }
         }
     }
+
+    Ok(())
 }
 
 /// Token gate for remote connections: the first line must equal the

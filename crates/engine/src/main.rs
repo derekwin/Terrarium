@@ -8,8 +8,13 @@ mod daemon;
 mod manager;
 
 use std::env;
+use std::sync::Arc;
+
+use adapter_cloud_hypervisor::ChAdapter;
+use adapter_traits::VmAdapter;
 
 const DEFAULT_SOCKET: &str = "/tmp/terra.sock";
+const DEFAULT_CH_BINARY: &str = "cloud-hypervisor";
 
 fn usage() -> ! {
     eprintln!(
@@ -67,7 +72,12 @@ async fn main() {
     if args[1] == "daemon" {
         let socket = parse_socket_flag(&args);
         let tcp = parse_flag(&args, "--tcp");
-        daemon::run(&socket, tcp.as_deref())
+        let ch_binary = std::env::var("TERRA_CH_BINARY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_CH_BINARY.to_string());
+        let adapter: Arc<dyn VmAdapter> = Arc::new(ChAdapter::new(ch_binary));
+        daemon::run(&socket, tcp.as_deref(), adapter)
             .await
             .expect("Daemon failed");
         return;

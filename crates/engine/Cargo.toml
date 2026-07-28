@@ -4,11 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "terrarium_engine"
+crate-type = ["cdylib", "lib"]
+
 [dependencies]
 adapter-cloud-hypervisor = { path = "../adapter/cloud-hypervisor" }
 adapter-traits = { path = "../adapter/traits" }
 terrarium-network = { path = "../network" }
 terrarium-protocol = { path = "../protocol" }
+pyo3 = "0.22"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
