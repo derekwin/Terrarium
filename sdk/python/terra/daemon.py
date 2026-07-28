@@ -83,6 +83,21 @@ class Daemon:
 
         terrarium_engine.start_daemon(self.socket, ch_binary=ch_binary)
 
+        # When started via sudo, chown the socket to the original user
+        # so regular CLI commands work without sudo.
+        uid = os.environ.get("SUDO_UID")
+        gid = os.environ.get("SUDO_GID")
+        if uid and gid:
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if Path(self.socket).exists():
+                    try:
+                        os.chown(self.socket, int(uid), int(gid))
+                    except OSError:
+                        pass
+                    break
+                time.sleep(0.05)
+
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
