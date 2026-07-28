@@ -428,7 +428,7 @@ def cmd_image_layer_build(args):
         client.vm_create(
             builder,
             args.kernel,
-            initramfs=args.initramfs,
+            initramfs=str(images.resolve_rootfs("virtiofs")),
             cpus=1,
             memory_mb=512,
             layers=[system],
@@ -587,11 +587,9 @@ def cmd_layer_create(args):
     if args.from_image:
         args2 = argparse.Namespace(name=args.name, force=True)
         return cmd_image_base(args2)
-    # --script path (build-by-doing) requires kernel + initramfs
+    # --script path (build-by-doing) requires kernel; initramfs auto-resolved
     if not args.kernel:
         return _err("--kernel is required with --script (e.g. --kernel k612)")
-    if not args.initramfs:
-        return _err("--initramfs is required with --script (e.g. --initramfs initramfs-virtiofs)")
     return cmd_image_layer_build(args)
 
 
@@ -780,7 +778,7 @@ def main() -> int:
     c.add_argument("--rootfs", required=True,
                    help="system the layer is built on: alpine (musl) or ubuntu (glibc)")
     c.add_argument("--kernel", help="kernel for builder VM (required with --script)")
-    c.add_argument("--initramfs", help="initramfs for builder VM (required with --script)")
+
     c.add_argument("--no-net", action="store_true")
     c.add_argument("--timeout", type=int, default=600)
     c.set_defaults(f=cmd_layer_create)
