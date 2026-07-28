@@ -16,6 +16,8 @@ Usage::
 
 from __future__ import annotations
 
+import base64
+from dataclasses import dataclass
 from uuid import uuid4
 
 
@@ -33,6 +35,84 @@ from .exceptions import (
 
 # Template base label → engine system layer name.
 _SYSTEM_MAP: dict[str, str] = {"alpine": "base", "ubuntu": "ubuntu"}
+
+
+@dataclass
+class FileInfo:
+    """Metadata for a file or directory inside a sandbox."""
+
+    name: str
+    size: int = 0
+    is_dir: bool = False
+    mtime: str = ""
+
+
+class FilesClient:
+    """File operations inside a sandbox, bridged via :meth:`Sandbox.exec`.
+
+    All paths are resolved relative to the guest's working directory
+    (``/workdir`` by default).  Use absolute paths when needed.
+    """
+
+    def __init__(self, sandbox: Sandbox):
+        self._sb = sandbox
+
+    def read(self, path: str) -> str:
+        """Read a file from the sandbox and return its content as a string."""
+        result = self._sb.exec(["cat", path])
+        return result.stdout
+
+    def write(self, path: str, content: str) -> None:
+        """Write *content* into a file inside the sandbox.
+
+        The content is base64-encoded so that shell metacharacters are
+        handled safely and binary payloads can be written.
+        """
+        encoded = base64.b64encode(content.encode()).decode()
+        self._sb.exec(["sh", "-c", f"echo {encoded} | base64 -d > {path}"])
+
+    def upload(self, local_path: str, remote_path: str) -> None:
+        """Upload a file from the host to the sandbox."""
+        with open(local_path, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+        self._sb.exec(["sh", "-c", f"echo {data} | base64 -d > {remote_path}"])
+
+    def download(self, remote_path: str, local_path: str) -> None:
+        """Download a file from the sandbox to the host."""
+        result = self._sb.exec(["cat", remote_path])
+        with open(local_path, "w") as f:
+            f.write(result.stdout)
+
+    def list(self, path: str) -> list[FileInfo]:
+        """List files and directories at *path* inside the sandbox."""
+        result = self._sb.exec(["ls", "-la", path])
+        lines = result.stdout.strip().split("\n")
+        # The first line is the "total N" summary — skip it.
+        files: list[FileInfo] = []
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) >= 9:
+                files.append(
+                    FileInfo(
+                        name=parts[8],
+                        is_dir=line.startswith("d"),
+                        size=int(parts[4]) if parts[4].isdigit() else 0,
+                    )
+                )
+        return files
+
+    def mkdir(self, path: str) -> None:
+        """Create a directory (and parents) inside the sandbox."""
+        self._sb.exec(["mkdir", "-p", path])
+
+    def remove(self, path: str) -> None:
+        """Remove a file or directory tree inside the sandbox."""
+        self._sb.exec(["rm", "-rf", path])
+
+    def exists(self, path: str) -> bool:
+        """Return *True* if *path* exists inside the sandbox."""
+        result = self._sb.exec(["test", "-e", path], check=False)
+        return result.exit_code == 0
 
 
 class Sandbox:
@@ -161,6 +241,16 @@ class Sandbox:
     def backend(self) -> str:
         """Backend in use (``"ch"`` for Cloud Hypervisor)."""
         return self._backend
+
+    @property
+    def files(self) -> FilesClient:
+        """File operations client (read, write, upload, download, list, etc.).
+
+        Lazily created on first access.
+        """
+        if not hasattr(self, "_files"):
+            self._files = FilesClient(self)
+        return self._files
 
     # ── exec ───────────────────────────────────────────────────────
 
