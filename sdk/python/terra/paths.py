@@ -84,17 +84,5 @@ def run_dir() -> Path:
 
 
 def default_socket() -> str:
-    """Default engine daemon socket path.
-
-    The legacy /tmp/terra.sock is only used when it is actually usable
-    by this user — a root-owned 0600 socket must not be picked (users
-    should never need sudo).
-    """
-    legacy = Path("/tmp/terra.sock")
-    if (
-        legacy.exists()
-        and os.access(legacy, os.W_OK)
-        and "TERRA_HOME" not in os.environ
-    ):
-        return str(legacy)
-    return str(run_dir() / "terra.sock")
+    """Default engine daemon socket path — always /tmp/terra.sock."""
+    return "/tmp/terra.sock"
