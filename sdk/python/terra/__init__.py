@@ -23,6 +23,8 @@ from .daemon import session
 from .config import HostConfig
 from . import direct
 from .direct import create, list_vms, connect
+from . import sandbox
+from .sandbox import Sandbox
 
 __all__ = [
     "TerraClient",
@@ -35,6 +37,8 @@ __all__ = [
     "session",
     "HostConfig",
     "direct",
+    "sandbox",
+    "Sandbox",
     "create",
     "connect",
     "list_vms",
