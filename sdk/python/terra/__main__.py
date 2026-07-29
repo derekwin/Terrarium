@@ -820,7 +820,7 @@ def _build_layer_via_vm(args) -> int:
     try:
         client.vm_create(
             builder,
-            args.kernel,
+            args.kernel if Path(args.kernel).exists() else str(images.resolve_kernel(args.kernel)),
             initramfs=str(images.resolve_rootfs("virtiofs")),
             cpus=1,
             memory_mb=512,
