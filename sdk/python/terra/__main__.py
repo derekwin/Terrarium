@@ -832,6 +832,20 @@ def _build_layer_via_vm(args) -> int:
         return _err(f"builder VM create failed: {e}")
     print(f"builder VM {builder} running")
 
+    # Wait for VM to be fully ready before exec
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            info = client.vm_info(builder)
+            if info.get("state") == "Running":
+                break
+        except TerraError:
+            pass
+        time.sleep(0.5)
+    else:
+        client.vm_destroy(builder)
+        return _err(f"builder VM {builder} did not reach Running state within 30s")
+
     try:
         content = Path(args.script).read_text()
     except OSError as e:
