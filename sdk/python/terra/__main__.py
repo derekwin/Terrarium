@@ -1187,6 +1187,17 @@ def cmd_daemon_start(args) -> int:
         "time.sleep(10**9)" % (args.tcp,),
     ]
 
+    # When running via sudo, pass the original user's HOME so
+    # the daemon finds images/layers in the right place.
+    env = os.environ.copy()
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        import pwd
+        try:
+            env["HOME"] = pwd.getpwnam(sudo_user).pw_dir
+        except KeyError:
+            pass
+
     if args.daemonize or not args.daemonize:
         # Default: run as background daemon (existing behavior).
         # When --daemonize is explicit, same behavior but with log redirect.
@@ -1201,7 +1212,7 @@ def cmd_daemon_start(args) -> int:
                 pass
 
         proc = subprocess.Popen(
-            cmd, stdout=stdout_target, stderr=stderr_target, start_new_session=True
+            cmd, stdout=stdout_target, stderr=stderr_target, start_new_session=True, env=env
         )
         (paths.run_dir() / "daemon.pid").write_text(str(proc.pid))
         time.sleep(1.5)
