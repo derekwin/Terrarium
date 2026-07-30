@@ -119,6 +119,7 @@ class AsyncSandbox:
         timeout: int | None = None,
         check: bool = False,
         sandboxed: bool = True,
+        policy: dict | None = None,
     ) -> ExecResult:
         """Execute a command inside the sandbox asynchronously.
 
@@ -129,7 +130,7 @@ class AsyncSandbox:
             None,
             lambda: self._sync.exec(
                 command, cwd=cwd, env=env, timeout=timeout, check=check,
-                sandboxed=sandboxed,
+                sandboxed=sandboxed, policy=policy,
             ),
         )
 

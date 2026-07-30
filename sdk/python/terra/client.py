@@ -17,6 +17,34 @@ class TerraError(Exception):
         self.message = message
 
 
+_POLICY_KEYS = {"read_paths", "write_paths", "net_allow", "memory_mb", "procs"}
+
+
+def validate_policy(policy: dict) -> dict:
+    """Light client-side check of an exec-policy dict (the engine enforces too).
+
+    Raises ValueError on unknown keys, non-absolute path grants, or an
+    empty ``net_allow`` list. Returns a plain copy of *policy*.
+    """
+    unknown = set(policy) - _POLICY_KEYS
+    if unknown:
+        raise ValueError(
+            f"unknown policy keys: {sorted(unknown)} (known: {sorted(_POLICY_KEYS)})"
+        )
+    for key in ("read_paths", "write_paths"):
+        for p in policy.get(key) or []:
+            if not str(p).startswith("/"):
+                raise ValueError(f"policy {key} entries must be absolute paths: {p!r}")
+    if "net_allow" in policy and policy["net_allow"] is not None:
+        na = policy["net_allow"]
+        if not isinstance(na, list) or not na:
+            raise ValueError(
+                "policy net_allow must be a non-empty list "
+                "(omit it for unrestricted network)"
+            )
+    return dict(policy)
+
+
 class TerraClient:
     """Client for the terrarium engine daemon.
 
@@ -184,6 +212,7 @@ class TerraClient:
     def vm_exec(
         self, name: str, args: list[str], timeout_secs: int = 60, *,
         sandbox: bool = False,
+        policy: dict | None = None,
     ) -> dict:
         """Execute a command inside the VM via the guest agent (vsock).
 
@@ -193,6 +222,9 @@ class TerraClient:
         sandbox: run under sandlock permission isolation (the guest
         agent wraps argv with ``sandlock run <policy> --``; hard error
         when no sandlock binary exists in the guest).
+        policy: optional exec-policy dict (see ``validate_policy``) —
+        only meaningful with ``sandbox=True``; the engine rejects the
+        combination otherwise.
         """
         import time as _time
 
@@ -204,6 +236,8 @@ class TerraClient:
         }
         if sandbox:
             cmd["sandbox"] = True
+        if policy is not None:
+            cmd["policy"] = validate_policy(policy)
         last: Exception | None = None
         for _ in range(16):
             try:
@@ -221,15 +255,20 @@ class TerraClient:
 
     # ── first-class sandboxes (S-M2) ────────────────────────────────
 
-    def sandbox_create(self, tenant: str, **vmspec) -> dict:
+    def sandbox_create(self, tenant: str, policy: dict | None = None, **vmspec) -> dict:
         """Create a sandbox on the tenant's shared VM.
 
         Idempotent: an existing tenant VM is reused and the VM-spec
         fields (kernel, initramfs, layers, cpus, memory_mb, net, ...)
-        are ignored. Returns ``{id, vm, workdir}``.
+        are ignored. ``policy`` is the stored exec policy (see
+        ``validate_policy``); per-call ``sandbox_exec`` policies
+        override it once without changing it.
+        Returns ``{id, vm, workdir}``.
         """
         cmd = {"command": "sandbox_create", "tenant": tenant}
         cmd.update(vmspec)
+        if policy is not None:
+            cmd["policy"] = validate_policy(policy)
         return self._send(cmd)
 
     def sandbox_exec(
@@ -240,11 +279,14 @@ class TerraClient:
         *,
         sandbox: bool | None = None,
         exec_mode: str | None = None,
+        policy: dict | None = None,
     ) -> dict:
         """Execute args in a sandbox (cwd = its workdir, set engine-side).
 
         ``sandbox=None`` → engine default (True — confined via sandlock).
         ``exec_mode="background"`` → returns ``{session_id, ...}``.
+        ``policy`` is a per-call override of the sandbox's stored
+        policy (the stored policy is unaffected).
         """
         cmd: dict = {"command": "sandbox_exec", "id": id, "args": list(args)}
         if timeout_secs is not None:
@@ -253,6 +295,8 @@ class TerraClient:
             cmd["sandbox"] = bool(sandbox)
         if exec_mode is not None:
             cmd["exec_mode"] = exec_mode
+        if policy is not None:
+            cmd["policy"] = validate_policy(policy)
         return self._send(cmd)
 
     def sandbox_list(self, tenant: str | None = None) -> dict:

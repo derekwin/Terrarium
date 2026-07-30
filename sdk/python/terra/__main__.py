@@ -143,9 +143,29 @@ def _parse_kv_pairs(values: list[str] | None) -> dict[str, str]:
 # sandbox commands (high-level unified API)
 # ═══════════════════════════════════════════════════════════════════
 
+def _build_policy_from_args(args) -> dict | None:
+    """Assemble an exec-policy dict from --net-allow/--read-path/etc flags.
+
+    Returns None when no policy flags were given.
+    """
+    policy: dict = {}
+    if getattr(args, "read_path", None):
+        policy["read_paths"] = list(args.read_path)
+    if getattr(args, "write_path", None):
+        policy["write_paths"] = list(args.write_path)
+    if getattr(args, "net_allow", None):
+        policy["net_allow"] = list(args.net_allow)
+    if getattr(args, "memory_mb", None) is not None:
+        policy["memory_mb"] = args.memory_mb
+    if getattr(args, "procs", None) is not None:
+        policy["procs"] = args.procs
+    return policy or None
+
+
 def cmd_sandbox_create(args) -> int:
     """Create a sandbox using the high-level SDK."""
     try:
+        policy = _build_policy_from_args(args)
         sb = Sandbox(
             template=args.template,
             layers=args.layers or None,
@@ -153,6 +173,7 @@ def cmd_sandbox_create(args) -> int:
             cpu=args.cpu,
             memory_mb=args.memory,
             network=bool(args.net),
+            policy=policy,
             env=_parse_kv_pairs(args.env),
             timeout=args.timeout,
         )
@@ -224,7 +245,8 @@ def cmd_sandbox_exec(args) -> int:
 
         # Sandboxed by default (engine default too); --no-sandbox opts out.
         resp = c.sandbox_exec(args.id, cmd_args, args.timeout,
-                              sandbox=not args.no_sandbox)
+                              sandbox=not args.no_sandbox,
+                              policy=_build_policy_from_args(args))
         return _output(resp, args)
     except TerraError as e:
         msg = str(e)
@@ -1319,6 +1341,16 @@ Common workflows:
     sp.add_argument("--env", nargs="*", help="environment variables (KEY=VALUE)")
     sp.add_argument("--timeout", type=int, default=600, help="default command timeout (seconds)")
     sp.add_argument("--backend", default="auto", choices=["auto", "ch", "sandlock"])
+    sp.add_argument("--read-path", action="append", metavar="PATH",
+                    help="exec policy: extra read-only grant (repeatable)")
+    sp.add_argument("--write-path", action="append", metavar="PATH",
+                    help="exec policy: extra read-write grant (repeatable)")
+    sp.add_argument("--net-allow", action="append", metavar="HOST[:PORT]",
+                    help="exec policy: deny-by-default egress except these (repeatable)")
+    sp.add_argument("--memory-mb", type=int, metavar="N",
+                    help="exec policy: per-exec memory limit in MiB")
+    sp.add_argument("--procs", type=int, metavar="N",
+                    help="exec policy: per-exec process-count limit")
     sp.set_defaults(f=cmd_sandbox_create)
 
     sbs.add_parser("ls", help="list running sandboxes").set_defaults(f=cmd_sandbox_ls)
@@ -1334,6 +1366,8 @@ Common workflows:
     sp.add_argument("--timeout", type=int, default=60, help="command timeout (seconds)")
     sp.add_argument("--no-sandbox", action="store_true",
                     help="run without sandlock permission isolation")
+    sp.add_argument("--net-allow", action="append", metavar="HOST[:PORT]",
+                    help="per-call exec policy override: deny-by-default egress except these (repeatable)")
     sp.add_argument("--detach", action="store_true", help="detached mode (reserved)")
     sp.add_argument("--follow", help="follow exec ID (reserved)")
     sp.add_argument("args", nargs=argparse.REMAINDER, help="command and arguments (after --)")
@@ -1519,6 +1553,8 @@ Common workflows:
 
     try:
         return args.f(args)
+    except ValueError as e:  # e.g. client-side policy validation
+        return _err(str(e), exit_code=EXIT_USAGE)
     except TerraError as e:
         msg = str(e)
         if "not found" in msg.lower():

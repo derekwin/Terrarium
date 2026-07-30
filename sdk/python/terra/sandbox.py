@@ -36,7 +36,7 @@ from uuid import uuid4
 
 
 from ._engine import DaemonManager
-from .client import TerraClient, TerraError as ClientError
+from .client import TerraClient, TerraError as ClientError, validate_policy
 from . import images
 from .template import Template
 from .exceptions import (
@@ -157,6 +157,13 @@ class Sandbox:
         Guest RAM in MiB (default 256).
     network:
         Truthy → attach virtio-net (NAT + DHCP).
+    policy:
+        Optional exec-policy dict (plain dict, validated client-side):
+        ``read_paths``/``write_paths`` append path grants to the default
+        policy (RO system dirs, RW session workdir + ``/tmp``, network
+        unrestricted), ``net_allow`` (non-empty list) switches egress to
+        deny-by-default, ``memory_mb``/``procs`` set resource limits.
+        Stored on the sandbox engine-side; echoed by ``sandbox_info``.
     env:
         Default environment variables for :meth:`exec` (stored as metadata;
         not yet wired to guest agent).
@@ -180,6 +187,7 @@ class Sandbox:
         cpu: int | None = None,
         memory_mb: int | None = None,
         network: bool = False,
+        policy: dict | None = None,
         env: dict[str, str] | None = None,
         timeout: int = 600,
         metadata: dict | None = None,
@@ -188,6 +196,7 @@ class Sandbox:
         self._tenant: str = tenant or uuid4().hex[:8]
         self._id: str | None = None
         self._vm_name: str = f"tenant-{self._tenant}"
+        self._policy: dict = validate_policy(policy) if policy else {}
 
         # -- auto-start daemon ------------------------------------------------
         dm = DaemonManager()
@@ -253,7 +262,9 @@ class Sandbox:
         last: Exception | None = None
         for _ in range(20):
             try:
-                resp = client.sandbox_create(self._tenant, **vmspec)
+                resp = client.sandbox_create(
+                    self._tenant, policy=self._policy or None, **vmspec
+                )
                 break
             except ClientError as e:
                 msg = str(e)
@@ -297,6 +308,20 @@ class Sandbox:
     def tenant(self) -> str:
         """The tenant identifier (VM name is ``tenant-<tenant>``)."""
         return self._tenant
+
+    @property
+    def policy(self) -> dict:
+        """The stored exec policy, as echoed by the engine.
+
+        Pool-claimed sessions (not engine sandboxes) report the local
+        copy — always empty today.
+        """
+        if self._id is not None and not self._from_pool:
+            try:
+                return self._client.sandbox_info(self._id).get("policy") or {}
+            except ClientError:
+                pass
+        return dict(self._policy)
 
     @property
     def status(self) -> str:
@@ -348,6 +373,7 @@ class Sandbox:
         timeout: int | None = None,
         check: bool = False,
         sandboxed: bool = True,
+        policy: dict | None = None,
     ) -> ExecResult:
         """Execute a command inside the sandbox.
 
@@ -372,6 +398,10 @@ class Sandbox:
             isolation is the product point). The default policy makes
             the system read-only; only the session workdir and ``/tmp``
             are writable, and the network is unrestricted for now.
+        policy:
+            Per-call exec-policy override (same dict shape as the
+            *policy* constructor arg). Wins for this call only; the
+            stored policy is unaffected.
 
         Returns
         -------
@@ -405,6 +435,7 @@ class Sandbox:
             full_env.update(env)
 
         timeout_secs = timeout if timeout is not None else self._default_timeout
+        call_policy = validate_policy(policy) if policy is not None else None
 
         if self._from_pool:
             # Pool-claimed VMs are not engine sandboxes: exec directly on
@@ -420,7 +451,8 @@ class Sandbox:
                 args = ["sh", "-c", f"cd {shlex.quote(effective_cwd)} && {quoted}"]
             try:
                 resp = self._client.vm_exec(
-                    self._vm_name, args, timeout_secs, sandbox=sandboxed
+                    self._vm_name, args, timeout_secs, sandbox=sandboxed,
+                    policy=call_policy,
                 )
             except ClientError as e:
                 msg = str(e)
@@ -446,7 +478,8 @@ class Sandbox:
                 args = ["sh", "-c", quoted]
             try:
                 resp = self._client.sandbox_exec(
-                    self._id, args, timeout_secs, sandbox=sandboxed
+                    self._id, args, timeout_secs, sandbox=sandboxed,
+                    policy=call_policy,
                 )
             except ClientError as e:
                 msg = str(e)
