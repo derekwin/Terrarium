@@ -114,10 +114,11 @@ class AsyncSandbox:
     async def exec(
         self,
         command: str | list[str],
-        cwd: str = "/workdir",
+        cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout: int | None = None,
         check: bool = False,
+        sandboxed: bool = True,
     ) -> ExecResult:
         """Execute a command inside the sandbox asynchronously.
 
@@ -127,7 +128,8 @@ class AsyncSandbox:
         return await loop.run_in_executor(
             None,
             lambda: self._sync.exec(
-                command, cwd=cwd, env=env, timeout=timeout, check=check
+                command, cwd=cwd, env=env, timeout=timeout, check=check,
+                sandboxed=sandboxed,
             ),
         )
 

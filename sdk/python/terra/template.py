@@ -162,7 +162,7 @@ class Template:
         """Build a layer by loading the template and configuring inside a
         builder VM.
 
-        The workflow mirrors ``terra layer build``:
+        The workflow mirrors ``terra tool create``:
 
         1. Load the template *name*.
         2. Create a builder VM from the template's base layer with a
@@ -247,8 +247,8 @@ class Template:
                 pass
 
         # 5) Pack the upperdir delta into an EROFS layer.
-        fs_root = os.environ.get("TERRA_STATE_DIR", "/tmp/terra-disks")
-        upper_dir = Path(fs_root) / "fs" / "uppers" / builder
+        fs_root = Path(os.environ.get("TERRA_STATE_DIR") or str(paths.state_dir())) / "fs"
+        upper_dir = fs_root / "uppers" / builder
         if not upper_dir.is_dir():
             raise FileNotFoundError(
                 f"upperdir {upper_dir} not found — "

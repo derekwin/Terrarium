@@ -30,8 +30,6 @@ class ExecResult:
     exit_code: int
     stdout: str = ""
     stderr: str = ""
-    duration_ms: int = 0
-    timed_out: bool = False
 
 
 class TerraError(Exception):

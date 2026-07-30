@@ -22,7 +22,7 @@ import time
 import tempfile
 from pathlib import Path
 
-from . import images, paths
+from . import assets, images, paths
 from .client import TerraClient, TerraError
 from .sandbox import Sandbox
 from .template import Template
@@ -97,6 +97,21 @@ def _err(msg: str, *, cause: str = "", fix: str = "", exit_code: int = EXIT_ERRO
     return exit_code
 
 
+def _repo_root() -> Path | None:
+    """Terrarium repo checkout root, or None for wheel-only installs.
+
+    The package lives at <repo>/sdk/python/terra/__main__.py, so the
+    repo root is parents[3]. Verified by the presence of images/build.sh.
+    """
+    root = Path(__file__).resolve().parents[3]
+    return root if (root / "images" / "build.sh").exists() else None
+
+
+def _fs_root() -> Path:
+    """Engine fs root — must match the daemon's TERRA_STATE_DIR."""
+    return Path(os.environ.get("TERRA_STATE_DIR") or str(paths.state_dir())) / "fs"
+
+
 def _parse_multi(values: list[str] | None) -> list[str]:
     """Parse comma-separated multi-value args: ['a,b', 'c'] → ['a','b','c']."""
     if not values:
@@ -141,15 +156,17 @@ def cmd_sandbox_create(args) -> int:
             env=_parse_kv_pairs(args.env),
             timeout=args.timeout,
         )
-        return _output(
-            {
-                "id": sb.id,
-                "name": sb.id,
-                "status": sb.status,
-                "backend": sb.backend,
-            },
-            args,
-        )
+        out = {
+            "id": sb.id,
+            "name": sb.id,
+            "vm": sb.vm,
+            "status": sb.status,
+            "backend": sb.backend,
+        }
+        # The CLI returns the handle to the user — don't let Sandbox.__del__
+        # kill the freshly created record when this process exits.
+        sb._alive = False
+        return _output(out, args)
     except FileNotFoundError as e:
         return _err(str(e), exit_code=EXIT_NOTFOUND)
     except Exception as e:
@@ -157,27 +174,28 @@ def cmd_sandbox_create(args) -> int:
 
 
 def cmd_sandbox_ls(args) -> int:
-    """List running sandboxes."""
+    """List sandboxes (engine registry)."""
     c = _client(args)
     try:
-        vms = c.vm_list()
-        sandbox_vms = [
-            v for v in vms.get("vms", []) if v.get("name", "").startswith("sandbox-")
-        ]
-        return _output(
-            {"sandboxes": sandbox_vms, "count": len(sandbox_vms)},
-            args,
-        )
+        return _output(c.sandbox_list(), args)
     except TerraError as e:
         return _err(str(e))
+
+
+def _sandbox_vm(c: TerraClient, id_or_vm: str) -> str:
+    """Resolve a sandbox id to its tenant VM name (falls back to the
+    given value so plain VM names keep working)."""
+    try:
+        return c.sandbox_info(id_or_vm)["vm"]
+    except TerraError:
+        return id_or_vm
 
 
 def cmd_sandbox_info(args) -> int:
     """Show details about a specific sandbox."""
     c = _client(args)
     try:
-        info = c.vm_info(args.id)
-        return _output(info, args)
+        return _output(c.sandbox_info(args.id), args)
     except TerraError as e:
         msg = str(e)
         if "not found" in msg.lower():
@@ -204,7 +222,9 @@ def cmd_sandbox_exec(args) -> int:
             inner = " ".join(cmd_args)
             cmd_args = ["sh", "-c", " && ".join(prefix_parts + [inner])]
 
-        resp = c.vm_exec(args.id, cmd_args, timeout_secs=args.timeout)
+        # Sandboxed by default (engine default too); --no-sandbox opts out.
+        resp = c.sandbox_exec(args.id, cmd_args, args.timeout,
+                              sandbox=not args.no_sandbox)
         return _output(resp, args)
     except TerraError as e:
         msg = str(e)
@@ -243,7 +263,7 @@ def cmd_sandbox_cp(args) -> int:
         if src_remote:
             # Download: sandbox:/path → local
             sandbox_id, remote_path = src.split(":", 1)
-            resp = c.vm_exec(sandbox_id, ["cat", remote_path], timeout_secs=30)
+            resp = c.vm_exec(_sandbox_vm(c, sandbox_id), ["cat", remote_path], timeout_secs=30)
             content = resp.get("stdout", "")
             with open(dst, "w") as f:
                 f.write(content)
@@ -253,7 +273,7 @@ def cmd_sandbox_cp(args) -> int:
             sandbox_id, remote_path = dst.split(":", 1)
             with open(src, "rb") as f:
                 data = base64.b64encode(f.read()).decode()
-            c.vm_exec(sandbox_id, ["sh", "-c", f"echo {data} | base64 -d > {remote_path}"], timeout_secs=30)
+            c.vm_exec(_sandbox_vm(c, sandbox_id), ["sh", "-c", f"echo {data} | base64 -d > {remote_path}"], timeout_secs=30)
             print(f"Uploaded {src} → {dst}")
         return EXIT_OK
     except TerraError as e:
@@ -281,7 +301,7 @@ def cmd_sandbox_resize(args) -> int:
                 fix="Provide at least one: --cpu N and/or --memory MB",
                 exit_code=EXIT_USAGE,
             )
-        resp = c.vm_resize(args.id, **kwargs)
+        resp = c.vm_resize(_sandbox_vm(c, args.id), **kwargs)
         return _output(resp, args)
     except TerraError as e:
         msg = str(e)
@@ -294,7 +314,7 @@ def cmd_sandbox_metrics(args) -> int:
     """Query sandbox resource usage."""
     c = _client(args)
     try:
-        info = c.vm_info(args.id)
+        info = c.vm_info(_sandbox_vm(c, args.id))
         return _output(
             {
                 "id": args.id,
@@ -312,10 +332,10 @@ def cmd_sandbox_metrics(args) -> int:
 
 
 def cmd_sandbox_kill(args) -> int:
-    """Force-kill and deregister a sandbox."""
+    """Kill a sandbox (sessions + workdir; the tenant VM keeps running)."""
     c = _client(args)
     try:
-        resp = c.vm_destroy(args.id)
+        resp = c.sandbox_kill(args.id)
         return _output(resp, args)
     except TerraError as e:
         msg = str(e)
@@ -324,187 +344,136 @@ def cmd_sandbox_kill(args) -> int:
         return _err(msg)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# template commands
-# ═══════════════════════════════════════════════════════════════════
-
-def cmd_template_ls(args) -> int:
-    """List saved templates."""
+def cmd_sandbox_destroy_tenant(args) -> int:
+    """Destroy a tenant VM and all its sandboxes."""
+    c = _client(args)
     try:
-        names = Template.list()
-        if not names:
-            print("(no templates)")
-            return EXIT_OK
-        return _output(names, args)
-    except Exception as e:
-        return _err(str(e))
-
-
-def cmd_template_create(args) -> int:
-    """Create a template from kernel + rootfs + layers."""
-    try:
-        base = args.rootfs
-        if base not in ("alpine", "ubuntu"):
-            return _err(
-                f"Unsupported rootfs: {base!r}",
-                cause="Only 'alpine' (musl) and 'ubuntu' (glibc) are supported",
-                fix="Use --rootfs alpine or --rootfs ubuntu",
-                exit_code=EXIT_USAGE,
-            )
-        layers = _parse_multi(args.layers) if args.layers else []
-        t = Template(
-            name=args.name,
-            base=base,
-            layers=layers,
-            kernel=args.kernel or None,
-        )
-        path = t.save()
-        return _output(
-            {"name": t.name, "base": t.base, "layers": t.layers, "kernel": t.kernel, "path": str(path)},
-            args,
-        )
-    except Exception as e:
-        return _err(str(e))
-
-
-def cmd_template_info(args) -> int:
-    """Show template details."""
-    try:
-        t = Template.load(args.name)
-        return _output(
-            {"name": t.name, "base": t.base, "layers": t.layers, "kernel": t.kernel},
-            args,
-        )
-    except FileNotFoundError:
-        return _err(
-            f"Template not found: {args.name!r}",
-            cause="No template with this name exists",
-            fix="List templates: terra template ls",
-            exit_code=EXIT_NOTFOUND,
-        )
-    except Exception as e:
-        return _err(str(e))
-
-
-def cmd_template_remove(args) -> int:
-    """Remove a template."""
-    try:
-        removed = Template.remove(args.name)
-        if removed:
-            print(f"removed template '{args.name}'")
-            return EXIT_OK
-        return _err(
-            f"Template not found: {args.name!r}",
-            exit_code=EXIT_NOTFOUND,
-        )
-    except Exception as e:
-        return _err(str(e))
+        return _output(c.tenant_destroy(args.tenant), args)
+    except TerraError as e:
+        msg = str(e)
+        if "not found" in msg.lower():
+            return _err(msg, exit_code=EXIT_NOTFOUND)
+        return _err(msg)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# image commands
+# setup — one-command environment bootstrap
 # ═══════════════════════════════════════════════════════════════════
 
-# Rootfs aliases for display/resolution.
-_ROOOTFS_ALIASES = {
-    "alpine.cpio": "alpine",
-    "initramfs-agent.cpio.gz": "agent",
-    "initramfs-virtiofs.cpio.gz": "virtiofs",
-}
+def cmd_setup(args) -> int:
+    """One-command setup: assets + kernel + rootfs + initramfs + base layer + template.
 
-# Infra bootstrap images: needed by the system, not user-facing.
-_INFRA_IMAGES = {"initramfs-agent.cpio.gz", "initramfs-virtiofs.cpio.gz"}
+    Every stage is idempotent — existing artifacts are skipped unless
+    --force is given.
+    """
+    distro = args.distro
+    force = args.force
+    system_layer = _DISTRO_SYSTEM_LAYER[distro]
 
-# Names that are system bases, not add-on layers.
-_SYSTEM_LAYER_NAMES = {"base", "ubuntu", ".system"}
+    def stage(msg: str) -> None:
+        print(f"\n==> {msg}")
 
+    # 1. host binaries (auto-download into the managed bin dir)
+    stage("host binaries (cloud-hypervisor, virtiofsd, erofs tools)")
+    try:
+        print(f"  cloud-hypervisor: {assets.ensure_ch()}")
+        print(f"  virtiofsd:        {assets.ensure_virtiofsd()}")
+        mkfs, fuse = assets.ensure_erofs_tools()
+        print(f"  erofs tools:      {mkfs}, {fuse}")
+    except assets.AssetError as e:
+        return _err(str(e))
 
-def cmd_image_ls(args) -> int:
-    """List all images: kernels, rootfs, initramfs."""
-    kdir = paths.kernels_dir()
-    rdir = paths.rootfs_dir()
+    # 2. default kernel (Sandbox(kernel=None) and build_daemon_env use it)
+    stage("default kernel")
+    rc = _build_kernel_image("default", args.kernel_version, force=force)
+    if rc != EXIT_OK:
+        return rc
 
-    if args.json or getattr(args, "verbose", False):
-        result: dict = {"kernels": [], "rootfs": [], "initramfs": []}
-        if kdir.is_dir():
-            for e in sorted(kdir.iterdir()):
-                if e.is_dir() and (e / "vmlinux.bin").exists():
-                    result["kernels"].append(e.name)
-        seen_rootfs = set()
-        if rdir.is_dir():
-            for e in sorted(rdir.iterdir()):
-                if e.name in _INFRA_IMAGES:
-                    alias = _ROOOTFS_ALIASES.get(e.name)
-                    if alias and alias not in seen_rootfs:
-                        result["initramfs"].append(alias)
-                        seen_rootfs.add(alias)
-                elif e.name in _ROOOTFS_ALIASES:
-                    alias = _ROOOTFS_ALIASES[e.name]
-                    if alias not in seen_rootfs:
-                        result["rootfs"].append(alias)
-                        seen_rootfs.add(alias)
-                else:
-                    if e.suffix == ".cpio":
-                        result["rootfs"].append(e.stem)
-                    elif e.name.endswith(".cpio.gz"):
-                        result["rootfs"].append(e.name[: -len(".cpio.gz")])
-                    else:
-                        result["rootfs"].append(e.name)
-        return _output(result, args)
+    # 3. distro rootfs image
+    stage(f"{distro} rootfs")
+    try:
+        img = _ensure_distro_rootfs(distro, force=force)
+        print(f"  rootfs: {img}")
+    except Exception as e:
+        return _err(str(e))
 
-    # Human-readable output
-    print("kernels:")
-    if kdir.is_dir():
-        for e in sorted(kdir.iterdir()):
-            if e.is_dir() and (e / "vmlinux.bin").exists():
-                print(f"  {e.name}")
+    # 4. initramfs images (agent for warm/exec, virtiofs for layered boot)
+    stage("initramfs (agent + virtiofs)")
+    for name in ("initramfs-agent.cpio.gz", "initramfs-virtiofs.cpio.gz"):
+        managed = paths.rootfs_dir() / name
+        if managed.exists() and not force:
+            print(f"  already present: {managed}")
+            continue
+        if force:
+            managed.unlink(missing_ok=True)
+        try:
+            print(f"  built: {images.ensure(name)}")
+        except Exception as e:
+            return _err(str(e))
+
+    # 5. base layer (alpine→base, ubuntu→ubuntu — sandbox/template rely on it)
+    stage(f"base layer ({system_layer})")
+    layer_dir = paths.layers_dir() / system_layer
+    if distro == "ubuntu":
+        # The distro script created layers/ubuntu during the rootfs stage.
+        if not layer_dir.is_dir():
+            return _err(f"ubuntu layer missing after rootfs stage: {layer_dir}")
+        print(f"  ready: {layer_dir}")
     else:
-        print("  (none)")
+        try:
+            dest = _extract_rootfs_into_layer(img, system_layer, force=force)
+        except Exception as e:
+            return _err(str(e))
+        print(f"  {'extracted' if dest else 'already present'}: {layer_dir}")
 
-    print("rootfs:")
-    seen = set()
-    if rdir.is_dir():
-        for e in sorted(rdir.iterdir()):
-            if e.name in _INFRA_IMAGES:
-                continue
-            alias = _ROOOTFS_ALIASES.get(e.name)
-            if alias:
-                if alias not in seen:
-                    print(f"  {alias}")
-                    seen.add(alias)
-            elif e.suffix == ".cpio":
-                print(f"  {e.stem}")
-            elif e.name.endswith(".cpio.gz"):
-                print(f"  {e.name[:-len('.cpio.gz')]}")
-            else:
-                print(f"  {e.name}")
-    else:
-        print("  (none)")
+    # 6. guest binaries — bake sandlock (exec isolation) and the current
+    # guest-proxy agent into the system layer: cold-boot VMs switch_root
+    # into the composed layers and run the agent from there, so a layer
+    # built from an older rootfs serves a stale agent otherwise.
+    stage("guest binaries (sandlock + guest-proxy)")
+    rc = _install_sandlock(system_layer, force=force)
+    if rc != EXIT_OK:
+        return rc
+    rc = _refresh_layer_guest_proxy(system_layer, force=force)
+    if rc != EXIT_OK:
+        return rc
 
-    print("initramfs:")
-    if rdir.is_dir():
-        for e in sorted(rdir.iterdir()):
-            if e.name in _INFRA_IMAGES:
-                alias = _ROOOTFS_ALIASES.get(e.name)
-                label = alias if alias else e.name
-                print(f"  {label}")
-    else:
-        print("  (none)")
+    # 7. template (same code path as `template create`)
+    stage(f"template ({distro})")
+    t = Template(name=distro, base=distro, layers=[system_layer], kernel="default")
+    path = t.save()
+    print(f"  wrote: {path}")
+
+    print(f"""
+setup complete. Next:
+
+  terra daemon start
+  terra sandbox create --template {distro} --net
+  terra sandbox exec <vm-name> -- python3 --version
+  terra sandbox kill <vm-name>""")
     return EXIT_OK
 
 
-def cmd_image_build_kernel(args) -> int:
-    """Build a kernel image: bash images/build-kernel.sh <version> <config> <output_dir>."""
-    name = args.name
-    version = args.version or ""
-    script = Path("images/build-kernel.sh")
-    if not script.exists():
-        return _err(
-            f"Build script not found: {script}",
-            cause="Must be run from the Terrarium repository root",
-            fix="Run this command from the repo root directory",
-        )
+# ═══════════════════════════════════════════════════════════════════
+# setup/build internals (shared by `terra setup` and `tool create`;
+# the image/template/layer CLI groups were removed — setup is the
+# only system-resource entry point)
+# ═══════════════════════════════════════════════════════════════════
 
+def _build_kernel_image(name: str, version: str, *, force: bool = False) -> int:
+    """Build kernel variant *name* (idempotent skip unless *force*)."""
+    dest = paths.kernels_dir() / name / "vmlinux.bin"
+    if dest.exists() and not force:
+        print(f"already present: {dest}")
+        return EXIT_OK
+    repo = _repo_root()
+    if repo is None:
+        return _err(
+            "Terrarium repo checkout not found",
+            cause="Kernel builds need images/build-kernel.sh from the repo",
+            fix="Run on a machine with the Terrarium repo checked out",
+        )
+    script = repo / "images" / "build-kernel.sh"
     with tempfile.TemporaryDirectory() as td:
         r = subprocess.run(
             ["bash", str(script), version, "", td]
@@ -512,243 +481,132 @@ def cmd_image_build_kernel(args) -> int:
         if r.returncode:
             return r.returncode
         src = Path(td) / "vmlinux.bin"
-        dest = paths.kernels_dir() / name
-        shutil.rmtree(dest, ignore_errors=True)
-        dest.mkdir(parents=True)
-        target = dest / "vmlinux.bin"
-        shutil.move(str(src), str(target))
-        print(f"built: {target}")
-        return EXIT_OK
-
-
-def cmd_image_build_rootfs(args) -> int:
-    """Build a bootable system rootfs. Supported: alpine, ubuntu."""
-    return _build_rootfs(args)
-
-
-def cmd_image_build_initramfs(args) -> int:
-    """Build initramfs via terrarium_fs (Rust), replacing shell scripts."""
-    import terrarium_fs
-
-    repo = Path.cwd()
-    if not (repo / "images" / "build.sh").exists():
-        return _err(
-            "Not in Terrarium repo root",
-            cause="The images/build.sh script was not found",
-            fix="Run this command from the Terrarium repository root directory",
-        )
-
-    src_rootfs = _ensure_initramfs_src_rootfs(repo)
-    if args.type == "agent":
-        init_template = repo / "images" / "rootfs" / "init-agent"
-        gp = _ensure_initramfs_guest_proxy(repo)
-        output_name = "initramfs-agent.cpio.gz"
-        def build_fn(out: str) -> None:
-            terrarium_fs.build_initramfs_agent(
-                src_rootfs, gp, str(init_template), out,
-            )
-    else:  # virtiofs
-        init_template = repo / "images" / "rootfs" / "init-virtiofs"
-        output_name = "initramfs-virtiofs.cpio.gz"
-        def build_fn(out: str) -> None:
-            terrarium_fs.build_initramfs_virtiofs(
-                src_rootfs, str(init_template), out,
-            )
-
-    # Always store in managed rootfs directory as a flat file
-    dest = paths.rootfs_dir() / output_name
-    with tempfile.TemporaryDirectory() as td:
-        out = Path(td) / output_name
-        build_fn(str(out))
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(out), str(dest))
+        shutil.move(str(src), str(dest))
         print(f"built: {dest}")
-    return EXIT_OK
-
-
-def cmd_image_info(args) -> int:
-    """Show details about a specific image (kernel or rootfs)."""
-    name = args.name
-
-    # Check kernels_dir
-    kpath = paths.kernels_dir() / name
-    if kpath.is_dir() and (kpath / "vmlinux.bin").exists():
-        vmlinux = kpath / "vmlinux.bin"
-        stat = vmlinux.stat()
-        return _output(
-            {
-                "type": "kernel",
-                "name": name,
-                "path": str(vmlinux),
-                "size_bytes": stat.st_size,
-                "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
-            },
-            args,
-        )
-
-    # Check rootfs_dir
-    rdir = paths.rootfs_dir()
-    for cand_name in (name, f"{name}.cpio", f"{name}.cpio.gz", f"{name}.img"):
-        rpath = rdir / cand_name
-        if rpath.exists():
-            stat = rpath.stat()
-            return _output(
-                {
-                    "type": "rootfs",
-                    "name": name,
-                    "filename": cand_name,
-                    "path": str(rpath),
-                    "size_bytes": stat.st_size,
-                    "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
-                },
-                args,
-            )
-
-    # Check aliases
-    for alias_img, alias_name in _ROOOTFS_ALIASES.items():
-        if alias_name == name:
-            rpath = rdir / alias_img
-            if rpath.exists():
-                stat = rpath.stat()
-                return _output(
-                    {
-                        "type": "initramfs",
-                        "name": name,
-                        "filename": alias_img,
-                        "path": str(rpath),
-                        "size_bytes": stat.st_size,
-                        "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
-                    },
-                    args,
-                )
-
-    return _err(
-        f"Image not found: {name!r}",
-        cause="No kernel or rootfs image with this name exists",
-        fix="List available images: terra image ls",
-        exit_code=EXIT_NOTFOUND,
-    )
-
-
-def cmd_image_remove(args) -> int:
-    """Remove any image — checks kernels_dir and rootfs_dir."""
-    name = args.name
-    # Check kernels_dir
-    kpath = paths.kernels_dir() / name
-    if kpath.exists():
-        if kpath.is_dir():
-            shutil.rmtree(kpath)
-        else:
-            kpath.unlink()
-        print(f"removed kernel: {kpath}")
         return EXIT_OK
-    # Check rootfs_dir — try name directly, and with known extensions
-    rdir = paths.rootfs_dir()
-    for cand_name in (name, f"{name}.cpio", f"{name}.cpio.gz", f"{name}.img"):
-        rpath = rdir / cand_name
-        if rpath.exists():
-            if rpath.is_dir():
-                shutil.rmtree(rpath)
-            else:
-                rpath.unlink()
-            print(f"removed rootfs: {rpath}")
-            return EXIT_OK
-    # Check aliases
-    for alias_img, alias_name in _ROOOTFS_ALIASES.items():
-        if alias_name == name:
-            rpath = rdir / alias_img
-            if rpath.exists():
-                rpath.unlink()
-                print(f"removed rootfs: {rpath}")
-                return EXIT_OK
-    return _err(
-        f"Image not found: {name!r}",
-        cause="No kernel or rootfs image with this name exists",
-        fix="List available images: terra image ls",
-        exit_code=EXIT_NOTFOUND,
-    )
 
 
 # ── internal build helpers ───────────────────────────────────────
 
-def _build_rootfs(args) -> int:
-    """Internal: create a bootable system rootfs. Supported: alpine, ubuntu."""
-    name = args.name
-    if name == "ubuntu":
-        layer_dir = Path(os.environ.get("TERRA_LAYER_DIR") or paths.layers_dir()) / "ubuntu"
-        if not layer_dir.is_dir():
-            r = subprocess.run(["bash", "images/build-layer-distro.sh", "ubuntu"])
-            if r.returncode:
-                return r.returncode
-        return _pack_layer_as_rootfs("ubuntu", "ubuntu")
-    if name == "alpine":
-        img = images.ensure("alpine.cpio")
-        print(f"rootfs ready: {img}")
+# Distro label → engine system layer name (sandbox.py/template.py agree).
+_DISTRO_SYSTEM_LAYER = {"alpine": "base", "ubuntu": "ubuntu"}
+
+
+def _refresh_layer_guest_proxy(system_layer: str, *, force: bool = False) -> int:
+    """Sync <layer>/bin/guest-proxy with the current musl build.
+
+    Cold-boot layered VMs switch_root into the composed layers, so the
+    exec agent they run is the layer's copy — rebuilds of crates/guest-proxy
+    must propagate here. Idempotent (sha256); --force reinstalls.
+    """
+    repo = _repo_root()
+    if repo is None:
+        print("  (skip guest-proxy refresh — no repo checkout)")
         return EXIT_OK
-    return _err(
-        f"Unsupported rootfs: {name!r}",
-        cause="Only 'alpine' (musl) and 'ubuntu' (glibc) are supported",
-        fix="Use --name alpine or --name ubuntu",
-        exit_code=EXIT_USAGE,
-    )
-
-
-def _pack_layer_as_rootfs(layer_name: str, out_name: str) -> int:
-    """Pack a layer directory into a bootable rootfs cpio image."""
-    import terrarium_fs
-
-    layer_dir = str(Path(os.environ.get("TERRA_LAYER_DIR") or paths.layers_dir()) / layer_name)
-    output_dir = str(paths.rootfs_dir())
-    try:
-        out_path = terrarium_fs.pack_cpio_rootfs(layer_dir, out_name, output_dir)
-        print(f"rootfs image built: {out_path}")
-        return EXIT_OK
-    except Exception as e:
-        return _err(str(e))
-
-
-def _ensure_initramfs_src_rootfs(repo: Path) -> str:
-    """Return a directory with bin/busybox and musl libs."""
-    rootfs_dir = repo / "target" / "guest" / "rootfs"
-    if (rootfs_dir / "bin" / "busybox").exists():
-        return str(rootfs_dir)
-
-    alpine = repo / "target" / "guest" / "alpine.cpio"
-    if not alpine.exists():
-        raise FileNotFoundError(
-            f"no rootfs source: need {rootfs_dir} or {alpine} "
-            f"(run build-rootfs.sh first)"
-        )
-
-    extract_dir = tempfile.mkdtemp(prefix="terrarium-src-")
-    cmd = (
-        f"zcat '{alpine}' 2>/dev/null || cat '{alpine}'"
-        f" | (cd '{extract_dir}' && cpio -idm --quiet)"
-    )
-    subprocess.run(cmd, shell=True, check=True)
-    return extract_dir
-
-
-def _ensure_initramfs_guest_proxy(repo: Path) -> str:
-    """Return the guest-proxy binary path; build it if missing."""
     gp = repo / "target" / "x86_64-unknown-linux-musl" / "release" / "guest-proxy"
     if not gp.exists():
         subprocess.run(
-            [
-                "cargo", "build", "--release",
-                "--target", "x86_64-unknown-linux-musl",
-                "-p", "guest-proxy",
-            ],
-            cwd=repo, check=True,
+            ["cargo", "build", "--release",
+             "--target", "x86_64-unknown-linux-musl", "-p", "guest-proxy"],
+            cwd=str(repo), check=True,
         )
-    return str(gp)
+    dest = paths.layers_dir() / system_layer / "bin" / "guest-proxy"
+    if dest.exists() and not force and _sha256_file(dest) == _sha256_file(gp):
+        print(f"  guest-proxy current: {dest}")
+        return EXIT_OK
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(gp, dest)
+    dest.chmod(0o755)
+    print(f"  guest-proxy updated: {dest}")
+    return EXIT_OK
+
+
+def _sha256_file(p: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _install_sandlock(system_layer: str, *, force: bool = False) -> int:
+    """Install the musl sandlock binary into the system layer (idempotent).
+
+    Builds bin/sandlock-musl via images/build-sandlock.sh when absent,
+    then installs it as <layer>/usr/bin/sandlock (0755). Skipped when
+    the installed copy is identical (sha256); --force reinstalls.
+    """
+    src = paths.bin_dir() / "sandlock-musl"
+    if not src.exists():
+        repo = _repo_root()
+        script = repo / "images" / "build-sandlock.sh" if repo else None
+        if script is None or not script.exists():
+            return _err(
+                "sandlock-musl not found and no build script available",
+                cause=f"missing: {src} (and images/build-sandlock.sh not found)",
+                fix="Run on a machine with the Terrarium repo checked out",
+            )
+        r = subprocess.run(["bash", str(script)])
+        if r.returncode:
+            return r.returncode
+    dest = paths.layers_dir() / system_layer / "usr" / "bin" / "sandlock"
+    if dest.exists() and not force and _sha256_file(dest) == _sha256_file(src):
+        print(f"  already present: {dest}")
+        return EXIT_OK
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(src, dest)
+    dest.chmod(0o755)
+    print(f"  installed: {dest}")
+    return EXIT_OK
+
+
+def _ensure_distro_rootfs(distro: str, *, force: bool = False) -> Path:
+    """Ensure images/rootfs/<distro>.cpio(.gz), building if needed.
+
+    alpine: busybox rootfs dir via images/build-rootfs.sh, packed with
+    terrarium_fs (inside images.ensure). ubuntu: images/build-layer-distro.sh
+    creates the layer dir, then it is packed into the rootfs image.
+    Raises on failure — callers convert to _err.
+    """
+    import terrarium_fs
+
+    rdir = paths.rootfs_dir()
+    if distro not in _DISTRO_SYSTEM_LAYER:
+        raise ValueError(f"unsupported distro {distro!r}")
+    if not force:
+        for cand in (rdir / f"{distro}.cpio", rdir / f"{distro}.cpio.gz"):
+            if cand.exists():
+                return cand
+    if distro == "alpine":
+        if force:
+            repo = _repo_root()
+            if repo:
+                (repo / "target" / "guest" / "alpine.cpio").unlink(missing_ok=True)
+            (rdir / "alpine.cpio").unlink(missing_ok=True)
+        return images.ensure("alpine.cpio")
+    # ubuntu
+    layer_dir = Path(os.environ.get("TERRA_LAYER_DIR") or paths.layers_dir()) / "ubuntu"
+    if force:
+        (layer_dir / ".unpacked").unlink(missing_ok=True)
+    if not layer_dir.is_dir() or not (layer_dir / ".unpacked").exists():
+        repo = _repo_root()
+        if repo is None:
+            raise FileNotFoundError(
+                "ubuntu rootfs build needs images/build-layer-distro.sh "
+                "from a Terrarium repo checkout"
+            )
+        subprocess.run(
+            ["bash", str(repo / "images" / "build-layer-distro.sh"), "ubuntu"],
+            check=True,
+        )
+    out = terrarium_fs.pack_cpio_rootfs(str(layer_dir), "ubuntu", str(rdir))
+    return Path(out)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# layer commands
+# tool commands — tool layers built on distro templates
 # ═══════════════════════════════════════════════════════════════════
 
-def cmd_layer_ls(args) -> int:
+def cmd_tool_ls(args) -> int:
     """List filesystem layers."""
     import terrarium_fs
 
@@ -760,58 +618,48 @@ def cmd_layer_ls(args) -> int:
         return _err(f"read {layer_dir}: {e}")
 
 
-def cmd_layer_create(args) -> int:
-    """Create a filesystem layer."""
-    if args.from_dir:
-        out = images.build_layer(args.from_dir, args.name)
-        print(f"layer built: {out}")
-        return EXIT_OK
-
-    if args.from_image:
-        return _build_layer_from_image(args)
-
-    # --script path (build-by-doing) requires kernel; initramfs auto-resolved
-    if not args.kernel:
-        return _err(
-            "Missing --kernel for script-based layer build",
-            cause="--script needs a builder VM, which requires a kernel",
-            fix="Provide --kernel (e.g. --kernel k612)",
-            exit_code=EXIT_USAGE,
-        )
-    return _build_layer_via_vm(args)
-
-
-def _build_layer_from_image(args) -> int:
-    """Build/refresh the base layer from guest rootfs."""
-    import terrarium_fs
-
-    name = args.name
-    dest = paths.layers_dir() / name
-    if dest.exists():
-        print(f"{dest} exists (use --overwrite to rebuild)")
-        return EXIT_OK
-    shutil.rmtree(dest, ignore_errors=True)
-    dest.mkdir(parents=True)
-    cpio = images.ensure("alpine.cpio")
+def cmd_tool_create(args) -> int:
+    """Build a tool layer by provisioning a builder VM from a template."""
     try:
-        terrarium_fs.extract_cpio_layer(str(cpio), str(dest))
-    except Exception as e:
-        return _err(str(e))
-    print(f"base layer ready: {dest}")
-    return EXIT_OK
-
-
-def _build_layer_via_vm(args) -> int:
-    """Build a tool layer by configuring inside a builder VM."""
-    system_map = {"alpine": "base", "ubuntu": "ubuntu"}
-    system = system_map.get(args.rootfs)
+        t = Template.load(args.template)
+    except FileNotFoundError:
+        return _err(
+            f"Template not found: {args.template!r}",
+            cause="Tool layers are built on a distro template",
+            fix=f"Create the distro environment first: terra setup {args.template}",
+            exit_code=EXIT_NOTFOUND,
+        )
+    system = _DISTRO_SYSTEM_LAYER.get(t.base)
     if system is None:
         return _err(
-            f"Unsupported rootfs: {args.rootfs!r}",
+            f"Unsupported template base {t.base!r}",
             cause="Only 'alpine' (musl) and 'ubuntu' (glibc) are supported",
-            fix="Use --rootfs alpine or --rootfs ubuntu",
+            fix="Use a template created by `terra setup alpine|ubuntu`",
             exit_code=EXIT_USAGE,
         )
+    return _build_tool_layer(args, system, t.kernel or "default")
+
+
+def _extract_rootfs_into_layer(rootfs_img: Path, layer_name: str, *, force: bool = False) -> Path | None:
+    """Extract a rootfs cpio into layers/<layer_name> (idempotent).
+
+    Returns the layer path, or None when it already exists and not *force*.
+    Used by `terra setup` to materialize the distro base layer.
+    """
+    import terrarium_fs
+
+    dest = paths.layers_dir() / layer_name
+    if dest.exists():
+        if not force:
+            return None
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    terrarium_fs.extract_cpio_layer(str(rootfs_img), str(dest))
+    return dest
+
+
+def _build_tool_layer(args, system: str, kernel: str) -> int:
+    """Build a tool layer by configuring inside a builder VM."""
     client = _client(args)
     name = args.name
     builder = f"lb-{name}"
@@ -820,7 +668,7 @@ def _build_layer_via_vm(args) -> int:
     try:
         client.vm_create(
             builder,
-            args.kernel if Path(args.kernel).exists() else str(images.resolve_kernel(args.kernel)),
+            kernel if Path(kernel).exists() else str(images.resolve_kernel(kernel)),
             initramfs=str(images.resolve_rootfs("virtiofs")),
             cpus=1,
             memory_mb=512,
@@ -846,20 +694,24 @@ def _build_layer_via_vm(args) -> int:
         client.vm_destroy(builder)
         return _err(f"builder VM {builder} did not reach Running state within 30s")
 
-    try:
-        content = Path(args.script).read_text()
-    except OSError as e:
-        return _err(f"read script: {e}")
-
-    # 2) run setup inside
-    resp = client.vm_exec(builder, ["sh", "-c", content], timeout_secs=args.timeout)
-    if resp.get("exit_code") != 0:
+    # 2) provision inside (if a script was given)
+    if args.script:
         try:
-            client.vm_destroy(builder)
-        except TerraError:
-            pass
-        return _err(f"setup script failed: {resp}")
-    print("setup output:", resp)
+            content = Path(args.script).read_text()
+        except OSError as e:
+            try:
+                client.vm_destroy(builder)
+            except TerraError:
+                pass
+            return _err(f"read script: {e}")
+        resp = client.vm_exec(builder, ["sh", "-c", content], timeout_secs=args.timeout)
+        if resp.get("exit_code") != 0:
+            try:
+                client.vm_destroy(builder)
+            except TerraError:
+                pass
+            return _err(f"setup script failed: {resp}")
+        print("setup output:", resp)
 
     # 3) cleanup runtime noise
     client.vm_exec(
@@ -876,58 +728,18 @@ def _build_layer_via_vm(args) -> int:
     print("builder VM destroyed")
 
     # 5) pack the upperdir delta as the layer
-    fs_root = os.environ.get("TERRA_STATE_DIR", "/tmp/terra-disks")
-    upper_dir = Path(fs_root) / "fs" / "uppers" / builder
+    upper_dir = _fs_root() / "uppers" / builder
     if not upper_dir.is_dir():
         return _err(
-            f"upperdir {upper_dir} not found — layer-build needs a LOCAL daemon "
+            f"upperdir {upper_dir} not found — tool build needs a LOCAL daemon "
             "(the upperdir lives on the daemon host)"
         )
     out = images.build_layer(str(upper_dir), name)
-    print(f"layer '{name}' built: {out}")
+    print(f"tool layer '{name}' built: {out}")
     return EXIT_OK
 
 
-def cmd_layer_info(args) -> int:
-    """Show layer details."""
-    layer_dir = os.environ.get("TERRA_LAYER_DIR") or str(paths.layers_dir())
-    layer_path = Path(layer_dir) / args.name
-    erofs_path = Path(layer_dir) / f"{args.name}.erofs"
-
-    if layer_path.is_dir():
-        # Count files (lightweight)
-        file_count = sum(1 for _ in layer_path.rglob("*") if _.is_file())
-        return _output(
-            {
-                "name": args.name,
-                "type": "directory",
-                "path": str(layer_path),
-                "file_count": file_count,
-            },
-            args,
-        )
-    if erofs_path.exists():
-        stat = erofs_path.stat()
-        return _output(
-            {
-                "name": args.name,
-                "type": "erofs",
-                "path": str(erofs_path),
-                "size_bytes": stat.st_size,
-                "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
-            },
-            args,
-        )
-
-    return _err(
-        f"Layer not found: {args.name!r}",
-        cause="No directory or .erofs image with this name",
-        fix="List layers: terra layer ls",
-        exit_code=EXIT_NOTFOUND,
-    )
-
-
-def cmd_layer_remove(args) -> int:
+def cmd_tool_remove(args) -> int:
     """Remove a filesystem layer."""
     import terrarium_fs
 
@@ -1182,23 +994,77 @@ def cmd_net_remove(args) -> int:
 def cmd_daemon_start(args) -> int:
     """Start a daemon as a detached background process.
 
-    Spawns a Python subprocess that calls Daemon.start(), which runs
-    the engine in a Rust background thread via PyO3 FFI.
+    Spawns a Python subprocess that calls Daemon.start(embedded=False),
+    which runs the engine in a Rust background thread via PyO3 FFI.
+    embedded=False makes this a dedicated service daemon that honors
+    the daemon_stop wire command.
+
+    NAT networking (tap) needs CAP_NET_ADMIN, so a non-root invocation
+    self-elevates: it re-execs itself via sudo (preserving PATH, HOME
+    and TERRA_* vars). --no-root skips the elevation for rootless use.
     """
-    existing = _daemon_pids()
-    if existing:
-        print(f"daemon already running (pid={existing[0]}) — stop it first: terra daemon stop")
+    if os.geteuid() != 0 and not args.no_root:
+        sudo = shutil.which("sudo")
+        sudo_noninteractive = False
+        if sudo:
+            r = subprocess.run([sudo, "-n", "true"], capture_output=True)
+            sudo_noninteractive = r.returncode == 0
+        if sudo and (sudo_noninteractive or sys.stdin.isatty()):
+            print("daemon runs as root (NAT networking) — re-running via sudo ...")
+            env_pairs = [
+                f"PATH={os.environ.get('PATH', '')}",
+                f"HOME={os.environ.get('HOME', '')}",
+            ]
+            env_pairs += [
+                f"{k}={v}" for k, v in os.environ.items() if k.startswith("TERRA_")
+            ]
+            cmd = [
+                sudo, "env", *env_pairs,
+                sys.executable, "-m", "terra", "daemon", "start", "--no-root",
+            ]
+            if args.tcp:
+                cmd += ["--tcp", args.tcp]
+            os.execvp(sudo, cmd)
+        # sudo unavailable or needs a password we can't supply here —
+        # don't hang on a hidden prompt; hand the user the command.
+        manual = (
+            f'sudo env "PATH={os.environ.get("PATH", "")}" '
+            f'"HOME={os.environ.get("HOME", "")}" '
+            f"{sys.executable} -m terra daemon start"
+        )
+        return _err(
+            "daemon start needs root for NAT networking (tap device)",
+            cause="not running as root and sudo is unavailable or needs a password",
+            fix=f"run it yourself: {manual}\n"
+            "  or go rootless (no --net VMs): terra daemon start --no-root",
+        )
+
+    if _daemon_alive(paths.default_socket()):
+        print("daemon already running — stop it first: terra daemon stop")
         return EXIT_ERROR
 
     log_file = paths.run_dir() / "daemon.log"
 
+    # The engine daemon runs on a Rust thread; when daemon_stop shuts
+    # it down the thread ends but this wrapper process would linger.
+    # Poll the socket and exit once the daemon stops answering, so the
+    # service process lifecycle tracks the daemon itself.
     cmd = [
         sys.executable,
         "-c",
-        "from terra.daemon import Daemon; import time\n"
-        "d = Daemon(tcp=%r).start()\n"
+        "import socket, time\n"
+        "from terra.daemon import Daemon\n"
+        "d = Daemon(tcp=%r, embedded=False).start()\n"
         "print(d.socket, flush=True)\n"
-        "time.sleep(10**9)" % (args.tcp,),
+        "while True:\n"
+        "    time.sleep(0.5)\n"
+        "    try:\n"
+        "        s = socket.socket(socket.AF_UNIX)\n"
+        "        s.settimeout(1)\n"
+        "        s.connect(d.socket)\n"
+        "        s.close()\n"
+        "    except OSError:\n"
+        "        break\n" % (args.tcp,),
     ]
 
     # When running via sudo, pass the original user's HOME so
@@ -1212,45 +1078,29 @@ def cmd_daemon_start(args) -> int:
         except KeyError:
             pass
 
-    if args.daemonize or not args.daemonize:
-        # Default: run as background daemon (existing behavior).
-        # When --daemonize is explicit, same behavior but with log redirect.
+    try:
+        log_fh = open(str(log_file), "a")
+        stdout_target = log_fh
+        stderr_target = log_fh
+    except OSError:
         stdout_target = subprocess.DEVNULL
         stderr_target = subprocess.DEVNULL
-        if args.daemonize:
-            try:
-                log_fh = open(str(log_file), "a")
-                stdout_target = log_fh
-                stderr_target = log_fh
-            except OSError:
-                pass
 
-        proc = subprocess.Popen(
-            cmd, stdout=stdout_target, stderr=stderr_target, start_new_session=True, env=env
-        )
-        (paths.run_dir() / "daemon.pid").write_text(str(proc.pid))
-        time.sleep(1.5)
-        sock = paths.default_socket()
-        print(f"daemon started (pid={proc.pid}, socket={sock})")
-        return EXIT_OK
-    else:
-        # Foreground mode (not daemonizing)
-        print("Starting daemon in foreground...")
-        proc = subprocess.Popen(cmd, stdout=None, stderr=None)
-        try:
-            proc.wait()
-        except KeyboardInterrupt:
-            proc.terminate()
-            proc.wait()
-        return EXIT_OK
+    proc = subprocess.Popen(
+        cmd, stdout=stdout_target, stderr=stderr_target, start_new_session=True, env=env
+    )
+    (paths.run_dir() / "daemon.pid").write_text(str(proc.pid))
+    time.sleep(1.5)
+    sock = paths.default_socket()
+    print(f"daemon started (pid={proc.pid}, socket={sock})")
+    return EXIT_OK
 
 
 def cmd_daemon_status(args) -> int:
     """Show daemon status (renamed from ls)."""
     info = {"socket": paths.default_socket()}
-    pids = _daemon_pids()
-    info["pids"] = pids
-    info["alive"] = bool(pids) or Path(info["socket"]).exists()
+    info["alive"] = _daemon_alive(info["socket"])
+    info["pids"] = _daemon_pids()  # pidfile hint, not proof of liveness
     return _output(info, args)
 
 
@@ -1311,19 +1161,64 @@ def cmd_daemon_logs(args) -> int:
 
 
 def cmd_daemon_stop(args) -> int:
-    """Stop daemon gracefully."""
-    return _daemon_stop(_signal.SIGTERM)
+    """Stop daemon gracefully via the daemon_stop wire command."""
+    sock = paths.default_socket()
+    if not _daemon_alive(sock):
+        _daemon_pidfile().unlink(missing_ok=True)
+        return _err(
+            "No engine daemon running",
+            cause=f"No daemon answering at {sock}",
+            fix="If you want to ensure a clean state, try: terra daemon destroy",
+        )
+    try:
+        TerraClient(socket_path=sock)._send({"command": "daemon_stop"})
+    except TerraError as e:
+        return _err(f"daemon_stop failed: {e}")
+    except (OSError, TimeoutError) as e:
+        return _err(f"could not reach daemon at {sock}: {e}")
+    print("daemon stopped")
+    # Wait for the daemon process to exit, then clean up hints.
+    for pid in _daemon_pids():
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                gone = Path(f"/proc/{pid}/stat").read_text().split()[2] == "Z"
+            except (OSError, IndexError):
+                gone = True
+            if gone:
+                break
+            time.sleep(0.1)
+    _daemon_pidfile().unlink(missing_ok=True)
+    try:
+        Path(sock).unlink()
+    except FileNotFoundError:
+        pass
+    return EXIT_OK
 
 
 def cmd_daemon_destroy(args) -> int:
-    """Force-stop daemon."""
-    rc = _daemon_stop(_signal.SIGKILL)
+    """Force-stop daemon (SIGKILL, pidfile hint)."""
+    pids = _daemon_pids()
+    if not pids:
+        _daemon_pidfile().unlink(missing_ok=True)
+        try:
+            Path(paths.default_socket()).unlink()
+        except FileNotFoundError:
+            pass
+        return _err(
+            "No engine daemon running",
+            cause="No daemon process or PID file found",
+            fix="Nothing to destroy — the daemon is not running",
+        )
+    for pid in pids:
+        os.kill(pid, _signal.SIGKILL)
+        print(f"sent SIGKILL to daemon (pid={pid})")
     _daemon_pidfile().unlink(missing_ok=True)
     try:
         Path(paths.default_socket()).unlink()
     except FileNotFoundError:
         pass
-    return rc
+    return EXIT_OK
 
 
 # ── daemon internals ──────────────────────────────────────────────
@@ -1332,8 +1227,24 @@ def _daemon_pidfile() -> Path:
     return paths.run_dir() / "daemon.pid"
 
 
+def _daemon_alive(socket_path: str) -> bool:
+    """Liveness = the daemon answers a lightweight command on its socket.
+
+    Neither pidfile existence nor a stale socket file proves the
+    daemon is up; a reply to ``list`` does.
+    """
+    try:
+        TerraClient(socket_path=socket_path)._send({"command": "list"})
+        return True
+    except TerraError:
+        return True  # an error reply still proves the daemon is up
+    except (OSError, TimeoutError, ValueError):
+        return False
+
+
 def _daemon_pids() -> list[int]:
-    """Live daemon pids (zombies excluded) — any start method."""
+    """Daemon pids from the pidfile — a hint for which process to
+    signal/wait on, NOT a liveness check (see _daemon_alive)."""
     pidfile = _daemon_pidfile()
     if pidfile.exists():
         try:
@@ -1341,38 +1252,9 @@ def _daemon_pids() -> list[int]:
             stat = Path(f"/proc/{pid}/stat").read_text().split()[2]
             if stat != "Z":
                 return [pid]
-        except (OSError, ValueError):
+        except (OSError, ValueError, IndexError):
             pass
-    import subprocess
-
-    out = subprocess.run(["pgrep", "-x", "engine"], capture_output=True, text=True)
-    pids = []
-    for p in out.stdout.split():
-        if not p.strip().isdigit():
-            continue
-        try:
-            stat = Path(f"/proc/{p}/stat").read_text().split()[2]
-            if stat != "Z":
-                pids.append(int(p))
-        except OSError:
-            pass
-    return pids
-
-
-def _daemon_stop(sig) -> int:
-    pids = _daemon_pids()
-    if not pids:
-        _daemon_pidfile().unlink(missing_ok=True)
-        return _err(
-            "No engine daemon running",
-            cause="No daemon process or PID file found",
-            fix="If you want to ensure a clean state, try: terra daemon destroy",
-        )
-    for pid in pids:
-        os.kill(pid, sig)
-        print(f"sent {_signal.Signals(sig).name} to daemon (pid={pid})")
-    _daemon_pidfile().unlink(missing_ok=True)
-    return EXIT_OK
+    return []
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1385,19 +1267,21 @@ def main() -> int:
         description="Terrarium CLI (python -m terra)",
         epilog="""\
 Common workflows:
-  First time setup:
-    terra image build kernel -n k612 --version 6.12
-    terra image build rootfs -n alpine
+  First time setup (one command):
+    terra setup alpine
 
   Quick sandbox:
-    terra sandbox create --template python312
+    terra daemon start
+    terra sandbox create --template alpine --net
+    terra sandbox exec <vm-name> -- python3 --version
+    terra sandbox kill <vm-name>
 
   Warm pool:
     terra pool create -n mypool --size 3
-    terra pool claim --template python312
+    terra pool claim --template alpine
 
   Direct VM:
-    terra vm create dev --kernel k612 --layers base --net
+    terra vm create dev --kernel default --layers base --net
     terra vm exec dev -- python3 --version
     terra vm destroy dev
 """,
@@ -1407,6 +1291,17 @@ Common workflows:
     p.add_argument("--json", action="store_true", help="machine-readable JSON output")
     p.add_argument("-v", "--verbose", action="store_true", help="verbose output (--json style for dicts)")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    # ── setup ──────────────────────────────────────────────────────
+    stp = sub.add_parser(
+        "setup",
+        help="one-command environment setup (kernel + rootfs + layers + template)",
+    )
+    stp.add_argument("distro", nargs="?", default="alpine", choices=["alpine", "ubuntu"],
+                     help="base distro (default: alpine)")
+    stp.add_argument("--kernel-version", default="6.12", help="kernel version (default: 6.12)")
+    stp.add_argument("--force", action="store_true", help="rebuild even if artifacts exist")
+    stp.set_defaults(f=cmd_setup)
 
     # ── sandbox ────────────────────────────────────────────────────
     sb = sub.add_parser("sandbox", help="high-level sandbox operations (recommended)")
@@ -1437,6 +1332,8 @@ Common workflows:
     sp.add_argument("--cwd", default="/workdir", help="working directory")
     sp.add_argument("--env", nargs="*", help="environment variables (KEY=VALUE)")
     sp.add_argument("--timeout", type=int, default=60, help="command timeout (seconds)")
+    sp.add_argument("--no-sandbox", action="store_true",
+                    help="run without sandlock permission isolation")
     sp.add_argument("--detach", action="store_true", help="detached mode (reserved)")
     sp.add_argument("--follow", help="follow exec ID (reserved)")
     sp.add_argument("args", nargs=argparse.REMAINDER, help="command and arguments (after --)")
@@ -1461,84 +1358,28 @@ Common workflows:
     sp.add_argument("id", help="sandbox ID")
     sp.set_defaults(f=cmd_sandbox_kill)
 
-    # ── template ───────────────────────────────────────────────────
-    tmpl = sub.add_parser("template", help="manage named templates")
-    tmpls = tmpl.add_subparsers(dest="action", required=True)
+    sp = sbs.add_parser("destroy-tenant", help="destroy a tenant VM and all its sandboxes")
+    sp.add_argument("tenant", help="tenant identifier")
+    sp.set_defaults(f=cmd_sandbox_destroy_tenant)
 
-    tmpls.add_parser("ls", help="list templates").set_defaults(f=cmd_template_ls)
+    # ── tool ────────────────────────────────────────────────────────
+    tl = sub.add_parser("tool", help="tool layers built on distro templates")
+    tls = tl.add_subparsers(dest="action", required=True)
 
-    sp = tmpls.add_parser("create", help="create a template")
-    sp.add_argument("-n", "--name", required=True, help="template name")
-    sp.add_argument("--kernel", required=True, help="kernel variant")
-    sp.add_argument("--rootfs", required=True, choices=["alpine", "ubuntu"], help="base distro")
-    sp.add_argument("--layers", nargs="*", default=[], help="tool layers comma-separated")
-    sp.set_defaults(f=cmd_template_create)
-
-    sp = tmpls.add_parser("info", help="show template details")
-    sp.add_argument("name", help="template name")
-    sp.set_defaults(f=cmd_template_info)
-
-    sp = tmpls.add_parser("remove", help="remove a template")
-    sp.add_argument("name", help="template name")
-    sp.set_defaults(f=cmd_template_remove)
-
-    # ── image ───────────────────────────────────────────────────────
-    img = sub.add_parser("image", help="manage guest images (kernel, rootfs, initramfs)")
-    imgs = img.add_subparsers(dest="action", required=True)
-
-    imgs.add_parser("ls", help="list images").set_defaults(f=cmd_image_ls)
-
-    b = imgs.add_parser("build", help="build images")
-    bs = b.add_subparsers(dest="what", required=True)
-
-    k = bs.add_parser("kernel", help="build a kernel image")
-    k.add_argument("-n", "--name", required=True, help="kernel variant name")
-    k.add_argument("--version", default="6.12", help="kernel version")
-    k.set_defaults(f=cmd_image_build_kernel)
-
-    r = bs.add_parser("rootfs", help="build a rootfs image")
-    r.add_argument("-n", "--name", required=True, choices=["alpine", "ubuntu"])
-    r.set_defaults(f=cmd_image_build_rootfs)
-
-    i = bs.add_parser("initramfs", help="build an initramfs image")
-    i.add_argument("--type", required=True, choices=["virtiofs", "agent"])
-    i.add_argument("-n", "--name", help="variant name (optional)")
-    i.set_defaults(f=cmd_image_build_initramfs)
-
-    sp = imgs.add_parser("info", help="show image details")
-    sp.add_argument("name", help="image name")
-    sp.set_defaults(f=cmd_image_info)
-
-    sp = imgs.add_parser("remove", help="remove an image")
-    sp.add_argument("-n", "--name", required=True, help="image name")
-    sp.set_defaults(f=cmd_image_remove)
-
-    # ── layer ───────────────────────────────────────────────────────
-    lay = sub.add_parser("layer", help="manage filesystem layers")
-    lays = lay.add_subparsers(dest="action", required=True)
-
-    lays.add_parser("ls", help="list layers").set_defaults(f=cmd_layer_ls)
-
-    sp = lays.add_parser("create", help="create a layer")
-    sp.add_argument("-n", "--name", required=True, help="layer name")
-    src = sp.add_mutually_exclusive_group(required=True)
-    src.add_argument("--from-dir", help="pack an existing directory")
-    src.add_argument("--script", help="build-by-doing: run setup in a builder VM")
-    src.add_argument("--from-image", action="store_true", help="base layer from guest rootfs")
-    sp.add_argument("--rootfs", required=True,
-                    help="system the layer is built on: alpine (musl) or ubuntu (glibc)")
-    sp.add_argument("--kernel", help="kernel for builder VM (required with --script)")
+    sp = tls.add_parser("create", help="build a tool layer in a builder VM")
+    sp.add_argument("-n", "--name", required=True, help="tool layer name")
+    sp.add_argument("--template", required=True,
+                    help="distro template to build on (created by terra setup)")
+    sp.add_argument("--script", help="provisioning script run inside the builder VM")
     sp.add_argument("--no-net", action="store_true", help="disable networking for builder VM")
     sp.add_argument("--timeout", type=int, default=600, help="builder VM timeout")
-    sp.set_defaults(f=cmd_layer_create)
+    sp.set_defaults(f=cmd_tool_create)
 
-    sp = lays.add_parser("info", help="show layer details")
-    sp.add_argument("name", help="layer name")
-    sp.set_defaults(f=cmd_layer_info)
+    tls.add_parser("ls", help="list tool layers").set_defaults(f=cmd_tool_ls)
 
-    sp = lays.add_parser("remove", help="remove a layer")
-    sp.add_argument("-n", "--name", required=True, help="layer name")
-    sp.set_defaults(f=cmd_layer_remove)
+    sp = tls.add_parser("remove", help="remove a tool layer")
+    sp.add_argument("-n", "--name", required=True, help="tool layer name")
+    sp.set_defaults(f=cmd_tool_remove)
 
     # ── vm ──────────────────────────────────────────────────────────
     vm = sub.add_parser("vm", help="VM operations")
@@ -1655,8 +1496,9 @@ Common workflows:
     dmn = sub.add_parser("daemon", help="engine daemon lifecycle")
     dmns = dmn.add_subparsers(dest="action", required=True)
 
-    sp = dmns.add_parser("start", help="start the daemon")
-    sp.add_argument("--daemonize", action="store_true", help="run as background daemon")
+    sp = dmns.add_parser("start", help="start the daemon (detached background process)")
+    sp.add_argument("--no-root", action="store_true",
+                    help="run unprivileged (no sudo self-elevation; --net VMs unavailable)")
     sp.add_argument("--tcp", help="also listen on host:port for remote clients")
     sp.set_defaults(f=cmd_daemon_start)
 

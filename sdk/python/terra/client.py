@@ -181,25 +181,33 @@ class TerraClient:
         """Detach a previously attached layered filesystem."""
         return self._send({"command": "detach_fs", "name": name})
 
-    def vm_exec(self, name: str, args: list[str], timeout_secs: int = 60) -> dict:
+    def vm_exec(
+        self, name: str, args: list[str], timeout_secs: int = 60, *,
+        sandbox: bool = False,
+    ) -> dict:
         """Execute a command inside the VM via the guest agent (vsock).
 
         Retries transient agent-boot errors (handshake/vsock connect)
         for a few seconds — a VM is "Running" before its agent is ready.
+
+        sandbox: run under sandlock permission isolation (the guest
+        agent wraps argv with ``sandlock run <policy> --``; hard error
+        when no sandlock binary exists in the guest).
         """
         import time as _time
 
+        cmd: dict = {
+            "command": "exec",
+            "name": name,
+            "args": list(args),
+            "timeout_secs": timeout_secs,
+        }
+        if sandbox:
+            cmd["sandbox"] = True
         last: Exception | None = None
         for _ in range(16):
             try:
-                return self._send(
-                    {
-                        "command": "exec",
-                        "name": name,
-                        "args": list(args),
-                        "timeout_secs": timeout_secs,
-                    }
-                )
+                return self._send(cmd)
             except TerraError as e:
                 if "handshake" not in str(e) and "vsock" not in str(e):
                     raise
@@ -210,4 +218,62 @@ class TerraClient:
     def vm_destroy(self, name: str) -> dict:
         """Stop and deregister a VM."""
         return self._send({"command": "destroy", "name": name})
+
+    # ── first-class sandboxes (S-M2) ────────────────────────────────
+
+    def sandbox_create(self, tenant: str, **vmspec) -> dict:
+        """Create a sandbox on the tenant's shared VM.
+
+        Idempotent: an existing tenant VM is reused and the VM-spec
+        fields (kernel, initramfs, layers, cpus, memory_mb, net, ...)
+        are ignored. Returns ``{id, vm, workdir}``.
+        """
+        cmd = {"command": "sandbox_create", "tenant": tenant}
+        cmd.update(vmspec)
+        return self._send(cmd)
+
+    def sandbox_exec(
+        self,
+        id: str,
+        args: list[str],
+        timeout_secs: int | None = None,
+        *,
+        sandbox: bool | None = None,
+        exec_mode: str | None = None,
+    ) -> dict:
+        """Execute args in a sandbox (cwd = its workdir, set engine-side).
+
+        ``sandbox=None`` → engine default (True — confined via sandlock).
+        ``exec_mode="background"`` → returns ``{session_id, ...}``.
+        """
+        cmd: dict = {"command": "sandbox_exec", "id": id, "args": list(args)}
+        if timeout_secs is not None:
+            cmd["timeout_secs"] = timeout_secs
+        if sandbox is not None:
+            cmd["sandbox"] = bool(sandbox)
+        if exec_mode is not None:
+            cmd["exec_mode"] = exec_mode
+        return self._send(cmd)
+
+    def sandbox_list(self, tenant: str | None = None) -> dict:
+        """List sandbox records, optionally filtered by tenant."""
+        cmd: dict = {"command": "sandbox_list"}
+        if tenant:
+            cmd["tenant"] = tenant
+        return self._send(cmd)
+
+    def sandbox_info(self, id: str) -> dict:
+        """Get one sandbox record."""
+        return self._send({"command": "sandbox_info", "id": id})
+
+    def sandbox_kill(self, id: str) -> dict:
+        """Kill a sandbox's sessions, remove its workdir, drop the record.
+
+        The shared tenant VM keeps running.
+        """
+        return self._send({"command": "sandbox_kill", "id": id})
+
+    def tenant_destroy(self, tenant: str) -> dict:
+        """Destroy the tenant VM and all its sandbox records."""
+        return self._send({"command": "tenant_destroy", "tenant": tenant})
 

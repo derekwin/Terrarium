@@ -250,6 +250,15 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
 
     if Path(SOCKET).exists():
         Path(SOCKET).unlink()
+    # The daemon runs in-process, so the engine's PATH-based fallback
+    # tool lookups (erofsfuse — crates/fs/src/erofs.rs) read THIS
+    # process's PATH. Mirror the SDK daemon env (build_daemon_env):
+    # managed bin dir on PATH.
+    from terra import paths as _terra_paths
+
+    _bin_dir = str(_terra_paths.bin_dir())
+    if _bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = _bin_dir + os.pathsep + os.environ.get("PATH", "")
     env = {
         "TERRA_STATE_DIR": str(state_dir / "vms"),
         "TERRA_CH_BINARY": ch,

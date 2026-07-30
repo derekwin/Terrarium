@@ -62,18 +62,26 @@ class DaemonManager:
         return self._ping()
 
     def stop(self) -> None:
-        """Graceful shutdown — sends ``shutdown all`` then returns.
+        """Graceful shutdown — sends ``daemon_stop`` and checks the reply.
 
-        Errors are silently ignored (the daemon may already be gone).
+        An embedded (in-process) daemon refuses ``daemon_stop`` by
+        design; that refusal is a no-op success because the daemon
+        thread dies with its host process. An unreachable daemon is
+        already gone. Any other engine error is raised.
         """
+        from .client import TerraClient, TerraError
+        from .daemon import EMBEDDED_STOP_REFUSAL
+
         try:
-            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-            s.settimeout(5)
-            s.connect(self.socket_path)
-            s.sendall(b'{"command":"shutdown","name":"all"}\n')
-            s.close()
-        except Exception:
-            pass
+            TerraClient(socket_path=self.socket_path)._send({"command": "daemon_stop"})
+        except TerraError as e:
+            if EMBEDDED_STOP_REFUSAL in str(e):
+                return  # embedded refusal — dies with the host process
+            raise EngineError(
+                f"daemon_stop failed: {e}", engine_error=str(e)
+            ) from e
+        except (OSError, TimeoutError):
+            pass  # daemon already gone
 
     # ── internals ───────────────────────────────────────────────
 
@@ -98,14 +106,22 @@ class DaemonManager:
     def _start_daemon(self) -> None:
         """Launch the engine daemon in-process via PyO3 FFI.
 
-        The ``ch_binary`` path can be overridden with
-        ``TERRA_CH_BINARY``; otherwise *terrarium_engine* resolves its
-        own default.
+        The environment (state/layer dirs, CH/virtiofsd binaries,
+        default kernel + agent initramfs) comes from the shared
+        :func:`terra.daemon.build_daemon_env`, so Sandbox-started
+        daemons see the same managed assets as ``terra daemon start``
+        ones. ``embedded`` keeps its fail-safe default (True): an
+        in-process daemon refuses ``daemon_stop``.
         """
         import terrarium_engine
 
-        ch_binary = os.environ.get("TERRA_CH_BINARY")
-        terrarium_engine.start_daemon(self.socket_path, ch_binary=ch_binary)
+        from .daemon import build_daemon_env
+
+        env = build_daemon_env()
+        os.environ.update(env)
+        terrarium_engine.start_daemon(
+            self.socket_path, ch_binary=env["TERRA_CH_BINARY"]
+        )
 
     def _wait_ready(self, timeout: float) -> None:
         """Poll the socket until the daemon responds or *timeout* expires."""

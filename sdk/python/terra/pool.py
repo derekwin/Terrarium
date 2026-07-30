@@ -21,7 +21,8 @@ Usage::
 
     # Pool-claimed sandboxes can be released back:
     pool.release(sb)      # returns VM to idle pool
-    sb.kill()             # deregister forever
+    sb.kill()             # removes only the sandbox workdir — the pool
+                          # VM stays claimed (vm_destroy deregisters it)
 
     # Warm-pool VMs are pre-booted and have the layers hot-plugged on
     # claim.  This is much faster than cold-creating a Sandbox.
@@ -80,7 +81,10 @@ class Pool:
             t = Template.load(template)
             system = _SYSTEM_MAP.get(t.base, t.base)
             if layers is None:
-                layers = t.layers + [system]
+                layers = list(t.layers)
+                # overlayfs rejects duplicate lower layers (ELOOP).
+                if system not in layers:
+                    layers.append(system)
             if kernel is None and t.kernel:
                 kernel = t.kernel
 
@@ -119,6 +123,7 @@ class Pool:
         workdir = f"/workdir/{session_id}"
         sb = Sandbox.__new__(Sandbox)
         sb._tenant = "pool"
+        sb._id = None  # not an engine sandbox — legacy vm_exec path
         sb._session_id = session_id
         sb._vm_name = claim["name"]
         sb._workdir = workdir
@@ -135,9 +140,10 @@ class Pool:
     def release(self, sandbox: Sandbox) -> None:
         """Release a claimed pool VM back to idle.
 
-        The VM stays running and can be claimed again later.  Use
-        :meth:`Sandbox.kill` if you want to permanently deregister
-        the VM instead.
+        The VM stays running and can be claimed again later.  Note that
+        :meth:`Sandbox.kill` only removes the sandbox workdir — it does
+        NOT deregister the pool VM.  Use ``vm_destroy`` to deregister
+        a VM permanently.
         """
         self._client.pool_release(sandbox._vm_name)
         sandbox._alive = False

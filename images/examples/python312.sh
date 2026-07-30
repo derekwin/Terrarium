@@ -2,7 +2,8 @@
 # layer-build example: python312 + numpy (Alpine base)
 #
 # Build with:
-#   sudo terra image layer-build python312 --script images/examples/python312.sh
+#   terra tool create -n python312 --template alpine --script images/examples/python312.sh
+#   (script uses the network — the daemon must run as root)
 #
 # Use with:
 #   layers=["python312", "base"]  (VM create or pool_claim)

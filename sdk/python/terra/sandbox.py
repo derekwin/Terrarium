@@ -16,8 +16,8 @@ Usage::
     sb2.exec("python3 -c 'print(2+2)'")
 
     # Both share the same VM, independent workdirs:
-    sb1.id  # "tenant-my-org/sb-a3f2"
-    sb2.id  # "tenant-my-org/sb-b1c4"
+    sb1.id  # "sb-a3f2b1c4" (engine-allocated)
+    sb2.id  # "sb-b1c4d5e6"
 
     # Context manager — auto-kills session on exit:
     with Sandbox(template="py312") as sb:
@@ -30,6 +30,7 @@ Usage::
 from __future__ import annotations
 
 import base64
+import shlex
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -184,25 +185,25 @@ class Sandbox:
         metadata: dict | None = None,
     ):
         # -- identity ---------------------------------------------------------
-        self._tenant: str = tenant or f"tenant-{uuid4().hex[:8]}"
-        self._session_id: str = f"sb-{uuid4().hex[:4]}"
+        self._tenant: str = tenant or uuid4().hex[:8]
+        self._id: str | None = None
         self._vm_name: str = f"tenant-{self._tenant}"
 
         # -- auto-start daemon ------------------------------------------------
         dm = DaemonManager()
         dm.ensure_running()
 
-        # -- check if tenant VM already exists ---------------------------------
+        # -- resolve the VM spec (only needed when the tenant VM is new) ------
         client = TerraClient()
         vm_exists: bool = False
         try:
-            info = client.vm_info(self._vm_name)
+            client.vm_info(self._vm_name)
             vm_exists = True
         except ClientError:
             vm_exists = False
 
+        vmspec: dict = {}
         if not vm_exists:
-            # First sandbox for this tenant → create VM.
             if not template and not layers:
                 raise TerraError(
                     "template or layers required for first sandbox in tenant",
@@ -215,7 +216,10 @@ class Sandbox:
                 t = Template.load(template)
                 system_layer = _SYSTEM_MAP.get(t.base, t.base)
                 if layers is None:
-                    layers = t.layers + [system_layer]
+                    layers = list(t.layers)
+                    # overlayfs rejects duplicate lower layers (ELOOP).
+                    if system_layer not in layers:
+                        layers.append(system_layer)
                 if kernel is None and t.kernel:
                     kernel = t.kernel
 
@@ -233,27 +237,36 @@ class Sandbox:
             else:
                 kernel_path = str(images.ensure("vmlinux.bin"))
 
-            # -- create VM -----------------------------------------------------
-            initramfs = str(images.resolve_rootfs("virtiofs"))
-            client.vm_create(
-                self._vm_name,
-                kernel_path,
-                initramfs=initramfs,
-                layers=layers,
-                cpus=cpu or 1,
-                memory_mb=memory_mb or 256,
-                net=bool(network),
-            )
-        else:
-            # VM exists → validate it's running.
-            if info.get("state") not in ("Running",):
-                raise SandboxStateError(
-                    f"Tenant VM {self._vm_name} is not running",
-                    sandbox_id=self._vm_name,
-                )
+            vmspec = {
+                "kernel": kernel_path,
+                "initramfs": str(images.resolve_rootfs("virtiofs")),
+                "layers": list(layers),
+                "cpus": cpu or 1,
+                "memory_mb": memory_mb or 256,
+                "net": bool(network),
+            }
 
-        # -- create per-sandbox workdir ----------------------------------------
-        self._workdir: str = f"/workdir/{self._session_id}"
+        # -- one engine call: ensure VM + allocate id + mkdir workdir ---------
+        # (retry transient agent-boot races on a freshly spawned VM)
+        import time as _time
+
+        last: Exception | None = None
+        for _ in range(20):
+            try:
+                resp = client.sandbox_create(self._tenant, **vmspec)
+                break
+            except ClientError as e:
+                msg = str(e)
+                if "handshake" not in msg and "vsock" not in msg:
+                    raise
+                last = e
+                _time.sleep(0.5)
+        else:
+            raise last  # type: ignore[misc]
+
+        self._id = resp["id"]
+        self._vm_name = resp["vm"]
+        self._workdir: str = resp["workdir"]
         self._client = client
         self._alive: bool = True
         self._default_timeout = timeout
@@ -266,13 +279,24 @@ class Sandbox:
 
     @property
     def id(self) -> str:
-        """Full sandbox identifier: ``{vm_name}/{session_id}``."""
+        """Engine-allocated sandbox identifier (``sb-<8hex>``).
+
+        Pool-claimed sessions (not engine sandboxes) fall back to the
+        ``{vm}/{session}`` composite.
+        """
+        if self._id is not None:
+            return self._id
         return f"{self._vm_name}/{self._session_id}"
 
     @property
     def vm(self) -> str:
         """The tenant VM name this sandbox runs in."""
         return self._vm_name
+
+    @property
+    def tenant(self) -> str:
+        """The tenant identifier (VM name is ``tenant-<tenant>``)."""
+        return self._tenant
 
     @property
     def status(self) -> str:
@@ -323,16 +347,18 @@ class Sandbox:
         env: dict[str, str] | None = None,
         timeout: int | None = None,
         check: bool = False,
+        sandboxed: bool = True,
     ) -> ExecResult:
         """Execute a command inside the sandbox.
 
         Parameters
         ----------
         command:
-            Command as a string (will be ``split()``) or list of args.
+            Command as a string (split shell-style with ``shlex``) or
+            list of args.
         cwd:
-            Working directory inside the guest (defaults to the sandbox's
-            private workdir).
+            Working directory inside the guest. Defaults to the sandbox's
+            private workdir (set engine-side); only pass this to override.
         env:
             Extra environment variables prepended to the command
             (merged with sandbox-level *env*).
@@ -341,12 +367,16 @@ class Sandbox:
         check:
             If *True*, raise :class:`~terra.exceptions.ExecError` on non-zero
             exit code.
+        sandboxed:
+            Run under sandlock permission isolation (default *True* —
+            isolation is the product point). The default policy makes
+            the system read-only; only the session workdir and ``/tmp``
+            are writable, and the network is unrestricted for now.
 
         Returns
         -------
         ExecResult
-            Structured result with ``exit_code``, ``stdout``, ``stderr``,
-            ``duration_ms``, ``timed_out``.
+            Structured result with ``exit_code``, ``stdout``, ``stderr``.
 
         Raises
         ------
@@ -363,46 +393,75 @@ class Sandbox:
                 sandbox_id=self.id,
             )
 
-        # Normalise to list-of-strings.
+        # Normalise to list-of-strings (shlex so quoting survives).
         if isinstance(command, str):
-            args = command.split()
+            args = shlex.split(command)
         else:
             args = list(command)
-
-        # Set workdir to sandbox-specific directory unless overridden.
-        effective_cwd: str = cwd if cwd is not None else self._workdir
 
         # Combine sandbox-level env + command-level env.
         full_env: dict[str, str] = dict(self._env)
         if env:
             full_env.update(env)
 
-        if full_env:
-            prefix = " ".join(f"{k}={v}" for k, v in full_env.items())
-            args = ["sh", "-c", f"cd {effective_cwd} && {prefix} {' '.join(args)}"]
-        else:
-            args = ["sh", "-c", f"cd {effective_cwd} && {' '.join(args)}"]
-
         timeout_secs = timeout if timeout is not None else self._default_timeout
 
-        try:
-            resp = self._client.vm_exec(self._vm_name, args, timeout_secs)
-        except ClientError as e:
-            msg = str(e)
-            if "timeout" in msg.lower():
-                raise SandboxTimeoutError(
+        if self._from_pool:
+            # Pool-claimed VMs are not engine sandboxes: exec directly on
+            # the VM, cd-ing into the session workdir (legacy path).
+            effective_cwd: str = cwd if cwd is not None else self._workdir
+            quoted = shlex.join(args)
+            if full_env:
+                prefix = " ".join(
+                    f"{k}={shlex.quote(str(v))}" for k, v in full_env.items()
+                )
+                args = ["sh", "-c", f"cd {shlex.quote(effective_cwd)} && {prefix} {quoted}"]
+            else:
+                args = ["sh", "-c", f"cd {shlex.quote(effective_cwd)} && {quoted}"]
+            try:
+                resp = self._client.vm_exec(
+                    self._vm_name, args, timeout_secs, sandbox=sandboxed
+                )
+            except ClientError as e:
+                msg = str(e)
+                if "timeout" in msg.lower():
+                    raise SandboxTimeoutError(
+                        msg, sandbox_id=self.id, engine_error=msg
+                    ) from e
+                raise TerraError(
                     msg, sandbox_id=self.id, engine_error=msg
                 ) from e
-            raise TerraError(
-                msg, sandbox_id=self.id, engine_error=msg
-            ) from e
+        else:
+            # Engine sandbox: cwd defaults to the sandbox workdir
+            # engine-side — only wrap when cwd/env override is needed.
+            if cwd is not None or full_env:
+                quoted = shlex.join(args)
+                if full_env:
+                    prefix = " ".join(
+                        f"{k}={shlex.quote(str(v))}" for k, v in full_env.items()
+                    )
+                    quoted = f"{prefix} {quoted}"
+                if cwd is not None:
+                    quoted = f"cd {shlex.quote(cwd)} && {quoted}"
+                args = ["sh", "-c", quoted]
+            try:
+                resp = self._client.sandbox_exec(
+                    self._id, args, timeout_secs, sandbox=sandboxed
+                )
+            except ClientError as e:
+                msg = str(e)
+                if "timeout" in msg.lower():
+                    raise SandboxTimeoutError(
+                        msg, sandbox_id=self.id, engine_error=msg
+                    ) from e
+                raise TerraError(
+                    msg, sandbox_id=self.id, engine_error=msg
+                ) from e
 
         result = ExecResult(
             exit_code=resp.get("exit_code", -1),
             stdout=resp.get("stdout", ""),
             stderr=resp.get("stderr", ""),
-            duration_ms=resp.get("duration_ms", 0),
-            timed_out=resp.get("timed_out", False),
         )
 
         if check and result.exit_code != 0:
@@ -419,17 +478,22 @@ class Sandbox:
     def kill(self) -> None:
         """Kill this sandbox session (does NOT destroy the shared tenant VM).
 
-        Only removes the sandbox workdir. Other sandboxes on the same
-        tenant VM continue running.
+        Engine-side: kills the sandbox's running sessions, removes the
+        workdir and drops the record. Other sandboxes on the same tenant
+        VM continue running.
 
-        Idempotent — safe to call multiple times.
+        Idempotent — safe to call multiple times (a second kill gets
+        "not found" from the engine and is a no-op).
         """
         if not self._alive:
             return
         try:
-            self._client.vm_exec(
-                self._vm_name, ["rm", "-rf", self._workdir], timeout_secs=5
-            )
+            if self._from_pool:
+                self._client.vm_exec(
+                    self._vm_name, ["rm", "-rf", self._workdir], timeout_secs=5
+                )
+            else:
+                self._client.sandbox_kill(self._id)
         except ClientError:
             pass
         self._alive = False
@@ -441,11 +505,10 @@ class Sandbox:
         Parameters
         ----------
         tenant_id:
-            The tenant identifier (the part after ``tenant-`` in the VM name).
+            The tenant identifier (the VM name is ``tenant-<tenant_id>``).
         """
         client = TerraClient()
-        vm_name = f"tenant-{tenant_id}"
-        client.vm_destroy(vm_name)
+        client.tenant_destroy(tenant_id)
 
     def metrics(self) -> dict:
         """Query current resource usage.
@@ -499,7 +562,7 @@ class Sandbox:
 
     def __del__(self) -> None:
         """Best-effort cleanup on GC."""
-        if self._alive:
+        if getattr(self, "_alive", False):
             try:
                 self.kill()
             except Exception:

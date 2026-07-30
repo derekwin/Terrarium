@@ -3,7 +3,7 @@
 #
 # Shows: pip installs land in the layer like any other file.
 # pip downloads can be slow — pass a larger --timeout if needed:
-#   sudo terra image layer-build pylibs --script images/examples/pylibs.sh --timeout 1800
+#   terra tool create -n pylibs --template alpine --script images/examples/pylibs.sh --timeout 1800
 
 set -e
 sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories

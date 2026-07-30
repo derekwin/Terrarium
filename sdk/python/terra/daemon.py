@@ -22,12 +22,65 @@ import socket as _socket
 import time
 from pathlib import Path
 
-from . import assets, paths
+from . import assets, images, paths
+from .client import TerraClient, TerraError as _ClientError
 from .config import HostConfig
 
 
 class DaemonError(RuntimeError):
     """The daemon failed to start or stop."""
+
+
+# Engine error substring returned when daemon_stop is sent to an
+# embedded (in-process) daemon — see crates/engine/src/daemon.rs.
+EMBEDDED_STOP_REFUSAL = "not supported in embedded mode"
+
+
+def build_daemon_env(
+    config: HostConfig | None = None,
+    *,
+    kernel: str | None = None,
+    ch_binary: str | None = None,
+    virtiofsd: str | None = None,
+    layer_dir: str | None = None,
+    state_dir: str | None = None,
+) -> dict[str, str]:
+    """Resolve the full daemon environment — single source of truth.
+
+    Used by both :meth:`Daemon.start` and the internal DaemonManager so
+    every daemon sees the managed state/layer dirs, host binaries and
+    default guest images, regardless of which path started it.
+    """
+    cfg = config or HostConfig()
+    env = cfg.env()
+    env["TERRA_STATE_DIR"] = state_dir or cfg.state_dir or str(paths.state_dir())
+    env["TERRA_LAYER_DIR"] = layer_dir or cfg.layer_dir or str(paths.layers_dir())
+    env["TERRA_CH_BINARY"] = ch_binary or cfg.ch_binary or str(assets.ensure_ch())
+    env["TERRA_VIRTIOFSD"] = virtiofsd or cfg.virtiofsd or str(assets.ensure_virtiofsd())
+    kernel = kernel or cfg.kernel
+    if kernel:
+        env["TERRA_KERNEL"] = str(Path(kernel).expanduser())
+    # Best-effort image defaults so engine pool_create doesn't fall
+    # back to repo-relative target/guest paths. Skipped silently when
+    # no default images are resolvable yet — explicit per-VM
+    # kernel/initramfs still work without them.
+    if "TERRA_KERNEL" not in env:
+        try:
+            env["TERRA_KERNEL"] = str(images.ensure("vmlinux.bin"))
+        except Exception:  # noqa: BLE001
+            pass
+    if "TERRA_AGENT_INITRAMFS" not in env:
+        try:
+            env["TERRA_AGENT_INITRAMFS"] = str(images.ensure("initramfs-agent.cpio.gz"))
+        except Exception:  # noqa: BLE001
+            pass
+    # Managed bin dir on PATH: the engine's fallback tool lookups
+    # (erofsfuse, virtiofsd, mkfs.erofs — see crates/fs/src/erofs.rs)
+    # resolve bare binary names via PATH.
+    bin_dir = str(paths.bin_dir())
+    if bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        env["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+    return env
 
 
 class Daemon:
@@ -45,6 +98,7 @@ class Daemon:
         layer_dir: str | None = None,
         state_dir: str | None = None,
         log: str | None = None,
+        embedded: bool = True,
     ):
         self.socket = socket or paths.default_socket()
         self.tcp = tcp
@@ -55,21 +109,24 @@ class Daemon:
         self._layer_dir = layer_dir or self.config.layer_dir
         self._state_dir = state_dir or self.config.state_dir
         self._log = log
+        # embedded=True (fail-safe default): the daemon runs inside a
+        # host process and refuses daemon_stop. Pass False only when
+        # this process is a dedicated daemon (e.g. the subprocess
+        # spawned by `terra daemon start`).
+        self._embedded = embedded
         self._log_file = None
 
     def start(self, timeout: float = 5.0) -> "Daemon":
-        ch_binary = self._ch or str(assets.ensure_ch())
-        env_updates = {
-            **self.config.env(),
-            "TERRA_STATE_DIR": self._state_dir or str(paths.state_dir()),
-            "TERRA_CH_BINARY": ch_binary,
-            "TERRA_LAYER_DIR": self._layer_dir or str(paths.layers_dir()),
-        }
-        vfsd = self._vfsd or str(assets.ensure_virtiofsd())
-        env_updates["TERRA_VIRTIOFSD"] = vfsd
-        if self._kernel:
-            env_updates["TERRA_KERNEL"] = self._kernel
+        env_updates = build_daemon_env(
+            self.config,
+            kernel=self._kernel,
+            ch_binary=self._ch,
+            virtiofsd=self._vfsd,
+            layer_dir=self._layer_dir,
+            state_dir=self._state_dir,
+        )
         os.environ.update(env_updates)
+        ch_binary = env_updates["TERRA_CH_BINARY"]
 
         if Path(self.socket).exists():
             try:
@@ -81,7 +138,9 @@ class Daemon:
 
         import terrarium_engine
 
-        terrarium_engine.start_daemon(self.socket, ch_binary=ch_binary)
+        terrarium_engine.start_daemon(
+            self.socket, ch_binary=ch_binary, embedded=self._embedded
+        )
 
         # When started via sudo, chown the socket to the original user
         # so regular CLI commands work without sudo.
@@ -110,17 +169,60 @@ class Daemon:
         raise DaemonError(f"daemon socket did not appear within {timeout}s")
 
     def stop(self, timeout: float = 15.0) -> None:
+        """Stop the daemon via the ``daemon_stop`` wire command.
+
+        A service daemon (``embedded=False``) acknowledges, shuts down
+        all VMs and exits — we then wait for its process to disappear
+        and remove the pidfile. An embedded (in-process) daemon refuses
+        ``daemon_stop`` by design; that refusal is a no-op success here
+        because the daemon thread dies with its host process. An
+        unreachable daemon is already gone. Any other engine error is
+        raised as :class:`DaemonError`.
+        """
         try:
-            s = _socket.socket(_socket.AF_UNIX)
-            s.settimeout(5)
-            s.connect(self.socket)
-            s.sendall(b'{"command":"shutdown","name":"all"}\n')
-            s.close()
-        except Exception:
-            pass
+            TerraClient(socket_path=self.socket)._send({"command": "daemon_stop"})
+        except _ClientError as e:
+            if EMBEDDED_STOP_REFUSAL not in str(e):
+                raise DaemonError(f"daemon_stop failed: {e}") from e
+            # embedded refusal — no-op (dies with the host process)
+        except (OSError, TimeoutError):
+            pass  # daemon already gone
+        else:
+            self._reap_service_daemon(timeout)
         if self._log_file:
             self._log_file.close()
             self._log_file = None
+
+    def _reap_service_daemon(self, timeout: float) -> None:
+        """Wait for the daemon subprocess to exit and drop pidfile state.
+
+        The pidfile is a `terra daemon start` convention for the
+        default-socket service daemon — custom-socket daemons have no
+        pidfile to clean up.
+        """
+        if self.socket == paths.default_socket():
+            pidfile = paths.run_dir() / "daemon.pid"
+            try:
+                pid = int(pidfile.read_text().strip())
+            except (OSError, ValueError):
+                pid = None
+            if pid is not None:
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    try:
+                        # A zombie has exited but not yet been reaped.
+                        gone = Path(f"/proc/{pid}/stat").read_text().split()[2] == "Z"
+                    except (OSError, IndexError):
+                        gone = True
+                    if gone:
+                        break
+                    time.sleep(0.1)
+            pidfile.unlink(missing_ok=True)
+        # Remove a stale socket file if the engine didn't.
+        try:
+            Path(self.socket).unlink()
+        except FileNotFoundError:
+            pass
 
     def __enter__(self) -> "Daemon":
         return self.start()
@@ -130,8 +232,6 @@ class Daemon:
 
 
 from contextlib import contextmanager
-
-from .client import TerraClient
 
 
 @contextmanager

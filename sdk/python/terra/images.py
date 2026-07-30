@@ -26,10 +26,11 @@ _ARTIFACTS = {
 
 _BUILDERS = {
     "vmlinux.bin": "images/build-kernel.sh",
-    "alpine.cpio": "images/build-rootfs.sh",
-    "initramfs-virtiofs.cpio.gz": "images/build-initramfs-virtiofs.sh",
-    "initramfs-agent.cpio.gz": "images/build-initramfs-agent.sh",
 }
+
+# Initramfs images are built purely in Rust (terrarium_fs) — the old
+# shell builders no longer exist; never look them up.
+_INITRAMFS_IMAGES = {"initramfs-virtiofs.cpio.gz", "initramfs-agent.cpio.gz"}
 
 
 class ImageError(RuntimeError):
@@ -37,8 +38,15 @@ class ImageError(RuntimeError):
 
 
 def _find_repo() -> Path | None:
-    """Locate a Terrarium repo checkout (has images/build.sh)."""
-    for base in (Path.cwd(), *Path.cwd().parents):
+    """Locate a Terrarium repo checkout (has images/build.sh).
+
+    Checks the package location first (pip install -e from
+    <repo>/sdk/python → repo root is parents[3] of this file), then
+    cwd and its parents.
+    """
+    here = Path(__file__).resolve()
+    candidates = [here.parents[3], Path.cwd(), *Path.cwd().parents]
+    for base in candidates:
         if (base / "images" / "build.sh").exists():
             return base
     return None
@@ -59,16 +67,11 @@ def ensure(name: str) -> Path:
     if repo:
         built = repo / "target" / "guest" / name
         if not built.exists():
-            builder = repo / _BUILDERS[name]
-            if not builder.exists():
-                raise ImageError(f"builder missing: {builder}")
-            if name in ("initramfs-virtiofs.cpio.gz", "initramfs-agent.cpio.gz"):
-                _build_initramfs_via_rust(repo, name, built)
-            else:
-                subprocess.run(["bash", str(builder)], cwd=repo, check=True)
+            _build_in_repo(repo, name, built)
         # Refresh the managed copy when the repo image is newer —
         # stale images silently miss later fixes (learned the hard way).
         if not managed.exists() or built.stat().st_mtime > managed.stat().st_mtime:
+            managed.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(built, managed)
         return managed
 
@@ -88,6 +91,35 @@ def ensure(name: str) -> Path:
         f"guest image {name!r} not found: run images/build.sh from the "
         "Terrarium repo, or set TERRA_ARTIFACT_BASE to a prebuilt-artifacts URL"
     )
+
+
+def _build_in_repo(repo: Path, name: str, built: Path) -> None:
+    """Build artifact *name* inside a repo checkout (→ target/guest)."""
+    if name in _INITRAMFS_IMAGES:
+        _build_initramfs_via_rust(repo, name, built)
+        return
+    if name == "alpine.cpio":
+        # build-rootfs.sh only creates the busybox rootfs *dir*; the
+        # cpio is packed from it via terrarium_fs (mirror of the
+        # ubuntu flow). Packed as .cpio.gz — renamed to the
+        # conventional alpine.cpio (content is gzip either way).
+        import terrarium_fs
+
+        subprocess.run(
+            ["bash", "images/build-rootfs.sh"], cwd=repo, check=True
+        )
+        src_rootfs = repo / "target" / "guest" / "rootfs"
+        if not (src_rootfs / "bin" / "busybox").exists():
+            raise ImageError(f"build-rootfs.sh did not produce {src_rootfs}")
+        out = terrarium_fs.pack_cpio_rootfs(
+            str(src_rootfs), "alpine", str(built.parent)
+        )
+        Path(out).replace(built)
+        return
+    builder = repo / _BUILDERS[name]
+    if not builder.exists():
+        raise ImageError(f"builder missing: {builder}")
+    subprocess.run(["bash", str(builder)], cwd=repo, check=True)
 
 
 def ensure_all() -> dict[str, Path]:
@@ -143,8 +175,9 @@ def resolve_kernel(name_or_path: str) -> Path:
     if name_or_path == "default":
         return _migrate_artifact("vmlinux.bin")
     raise ImageError(
-        f"kernel variant {name_or_path!r} not found — build one with "
-        f"`terra image build kernel -n {name_or_path} --version <ver>`"
+        f"kernel variant {name_or_path!r} not found — build the default "
+        "kernel with `terra setup` (or place a vmlinux.bin under "
+        f"{paths.kernels_dir()}/<name>/)"
     )
 
 
@@ -172,7 +205,7 @@ def resolve_rootfs(name_or_path: str) -> Path:
             return cand
     raise ImageError(
         f"rootfs image {name_or_path!r} not found under {paths.rootfs_dir()} "
-        f"(see `terra rootfs ls`)"
+        f"(build the distro environment with `terra setup`)"
     )
 
 
@@ -181,9 +214,13 @@ def _build_initramfs_via_rust(repo: Path, name: str, output: Path) -> None:
     import terrarium_fs
 
     src_rootfs = _ensure_src_rootfs(repo)
+    gp = _ensure_guest_proxy(repo)
+    # The virtiofs initramfs packs guest-proxy from inside src_rootfs;
+    # that copy goes stale when guest-proxy is rebuilt (build-rootfs.sh
+    # only copies it once). Refresh it so VMs get the current agent.
+    _refresh_guest_proxy_in_rootfs(src_rootfs, gp)
 
     if name == "initramfs-agent.cpio.gz":
-        gp = _ensure_guest_proxy(repo)
         init = str(repo / "images" / "rootfs" / "init-agent")
         output.parent.mkdir(parents=True, exist_ok=True)
         terrarium_fs.build_initramfs_agent(src_rootfs, gp, init, str(output))
@@ -191,6 +228,21 @@ def _build_initramfs_via_rust(repo: Path, name: str, output: Path) -> None:
         init = str(repo / "images" / "rootfs" / "init-virtiofs")
         output.parent.mkdir(parents=True, exist_ok=True)
         terrarium_fs.build_initramfs_virtiofs(src_rootfs, init, str(output))
+
+
+def _refresh_guest_proxy_in_rootfs(src_rootfs: str, gp: str) -> None:
+    """Sync <src_rootfs>/bin/guest-proxy with the fresh musl build."""
+    import hashlib
+
+    dest = Path(src_rootfs) / "bin" / "guest-proxy"
+
+    def _sha(p: Path) -> str:
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+
+    if dest.exists() and _sha(dest) == _sha(Path(gp)):
+        return
+    shutil.copy(gp, dest)
+    dest.chmod(0o755)
 
 
 def _ensure_src_rootfs(repo: Path) -> str:
