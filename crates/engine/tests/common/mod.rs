@@ -25,12 +25,24 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use adapter_traits::{
     AdapterError, ExecResult, FsSpec, NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle,
     VmInfo, VmSpec,
 };
+
+/// One recorded exec invocation (for assertions on engine→guest plumbing).
+/// Fields are read only by tests that assert on the plumbing.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ExecCall {
+    pub args: Vec<String>,
+    pub timeout_secs: u64,
+    pub sandbox: bool,
+    pub work_dir: Option<String>,
+    pub exec_id: Option<String>,
+}
 
 // ---------------------------------------------------------------------------
 // MockVmHandle — internal state
@@ -49,9 +61,17 @@ struct MockState {
 /// Controllable VM handle for unit tests.
 pub struct MockVmHandle {
     inner: Mutex<MockState>,
+    exec_log: Arc<Mutex<Vec<ExecCall>>>,
+    kill_log: Arc<Mutex<Vec<String>>>,
+    /// When set, exec calls carrying an exec_id (background sessions)
+    /// park on this gate before returning — lets tests observe a
+    /// genuinely "running" background session. Plain blocking execs
+    /// (mkdir, rm, ...) never park.
+    exec_gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl MockVmHandle {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         pid: u32,
         alive: bool,
@@ -60,6 +80,9 @@ impl MockVmHandle {
         exec_stderr: String,
         exec_exit_code: i32,
         fs_attached: bool,
+        exec_log: Arc<Mutex<Vec<ExecCall>>>,
+        kill_log: Arc<Mutex<Vec<String>>>,
+        exec_gate: Option<Arc<tokio::sync::Notify>>,
     ) -> Self {
         Self {
             inner: Mutex::new(MockState {
@@ -71,6 +94,9 @@ impl MockVmHandle {
                 exec_exit_code,
                 fs_attached,
             }),
+            exec_log,
+            kill_log,
+            exec_gate,
         }
     }
 }
@@ -146,23 +172,53 @@ impl VmHandle for MockVmHandle {
         Box::pin(async move { Ok(()) })
     }
 
-    fn exec<'life0, 'life1, 'async_trait>(
+    fn exec<'life0, 'life1, 'life2, 'life3, 'async_trait>(
         &'life0 self,
-        _args: &'life1 [String],
-        _timeout_secs: u64,
+        args: &'life1 [String],
+        timeout_secs: u64,
+        sandbox: bool,
+        work_dir: Option<&'life2 str>,
+        exec_id: Option<&'life3 str>,
     ) -> Pin<Box<dyn Future<Output = Result<ExecResult, AdapterError>> + Send + 'async_trait>>
     where
         'life0: 'async_trait,
         'life1: 'async_trait,
+        'life2: 'async_trait,
+        'life3: 'async_trait,
         Self: 'async_trait,
     {
         Box::pin(async move {
+            self.exec_log.lock().unwrap().push(ExecCall {
+                args: args.to_vec(),
+                timeout_secs,
+                sandbox,
+                work_dir: work_dir.map(String::from),
+                exec_id: exec_id.map(String::from),
+            });
+            if let (Some(gate), Some(_)) = (&self.exec_gate, exec_id) {
+                gate.notified().await;
+            }
             let s = self.inner.lock().unwrap();
             Ok(ExecResult {
                 stdout: s.exec_stdout.clone(),
                 stderr: s.exec_stderr.clone(),
                 exit_code: s.exec_exit_code,
             })
+        })
+    }
+
+    fn kill_exec<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        exec_id: &'life1 str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            self.kill_log.lock().unwrap().push(exec_id.to_string());
+            Ok(())
         })
     }
 
@@ -274,6 +330,9 @@ pub struct MockVmAdapter {
     exec_stderr: String,
     exec_exit_code: i32,
     fs_attached: bool,
+    exec_log: Arc<Mutex<Vec<ExecCall>>>,
+    kill_log: Arc<Mutex<Vec<String>>>,
+    exec_gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl MockVmAdapter {
@@ -291,7 +350,30 @@ impl MockVmAdapter {
             exec_stderr: String::new(),
             exec_exit_code: 0,
             fs_attached: false,
+            exec_log: Arc::new(Mutex::new(Vec::new())),
+            kill_log: Arc::new(Mutex::new(Vec::new())),
+            exec_gate: None,
         }
+    }
+
+    /// Park execs that carry an exec_id (background sessions) on this
+    /// gate until `notify_one()` — keeps a background session "running".
+    #[allow(dead_code)]
+    pub fn with_exec_gate(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.exec_gate = Some(gate);
+        self
+    }
+
+    /// Shared log of every exec call made on handles from this adapter.
+    #[allow(dead_code)]
+    pub fn exec_log(&self) -> Arc<Mutex<Vec<ExecCall>>> {
+        self.exec_log.clone()
+    }
+
+    /// Shared log of every kill_exec id sent to handles from this adapter.
+    #[allow(dead_code)]
+    pub fn kill_log(&self) -> Arc<Mutex<Vec<String>>> {
+        self.kill_log.clone()
     }
 
     /// Set the PID reported by created handles.
@@ -309,6 +391,7 @@ impl MockVmAdapter {
     }
 
     /// Configure the exec result returned by created handles.
+    #[allow(dead_code)]
     pub fn with_exec(mut self, stdout: &str, stderr: &str, exit_code: i32) -> Self {
         self.exec_stdout = stdout.to_string();
         self.exec_stderr = stderr.to_string();
@@ -361,6 +444,9 @@ impl MockVmAdapter {
             self.exec_stderr.clone(),
             self.exec_exit_code,
             self.fs_attached,
+            self.exec_log.clone(),
+            self.kill_log.clone(),
+            self.exec_gate.clone(),
         )
     }
 }

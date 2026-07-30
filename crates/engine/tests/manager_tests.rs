@@ -69,7 +69,7 @@ async fn test_exec_delegates() {
     mgr.spawn(test_spec("exec-vm")).await.unwrap();
 
     let result = mgr
-        .exec("exec-vm", &["echo".into(), "hello".into()], 10)
+        .exec("exec-vm", &["echo".into(), "hello".into()], 10, false, None)
         .await
         .unwrap();
     assert_eq!(result.stdout, "hello\n");
@@ -81,7 +81,9 @@ async fn test_exec_not_found() {
     let adapter = Arc::new(MockVmAdapter::new());
     let mgr = VmManager::new(adapter, "/tmp".into());
 
-    let result = mgr.exec("nonexistent", &["ls".into()], 10).await;
+    let result = mgr
+        .exec("nonexistent", &["ls".into()], 10, false, None)
+        .await;
     assert!(result.is_err(), "exec on unknown VM should fail");
 }
 

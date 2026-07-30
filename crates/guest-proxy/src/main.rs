@@ -5,8 +5,10 @@
 //! - vsock port 1024 for the host (via CH `--vsock ... socket=...`)
 //!
 //! Executes commands locally and returns stdout/stderr/exit_code.
-//! Not a sandbox — just a command forwarder.
+//! Commands with `"sandbox": true` are confined via sandlock
+//! (Landlock/seccomp); plain exec remains a simple command forwarder.
 
+mod registry;
 mod sandbox;
 mod vsock;
 
@@ -83,6 +85,7 @@ fn handle<S: Read + Write>(mut stream: S) {
     let command = cmd["command"].as_str().unwrap_or("");
     match command {
         "exec" => exec_cmd(&mut stream, &cmd),
+        "kill" => kill_cmd(&mut stream, &cmd),
         "mount" => mount_cmd(&mut stream, &cmd, false),
         "umount" => mount_cmd(&mut stream, &cmd, true),
         "ping" => {
@@ -138,6 +141,30 @@ fn mount_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value, umount: b
     }
 }
 
+/// {"command":"kill","exec_id":"<id registered by a live exec>"}
+/// SIGKILLs the exec's process group; the blocked exec connection then
+/// returns normally with the signal's exit code.
+fn kill_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
+    let exec_id = match cmd["exec_id"].as_str() {
+        Some(id) => id,
+        None => {
+            let resp = serde_json::json!({"status": "error", "message": "missing exec_id"});
+            let _ = writeln!(stream, "{}", resp);
+            return;
+        }
+    };
+    match registry::kill(exec_id) {
+        Ok(()) => {
+            let resp = serde_json::json!({"status": "ok", "message": "killed"});
+            let _ = writeln!(stream, "{}", resp);
+        }
+        Err(e) => {
+            let resp = serde_json::json!({"status": "error", "message": e});
+            let _ = writeln!(stream, "{}", resp);
+        }
+    }
+}
+
 fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
     let args: Vec<String> = match cmd["args"].as_array() {
         Some(a) => a
@@ -169,8 +196,31 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
         });
     let work_dir = work_dir.as_str();
     let timeout = cmd["timeout_secs"].as_u64().unwrap_or(60).min(3600);
+    let use_sandbox = cmd["sandbox"].as_bool().unwrap_or(false);
+    let exec_id = match cmd["exec_id"].as_str() {
+        Some(id) => match registry::validate_exec_id(id) {
+            Ok(()) => Some(id),
+            Err(e) => {
+                let resp = serde_json::json!({"status": "error", "message": e});
+                let _ = writeln!(stream, "{}", resp);
+                return;
+            }
+        },
+        None => None,
+    };
 
-    match sandbox::exec_isolated(&args[0], &args, work_dir, timeout) {
+    let result = if use_sandbox {
+        // Hard error when sandlock is absent — never silently fall back
+        // to unsandboxed execution.
+        match sandbox::wrap_for_sandbox(&args, work_dir, |p| std::path::Path::new(p).exists()) {
+            Ok(argv) => sandbox::exec_isolated(&argv[0], &argv, work_dir, timeout, exec_id),
+            Err(e) => Err(e),
+        }
+    } else {
+        sandbox::exec_isolated(&args[0], &args, work_dir, timeout, exec_id)
+    };
+
+    match result {
         Ok(o) => {
             let resp = serde_json::json!({
                 "status": "ok",

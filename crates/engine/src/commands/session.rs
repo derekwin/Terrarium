@@ -15,23 +15,26 @@ pub(crate) fn cmd_session_status(mgr: &VmManager, cmd: Command) -> Response {
             "exit_code": info.exit_code,
             "stdout": info.stdout,
             "stderr": info.stderr,
+            "sandbox": info.sandbox,
         })),
         None => Response::err(format!("Session '{}' not found", session_id)),
     }
 }
 
-pub(crate) fn cmd_session_kill(mgr: &VmManager, cmd: Command) -> Response {
+/// Kill a background exec session: killpg the process group in the guest
+/// (via a fresh vsock connection) and mark the session killed. Unknown or
+/// non-running sessions and gone VMs fail loudly — never fake success.
+pub(crate) async fn cmd_session_kill(mgr: &VmManager, cmd: Command) -> Response {
     let session_id = match cmd.session_id {
         Some(id) => id,
         None => return Response::err("Missing 'session_id' field"),
     };
-    if mgr.session_kill(&session_id) {
-        Response::ok(serde_json::json!({
+    match mgr.session_kill(&session_id).await {
+        Ok(()) => Response::ok(serde_json::json!({
             "session_id": session_id,
             "status": "killed",
-        }))
-    } else {
-        Response::err(format!("Session '{}' not found", session_id))
+        })),
+        Err(e) => Response::err(e.to_string()),
     }
 }
 
@@ -44,6 +47,7 @@ pub(crate) fn cmd_session_list(mgr: &VmManager) -> Response {
                 "session_id": s.session_id,
                 "vm_name": s.vm_name,
                 "status": s.status,
+                "sandbox": s.sandbox,
             })
         })
         .collect();

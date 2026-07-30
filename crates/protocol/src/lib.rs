@@ -54,8 +54,6 @@ pub struct Command {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hotplug_memory_gb: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_memory_mb: Option<u64>,
 
     // snapshot / restore
@@ -78,9 +76,23 @@ pub struct Command {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_mode: Option<String>,
 
+    // exec: run the command under sandlock (Landlock/seccomp) inside the
+    // guest (default false; hard error if the image lacks sandlock)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<bool>,
+
     // session commands: session_id for session_status / session_kill
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+
+    // sandbox_create / sandbox_list / tenant_destroy: tenant name
+    // (validated like VmName; the tenant VM is "tenant-<tenant>")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+
+    // sandbox_exec / sandbox_info / sandbox_kill: sandbox id (sb-<hex>)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 impl Command {
@@ -100,7 +112,6 @@ impl Command {
             cpus: None,
             max_cpus: None,
             memory_mb: None,
-            hotplug_memory_gb: None,
             max_memory_mb: None,
             snapshot_path: None,
             memory_bytes: None,
@@ -108,6 +119,9 @@ impl Command {
             timeout_secs: None,
             exec_mode: None,
             session_id: None,
+            sandbox: None,
+            tenant: None,
+            id: None,
         }
     }
 
@@ -211,9 +225,27 @@ impl Command {
         self
     }
 
+    /// Builder: run the exec under sandlock confinement in the guest.
+    pub fn with_sandbox(mut self, sandbox: bool) -> Self {
+        self.sandbox = Some(sandbox);
+        self
+    }
+
     /// Builder: set session ID (for session_status / session_kill).
     pub fn with_session_id(mut self, id: &str) -> Self {
         self.session_id = Some(id.to_string());
+        self
+    }
+
+    /// Builder: set tenant (for sandbox_create / sandbox_list / tenant_destroy).
+    pub fn with_tenant(mut self, tenant: &str) -> Self {
+        self.tenant = Some(tenant.to_string());
+        self
+    }
+
+    /// Builder: set sandbox id (for sandbox_exec / sandbox_info / sandbox_kill).
+    pub fn with_id(mut self, id: &str) -> Self {
+        self.id = Some(id.to_string());
         self
     }
 

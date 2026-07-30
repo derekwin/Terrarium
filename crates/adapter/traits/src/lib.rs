@@ -340,10 +340,29 @@ pub trait VmHandle: Send + Sync {
     async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), AdapterError>;
 
     /// Execute a command inside the VM (via the guest agent, e.g.
-    /// guest-proxy over vsock). Default: not supported by this backend.
-    async fn exec(&self, _args: &[String], _timeout_secs: u64) -> Result<ExecResult, AdapterError> {
+    /// guest-proxy over vsock). `sandbox` requests sandlock
+    /// (Landlock/seccomp) confinement in the guest. `work_dir` sets the
+    /// guest-side working directory (None = agent default). `exec_id`
+    /// registers the process under that id in the guest so it can be
+    /// killed later via `kill_exec`. Default: not supported.
+    async fn exec(
+        &self,
+        _args: &[String],
+        _timeout_secs: u64,
+        _sandbox: bool,
+        _work_dir: Option<&str>,
+        _exec_id: Option<&str>,
+    ) -> Result<ExecResult, AdapterError> {
         Err(AdapterError::not_supported(
             "exec not supported by this backend",
+        ))
+    }
+
+    /// Kill a previously `exec_id`-registered exec inside the VM
+    /// (SIGKILL to its process group). Default: not supported.
+    async fn kill_exec(&self, _exec_id: &str) -> Result<(), AdapterError> {
+        Err(AdapterError::not_supported(
+            "kill_exec not supported by this backend",
         ))
     }
 

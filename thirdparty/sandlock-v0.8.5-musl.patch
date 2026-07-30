@@ -1,0 +1,245 @@
+diff --git a/crates/sandlock-core/src/checkpoint/capture.rs b/crates/sandlock-core/src/checkpoint/capture.rs
+index 3147383..5777fae 100644
+--- a/crates/sandlock-core/src/checkpoint/capture.rs
++++ b/crates/sandlock-core/src/checkpoint/capture.rs
+@@ -9,14 +9,14 @@ use crate::error::{SandlockError, SandboxRuntimeError};
+ 
+ pub(crate) fn ptrace_seize(pid: i32) -> io::Result<()> {
+     let ret = unsafe {
+-        libc::ptrace(libc::PTRACE_SEIZE as libc::c_uint, pid, 0, 0)
++        libc::ptrace(libc::PTRACE_SEIZE as _, pid, 0, 0)
+     };
+     if ret < 0 {
+         return Err(io::Error::last_os_error());
+     }
+     // PTRACE_INTERRUPT stops the tracee without SIGSTOP side effects
+     let ret = unsafe {
+-        libc::ptrace(libc::PTRACE_INTERRUPT as libc::c_uint, pid, 0, 0)
++        libc::ptrace(libc::PTRACE_INTERRUPT as _, pid, 0, 0)
+     };
+     if ret < 0 {
+         return Err(io::Error::last_os_error());
+diff --git a/crates/sandlock-core/src/checkpoint/pager.rs b/crates/sandlock-core/src/checkpoint/pager.rs
+index 22f374f..e7f5623 100644
+--- a/crates/sandlock-core/src/checkpoint/pager.rs
++++ b/crates/sandlock-core/src/checkpoint/pager.rs
+@@ -61,7 +61,7 @@ impl PageImage {
+ /// Used by the pager unit test to stand in for the stub.
+ pub(crate) fn register_api_and_range(uffd: i32, start: u64, len: u64) -> io::Result<()> {
+     let mut api = UffdioApi { api: UFFD_API, features: 0, ioctls: 0 };
+-    if unsafe { libc::ioctl(uffd, UFFDIO_API, &mut api) } < 0 {
++    if unsafe { libc::ioctl(uffd, UFFDIO_API as _, &mut api) } < 0 {
+         return Err(io::Error::last_os_error());
+     }
+     let mut reg = UffdioRegister {
+@@ -69,7 +69,7 @@ pub(crate) fn register_api_and_range(uffd: i32, start: u64, len: u64) -> io::Res
+         mode: UFFDIO_REGISTER_MODE_MISSING,
+         ioctls: 0,
+     };
+-    if unsafe { libc::ioctl(uffd, UFFDIO_REGISTER, &mut reg) } < 0 {
++    if unsafe { libc::ioctl(uffd, UFFDIO_REGISTER as _, &mut reg) } < 0 {
+         return Err(io::Error::last_os_error());
+     }
+     Ok(())
+@@ -86,7 +86,7 @@ fn copy_page(uffd: i32, image: &PageImage, addr: u64, page: usize) -> io::Result
+             let mut c = UffdioCopy {
+                 dst: base, src: zero.as_ptr() as u64, len: page as u64, mode: 0, copy: 0,
+             };
+-            if unsafe { libc::ioctl(uffd, UFFDIO_COPY, &mut c) } < 0 {
++            if unsafe { libc::ioctl(uffd, UFFDIO_COPY as _, &mut c) } < 0 {
+                 return Err(io::Error::last_os_error());
+             }
+             return Ok(());
+@@ -95,7 +95,7 @@ fn copy_page(uffd: i32, image: &PageImage, addr: u64, page: usize) -> io::Result
+     let mut c = UffdioCopy {
+         dst: base, src: src.as_ptr() as u64, len: page as u64, mode: 0, copy: 0,
+     };
+-    if unsafe { libc::ioctl(uffd, UFFDIO_COPY, &mut c) } < 0 {
++    if unsafe { libc::ioctl(uffd, UFFDIO_COPY as _, &mut c) } < 0 {
+         return Err(io::Error::last_os_error());
+     }
+     Ok(())
+diff --git a/crates/sandlock-core/src/chroot/dispatch.rs b/crates/sandlock-core/src/chroot/dispatch.rs
+index c910d68..7265b4e 100644
+--- a/crates/sandlock-core/src/chroot/dispatch.rs
++++ b/crates/sandlock-core/src/chroot/dispatch.rs
+@@ -818,7 +818,7 @@ pub(crate) async fn handle_chroot_exec(
+         let child_interp_fd = unsafe {
+             libc::ioctl(
+                 notif_fd,
+-                SECCOMP_IOCTL_NOTIF_ADDFD as libc::c_ulong,
++                SECCOMP_IOCTL_NOTIF_ADDFD as _,
+                 &addfd_interp as *const _,
+             )
+         };
+@@ -867,7 +867,7 @@ pub(crate) async fn handle_chroot_exec(
+     let child_fd = unsafe {
+         libc::ioctl(
+             notif_fd,
+-            SECCOMP_IOCTL_NOTIF_ADDFD as libc::c_ulong,
++            SECCOMP_IOCTL_NOTIF_ADDFD as _,
+             &addfd as *const _,
+         )
+     };
+@@ -1735,7 +1735,7 @@ pub(crate) async fn handle_chroot_chdir(
+     let child_fd = unsafe {
+         libc::ioctl(
+             notif_fd,
+-            SECCOMP_IOCTL_NOTIF_ADDFD as libc::c_ulong,
++            SECCOMP_IOCTL_NOTIF_ADDFD as _,
+             &addfd as *const _,
+         )
+     };
+diff --git a/crates/sandlock-core/src/cow/dispatch.rs b/crates/sandlock-core/src/cow/dispatch.rs
+index dab3fd0..4a38a1c 100644
+--- a/crates/sandlock-core/src/cow/dispatch.rs
++++ b/crates/sandlock-core/src/cow/dispatch.rs
+@@ -1005,7 +1005,7 @@ pub(crate) async fn handle_cow_exec(
+     let child_fd = unsafe {
+         libc::ioctl(
+             notif_fd,
+-            crate::sys::structs::SECCOMP_IOCTL_NOTIF_ADDFD as libc::c_ulong,
++            crate::sys::structs::SECCOMP_IOCTL_NOTIF_ADDFD as _,
+             &addfd as *const _,
+         )
+     };
+@@ -1290,7 +1290,7 @@ pub(crate) async fn handle_cow_chdir(
+     let child_fd = unsafe {
+         libc::ioctl(
+             notif_fd,
+-            crate::sys::structs::SECCOMP_IOCTL_NOTIF_ADDFD as libc::c_ulong,
++            crate::sys::structs::SECCOMP_IOCTL_NOTIF_ADDFD as _,
+             &addfd as *const _,
+         )
+     };
+diff --git a/crates/sandlock-core/src/freeze.rs b/crates/sandlock-core/src/freeze.rs
+index 39104ed..cff5caf 100644
+--- a/crates/sandlock-core/src/freeze.rs
++++ b/crates/sandlock-core/src/freeze.rs
+@@ -106,7 +106,7 @@ fn seize_and_interrupt(tid: i32) -> io::Result<bool> {
+     }
+ 
+     let ret = unsafe {
+-        libc::ptrace(libc::PTRACE_SEIZE as libc::c_uint, tid, 0, 0)
++        libc::ptrace(libc::PTRACE_SEIZE as _, tid, 0, 0)
+     };
+     if ret < 0 {
+         let err = io::Error::last_os_error();
+@@ -119,7 +119,7 @@ fn seize_and_interrupt(tid: i32) -> io::Result<bool> {
+     // before returning so we don't leave the task traced-but-running.
+ 
+     let ret = unsafe {
+-        libc::ptrace(libc::PTRACE_INTERRUPT as libc::c_uint, tid, 0, 0)
++        libc::ptrace(libc::PTRACE_INTERRUPT as _, tid, 0, 0)
+     };
+     if ret < 0 {
+         let err = io::Error::last_os_error();
+diff --git a/crates/sandlock-core/src/network/send_engine.rs b/crates/sandlock-core/src/network/send_engine.rs
+index cafc523..268ec7a 100644
+--- a/crates/sandlock-core/src/network/send_engine.rs
++++ b/crates/sandlock-core/src/network/send_engine.rs
+@@ -42,7 +42,7 @@ fn send_materialized_at(fd: RawFd, m: &MaterializedMsg, offset: usize, flags: i3
+         }
+         if let Some(ref c) = m.control {
+             msg.msg_control = c.as_ptr() as *mut libc::c_void;
+-            msg.msg_controllen = c.len();
++            msg.msg_controllen = c.len() as _;
+         }
+     }
+     msg.msg_iov = &iov as *const libc::iovec as *mut libc::iovec;
+diff --git a/crates/sandlock-core/src/resource.rs b/crates/sandlock-core/src/resource.rs
+index 7bdaeb9..9ac36ec 100644
+--- a/crates/sandlock-core/src/resource.rs
++++ b/crates/sandlock-core/src/resource.rs
+@@ -324,7 +324,7 @@ fn process_creation_worker(
+         | libc::PTRACE_O_TRACEVFORK
+         | libc::PTRACE_O_TRACECLONE
+         | libc::PTRACE_O_TRACESYSGOOD) as libc::c_ulong;
+-    let ret = unsafe { libc::ptrace(libc::PTRACE_SEIZE as libc::c_uint, caller_tid, 0, opts) };
++    let ret = unsafe { libc::ptrace(libc::PTRACE_SEIZE as _, caller_tid, 0, opts) };
+     if ret < 0 {
+         let errno = io::Error::last_os_error().raw_os_error().unwrap_or(libc::EPERM);
+         let _ = attached_tx.send(Err(errno));
+@@ -450,13 +450,13 @@ fn run_creation_event_loop(caller_tid: i32, ctx: &Arc<SupervisorCtx>) -> io::Res
+         // Some other signal-delivery-stop in the window: forward the pending
+         // signal and keep waiting for the fork event.
+         let inject = if stopsig == libc::SIGTRAP { 0 } else { stopsig as libc::c_ulong };
+-        ptrace_resume(caller_tid, libc::PTRACE_CONT, inject)?;
++        ptrace_resume(caller_tid, libc::PTRACE_CONT as libc::c_uint, inject)?;
+     }
+ }
+ 
+ /// `ptrace(request, tid, 0, data)` returning an error on failure.
+ fn ptrace_resume(tid: i32, request: libc::c_uint, data: libc::c_ulong) -> io::Result<()> {
+-    let ret = unsafe { libc::ptrace(request, tid, 0, data) };
++    let ret = unsafe { libc::ptrace(request as _, tid, 0, data) };
+     if ret < 0 {
+         return Err(io::Error::last_os_error());
+     }
+@@ -470,7 +470,7 @@ fn handle_fork_event(caller_tid: i32, ctx: &Arc<SupervisorCtx>) -> io::Result<bo
+     let mut child_pid: libc::c_ulong = 0;
+     let ret = unsafe {
+         libc::ptrace(
+-            libc::PTRACE_GETEVENTMSG as libc::c_uint,
++            libc::PTRACE_GETEVENTMSG as _,
+             caller_tid,
+             0,
+             &mut child_pid,
+diff --git a/crates/sandlock-core/src/seccomp/notif.rs b/crates/sandlock-core/src/seccomp/notif.rs
+index e4a4bc0..650e34e 100644
+--- a/crates/sandlock-core/src/seccomp/notif.rs
++++ b/crates/sandlock-core/src/seccomp/notif.rs
+@@ -814,7 +814,7 @@ impl NotifPolicy {
+ fn recv_notif(fd: RawFd) -> io::Result<SeccompNotif> {
+     let mut notif: SeccompNotif = unsafe { std::mem::zeroed() };
+     let ret = unsafe {
+-        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_RECV as libc::c_ulong, &mut notif as *mut _)
++        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_RECV as _, &mut notif as *mut _)
+     };
+     if ret < 0 {
+         Err(io::Error::last_os_error())
+@@ -927,7 +927,7 @@ fn inject_fd_and_send(fd: RawFd, id: u64, srcfd: RawFd, newfd_flags: u32) -> io:
+         newfd_flags,
+     };
+     let ret = unsafe {
+-        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_ADDFD as libc::c_ulong, &addfd as *const _)
++        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_ADDFD as _, &addfd as *const _)
+     };
+     if ret < 0 {
+         Err(io::Error::last_os_error())
+@@ -947,7 +947,7 @@ fn inject_fd(fd: RawFd, id: u64, srcfd: RawFd, targetfd: i32) -> io::Result<()>
+         newfd_flags: 0,
+     };
+     let ret = unsafe {
+-        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_ADDFD as libc::c_ulong, &addfd as *const _)
++        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_ADDFD as _, &addfd as *const _)
+     };
+     if ret < 0 {
+         Err(io::Error::last_os_error())
+@@ -959,7 +959,7 @@ fn inject_fd(fd: RawFd, id: u64, srcfd: RawFd, targetfd: i32) -> io::Result<()>
+ /// Raw ioctl to send a notification response.
+ fn send_resp_raw(fd: RawFd, resp: &SeccompNotifResp) -> io::Result<()> {
+     let ret = unsafe {
+-        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_SEND as libc::c_ulong, resp as *const _)
++        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_SEND as _, resp as *const _)
+     };
+     if ret < 0 {
+         Err(io::Error::last_os_error())
+@@ -972,7 +972,7 @@ fn send_resp_raw(fd: RawFd, resp: &SeccompNotifResp) -> io::Result<()> {
+ /// ioctl(fd, SECCOMP_IOCTL_NOTIF_ID_VALID, &id)
+ pub(crate) fn id_valid(fd: RawFd, id: u64) -> io::Result<()> {
+     let ret = unsafe {
+-        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_ID_VALID as libc::c_ulong, &id as *const _)
++        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_ID_VALID as _, &id as *const _)
+     };
+     if ret < 0 {
+         Err(io::Error::last_os_error())
+@@ -985,7 +985,7 @@ pub(crate) fn id_valid(fd: RawFd, id: u64) -> io::Result<()> {
+ fn try_set_sync_wakeup(fd: RawFd) {
+     let flags: u64 = SECCOMP_USER_NOTIF_FD_SYNC_WAKE_UP as u64;
+     unsafe {
+-        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_SET_FLAGS as libc::c_ulong, &flags as *const _);
++        libc::ioctl(fd, SECCOMP_IOCTL_NOTIF_SET_FLAGS as _, &flags as *const _);
+     }
+ }
+ 

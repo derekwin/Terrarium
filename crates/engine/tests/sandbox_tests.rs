@@ -1,0 +1,402 @@
+//! Tests for the engine-level sandbox commands (S-M2):
+//! sandbox_create / sandbox_exec / sandbox_list / sandbox_info /
+//! sandbox_kill / tenant_destroy, against a MockVmAdapter.
+
+mod common;
+
+use std::sync::Arc;
+
+use common::MockVmAdapter;
+use terrarium_engine::commands::execute;
+use terrarium_engine::manager::VmManager;
+use terrarium_protocol::Command;
+
+fn make_mgr() -> VmManager {
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("ok\n", "", 0);
+    VmManager::new(Arc::new(adapter), "/tmp".into())
+}
+
+/// sandbox_create: allocates sb-<hex>, VM "tenant-<tenant>", workdir under
+/// /workdir, and creates the workdir in the guest (mkdir -p, unsandboxed).
+#[tokio::test]
+async fn test_sandbox_create() {
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("ok\n", "", 0);
+    let exec_log = adapter.exec_log();
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research"),
+    )
+    .await;
+    assert!(resp.is_ok(), "sandbox_create should succeed: {:?}", resp);
+    let data = resp.data.unwrap();
+    let id = data["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("sb-"), "id should be sb-<hex>: {}", id);
+    assert_eq!(data["vm"], "tenant-research");
+    assert_eq!(data["workdir"], format!("/workdir/{}", id));
+
+    // The tenant VM exists now.
+    let info = execute(&mut mgr, Command::new("info").with_name("tenant-research")).await;
+    assert!(info.is_ok(), "tenant VM should exist: {:?}", info);
+
+    // The workdir was created in the guest, unsandboxed.
+    {
+        let log = exec_log.lock().unwrap();
+        let mkdir = log
+            .iter()
+            .find(|c| c.args[0] == "mkdir")
+            .expect("mkdir call");
+        assert_eq!(mkdir.args, vec!["mkdir", "-p", &format!("/workdir/{}", id)]);
+        assert!(!mkdir.sandbox, "workdir creation must be unsandboxed");
+    }
+
+    // The record is listed.
+    let resp = execute(&mut mgr, Command::new("sandbox_info").with_id(&id)).await;
+    assert!(resp.is_ok());
+    let data = resp.data.unwrap();
+    assert_eq!(data["tenant"], "research");
+    assert_eq!(data["vm"], "tenant-research");
+}
+
+/// sandbox_create is idempotent at the VM level: a second create for the
+/// same tenant reuses the VM (no kernel needed, no duplicate-VM error) and
+/// allocates a fresh sandbox id.
+#[tokio::test]
+async fn test_sandbox_create_idempotent_vm_reuse() {
+    let mut mgr = make_mgr();
+    let first = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research"),
+    )
+    .await;
+    assert!(first.is_ok(), "first create: {:?}", first);
+
+    // No kernel field: only works when the tenant VM is reused.
+    let second = execute(
+        &mut mgr,
+        Command::new("sandbox_create").with_tenant("research"),
+    )
+    .await;
+    assert!(
+        second.is_ok(),
+        "second create should reuse VM: {:?}",
+        second
+    );
+    assert_ne!(
+        first.data.unwrap()["id"],
+        second.data.unwrap()["id"],
+        "each create allocates a fresh sandbox id"
+    );
+}
+
+/// Tenant names go into the VM name, so they must pass the VmName whitelist.
+#[tokio::test]
+async fn test_sandbox_create_invalid_tenant() {
+    let mut mgr = make_mgr();
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("bad/name"),
+    )
+    .await;
+    assert!(!resp.is_ok());
+    assert!(
+        resp.error.unwrap().contains("invalid tenant"),
+        "bad tenant should be rejected"
+    );
+}
+
+/// sandbox_exec: resolves the workdir from the registry and defaults to
+/// sandboxed execution (absent flag → true).
+#[tokio::test]
+async fn test_sandbox_exec_defaults_sandboxed_with_workdir() {
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("ok\n", "", 0);
+    let exec_log = adapter.exec_log();
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research"),
+    )
+    .await;
+    let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+    exec_log.lock().unwrap().clear();
+
+    // Default: sandboxed.
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["echo".into(), "hi".into()]),
+    )
+    .await;
+    assert!(resp.is_ok(), "sandbox_exec should succeed: {:?}", resp);
+    assert_eq!(resp.data.unwrap()["stdout"], "ok\n");
+    {
+        let log = exec_log.lock().unwrap();
+        assert_eq!(log.len(), 1);
+        assert!(log[0].sandbox, "sandbox must default to true");
+        assert_eq!(
+            log[0].work_dir.as_deref(),
+            Some(format!("/workdir/{}", id)).as_deref()
+        );
+    }
+
+    // Explicit escape hatch is honored.
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_sandbox(false),
+    )
+    .await;
+    assert!(resp.is_ok());
+    assert!(!exec_log.lock().unwrap()[1].sandbox);
+}
+
+/// sandbox_exec in background mode registers the session under the sandbox
+/// and passes the session id down as the guest exec_id.
+#[tokio::test]
+async fn test_sandbox_exec_background_links_session() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("ok\n", "", 0)
+        .with_exec_gate(gate.clone());
+    let exec_log = adapter.exec_log();
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research"),
+    )
+    .await;
+    let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["sleep".into(), "100".into()])
+            .with_exec_mode("background"),
+    )
+    .await;
+    assert!(resp.is_ok(), "background sandbox_exec: {:?}", resp);
+    let session_id = resp.data.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Session carries the sandbox linkage.
+    let resp = execute(
+        &mut mgr,
+        Command::new("session_status").with_session_id(&session_id),
+    )
+    .await;
+    let data = resp.data.unwrap();
+    assert_eq!(data["sandbox"], id);
+    assert_eq!(data["status"], "running");
+
+    // The guest exec was registered under the session id as exec_id.
+    // (Poll: the spawned task pushes the log entry asynchronously.)
+    let mut exec_call = None;
+    for _ in 0..100 {
+        if let Some(c) = exec_log
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|c| c.args[0] == "sleep")
+        {
+            exec_call = Some(c.clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let exec_call = exec_call.expect("background exec should reach the guest");
+    assert_eq!(exec_call.exec_id.as_deref(), Some(session_id.as_str()));
+
+    gate.notify_one();
+}
+
+/// Unknown sandbox ids fail loudly everywhere.
+#[tokio::test]
+async fn test_unknown_sandbox_id_errors() {
+    let mut mgr = make_mgr();
+    for cmd in [
+        Command::new("sandbox_exec")
+            .with_id("sb-deadbeef")
+            .with_args(vec!["true".into()]),
+        Command::new("sandbox_info").with_id("sb-deadbeef"),
+        Command::new("sandbox_kill").with_id("sb-deadbeef"),
+    ] {
+        let name = cmd.command.clone();
+        let resp = execute(&mut mgr, cmd).await;
+        assert!(!resp.is_ok(), "{} should fail", name);
+        assert!(
+            resp.error.unwrap().contains("not found"),
+            "{} should report not found",
+            name
+        );
+    }
+}
+
+/// sandbox_list filters by tenant.
+#[tokio::test]
+async fn test_sandbox_list_tenant_filter() {
+    let mut mgr = make_mgr();
+    for tenant in ["research", "research", "other"] {
+        let resp = execute(
+            &mut mgr,
+            Command::create("unused", "/fake/vmlinux")
+                .with_command("sandbox_create")
+                .with_tenant(tenant),
+        )
+        .await;
+        assert!(resp.is_ok(), "create {}: {:?}", tenant, resp);
+    }
+
+    let resp = execute(&mut mgr, Command::new("sandbox_list")).await;
+    assert_eq!(resp.data.unwrap()["count"], 3);
+
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_list").with_tenant("research"),
+    )
+    .await;
+    let data = resp.data.unwrap();
+    assert_eq!(data["count"], 2);
+    for item in data["sandboxes"].as_array().unwrap() {
+        assert_eq!(item["tenant"], "research");
+    }
+}
+
+/// sandbox_kill: kills live sessions of this sandbox (via the session_kill
+/// path), removes the workdir in the guest, and drops the record. The
+/// tenant VM keeps running.
+#[tokio::test]
+async fn test_sandbox_kill_sessions_workdir_record() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("ok\n", "", 0)
+        .with_exec_gate(gate.clone());
+    let exec_log = adapter.exec_log();
+    let kill_log = adapter.kill_log();
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research"),
+    )
+    .await;
+    let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+
+    // A live background session inside this sandbox.
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["sleep".into(), "100".into()])
+            .with_exec_mode("background"),
+    )
+    .await;
+    let session_id = resp.data.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = execute(&mut mgr, Command::new("sandbox_kill").with_id(&id)).await;
+    assert!(resp.is_ok(), "sandbox_kill should succeed: {:?}", resp);
+    assert_eq!(resp.data.unwrap()["sessions_killed"], 1);
+
+    // The live session was killed via the kill path...
+    assert_eq!(
+        kill_log.lock().unwrap().as_slice(),
+        std::slice::from_ref(&session_id)
+    );
+    let resp = execute(
+        &mut mgr,
+        Command::new("session_status").with_session_id(&session_id),
+    )
+    .await;
+    assert_eq!(resp.data.unwrap()["status"], "killed");
+
+    // ...the workdir was rm -rf'd (unsandboxed, exact path)...
+    {
+        let log = exec_log.lock().unwrap();
+        let rm = log.iter().find(|c| c.args[0] == "rm").expect("rm call");
+        assert_eq!(rm.args, vec!["rm", "-rf", &format!("/workdir/{}", id)]);
+        assert!(!rm.sandbox);
+    }
+
+    // ...the record is gone...
+    let resp = execute(&mut mgr, Command::new("sandbox_info").with_id(&id)).await;
+    assert!(!resp.is_ok());
+
+    // ...and the tenant VM is still running.
+    let resp = execute(&mut mgr, Command::new("info").with_name("tenant-research")).await;
+    assert!(resp.is_ok(), "tenant VM must survive sandbox_kill");
+
+    gate.notify_one();
+}
+
+/// tenant_destroy: destroys the tenant VM and drops all its sandbox records.
+#[tokio::test]
+async fn test_tenant_destroy_cascades() {
+    let mut mgr = make_mgr();
+    for _ in 0..2 {
+        execute(
+            &mut mgr,
+            Command::create("unused", "/fake/vmlinux")
+                .with_command("sandbox_create")
+                .with_tenant("research"),
+        )
+        .await;
+    }
+
+    let resp = execute(
+        &mut mgr,
+        Command::new("tenant_destroy").with_tenant("research"),
+    )
+    .await;
+    assert!(resp.is_ok(), "tenant_destroy should succeed: {:?}", resp);
+    assert_eq!(resp.data.unwrap()["sandboxes_removed"], 2);
+
+    // VM is gone, records are gone.
+    let resp = execute(&mut mgr, Command::new("info").with_name("tenant-research")).await;
+    assert!(!resp.is_ok());
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_list").with_tenant("research"),
+    )
+    .await;
+    assert_eq!(resp.data.unwrap()["count"], 0);
+
+    // Unknown tenant → honest error.
+    let resp = execute(
+        &mut mgr,
+        Command::new("tenant_destroy").with_tenant("nosuch"),
+    )
+    .await;
+    assert!(!resp.is_ok());
+    assert!(resp.error.unwrap().contains("not found"));
+}

@@ -1,18 +1,11 @@
-use super::{build_spec, SYSTEM_BASES};
+use super::{apply_system_base, build_spec};
 use crate::manager::VmManager;
 use terrarium_protocol::{Command, Response};
 
 pub(crate) async fn cmd_create(mgr: &mut VmManager, cmd: Command) -> Response {
     // The system base is implicit: tool layers stack on top of it.
-    // Append it unless the caller already ended the list with one.
     let mut cmd = cmd;
-    if !cmd.layers.is_empty() {
-        let last = cmd.layers.last().map(|s| s.as_str()).unwrap_or("");
-        if !SYSTEM_BASES.contains(&last) {
-            let system = cmd.system.clone().unwrap_or_else(|| "base".into());
-            cmd.layers.push(system);
-        }
-    }
+    apply_system_base(&mut cmd);
     let spec = match build_spec(&cmd) {
         Ok(s) => s,
         Err(e) => return Response::err(e),

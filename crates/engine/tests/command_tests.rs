@@ -131,6 +131,23 @@ async fn test_exec_valid() {
     assert_eq!(data["exit_code"], 0);
 }
 
+/// Exec with sandbox=true → flag is accepted and forwarded through the
+/// dispatch layer (mock adapter ignores it; confinement itself is
+/// guest-proxy's job, unit-tested there).
+#[tokio::test]
+async fn test_exec_sandbox_flag() {
+    let mut mgr = make_mgr();
+    execute(&mut mgr, Command::create("exec-vm", "/fake/vmlinux")).await;
+    let cmd = Command::new("exec")
+        .with_name("exec-vm")
+        .with_args(vec!["echo".into(), "hello".into()])
+        .with_sandbox(true);
+    let resp = execute(&mut mgr, cmd).await;
+    assert!(resp.is_ok(), "sandboxed exec should succeed: {:?}", resp);
+    let data = resp.data.expect("should have data");
+    assert_eq!(data["stdout"], "hello world\n");
+}
+
 /// Exec on a nonexistent VM → error.
 #[tokio::test]
 async fn test_exec_unknown_vm() {
@@ -331,5 +348,174 @@ async fn test_info_missing_name() {
     assert!(
         resp.error.unwrap().contains("Missing 'name'"),
         "should return 'Missing name' error"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Honesty: explicit errors instead of fake success / silent fallback
+// ---------------------------------------------------------------------------
+
+/// session_kill on an unknown session → honest not-found error.
+#[tokio::test]
+async fn test_session_kill_not_found() {
+    let mut mgr = make_mgr();
+    let cmd = Command::new("session_kill").with_session_id("some-session");
+    let resp = execute(&mut mgr, cmd).await;
+    assert!(!resp.is_ok());
+    assert!(
+        resp.error.unwrap().contains("not found"),
+        "session_kill of unknown session should return not-found"
+    );
+}
+
+/// session_kill of a running background session: a real kill is issued to
+/// the guest (with the session id as exec_id) and the session ends up
+/// "killed" — the completion path must not overwrite that status.
+#[tokio::test]
+async fn test_session_kill_running_session() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec_gate(gate.clone());
+    let kill_log = adapter.kill_log();
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+
+    execute(&mut mgr, Command::create("exec-vm", "/fake/vmlinux")).await;
+    let resp = execute(
+        &mut mgr,
+        Command::new("exec")
+            .with_name("exec-vm")
+            .with_args(vec!["sleep".into(), "100".into()])
+            .with_exec_mode("background"),
+    )
+    .await;
+    assert!(resp.is_ok(), "background exec should start: {:?}", resp);
+    let session_id = resp.data.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = execute(
+        &mut mgr,
+        Command::new("session_kill").with_session_id(&session_id),
+    )
+    .await;
+    assert!(resp.is_ok(), "session_kill should succeed: {:?}", resp);
+
+    // The guest received a kill for this exact exec_id (the session id).
+    assert_eq!(
+        kill_log.lock().unwrap().as_slice(),
+        std::slice::from_ref(&session_id)
+    );
+
+    // Let the parked exec finish; the completion path must NOT overwrite
+    // the "killed" status with completed/failed.
+    gate.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let resp = execute(
+        &mut mgr,
+        Command::new("session_status").with_session_id(&session_id),
+    )
+    .await;
+    assert_eq!(resp.data.unwrap()["status"], "killed");
+}
+
+/// session_kill of a session whose VM is gone → honest error.
+#[tokio::test]
+async fn test_session_kill_vm_gone() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec_gate(gate.clone());
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+
+    execute(&mut mgr, Command::create("exec-vm", "/fake/vmlinux")).await;
+    let resp = execute(
+        &mut mgr,
+        Command::new("exec")
+            .with_name("exec-vm")
+            .with_args(vec!["sleep".into(), "100".into()])
+            .with_exec_mode("background"),
+    )
+    .await;
+    let session_id = resp.data.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    execute(&mut mgr, Command::new("destroy").with_name("exec-vm")).await;
+    let resp = execute(
+        &mut mgr,
+        Command::new("session_kill").with_session_id(&session_id),
+    )
+    .await;
+    assert!(!resp.is_ok());
+    assert!(
+        resp.error.unwrap().contains("not found"),
+        "killing a session on a gone VM should error honestly"
+    );
+    gate.notify_one();
+}
+
+/// Unknown exec_mode → invalid-argument error (no silent blocking fallback).
+#[tokio::test]
+async fn test_exec_invalid_mode() {
+    let mut mgr = make_mgr();
+    execute(&mut mgr, Command::create("exec-vm", "/fake/vmlinux")).await;
+    let cmd = Command::new("exec")
+        .with_name("exec-vm")
+        .with_args(vec!["ls".into()])
+        .with_exec_mode("detached");
+    let resp = execute(&mut mgr, cmd).await;
+    assert!(!resp.is_ok());
+    assert!(
+        resp.error.unwrap().contains("invalid exec_mode"),
+        "unknown exec_mode should be rejected"
+    );
+}
+
+/// Explicit blocking exec_mode still works.
+#[tokio::test]
+async fn test_exec_explicit_blocking_mode() {
+    let mut mgr = make_mgr();
+    execute(&mut mgr, Command::create("exec-vm", "/fake/vmlinux")).await;
+    let cmd = Command::new("exec")
+        .with_name("exec-vm")
+        .with_args(vec!["ls".into()])
+        .with_exec_mode("blocking");
+    let resp = execute(&mut mgr, cmd).await;
+    assert!(
+        resp.is_ok(),
+        "explicit blocking mode should work: {:?}",
+        resp
+    );
+}
+
+/// Custom snapshot_path → explicit not-supported error (not silently ignored).
+#[tokio::test]
+async fn test_snapshot_custom_path_rejected() {
+    let mut mgr = make_mgr();
+    execute(&mut mgr, Command::create("snap-vm", "/fake/vmlinux")).await;
+    let cmd = Command::new("snapshot")
+        .with_name("snap-vm")
+        .with_snapshot_path("/tmp/custom.snap");
+    let resp = execute(&mut mgr, cmd).await;
+    assert!(!resp.is_ok());
+    assert!(
+        resp.error.unwrap().contains("not supported yet"),
+        "custom snapshot_path should be rejected"
+    );
+}
+
+/// daemon_stop via execute() (non-daemon path) → explicit error; the real
+/// handling lives in the daemon listener (see daemon_tests.rs).
+#[tokio::test]
+async fn test_daemon_stop_outside_daemon() {
+    let mut mgr = make_mgr();
+    let resp = execute(&mut mgr, Command::new("daemon_stop")).await;
+    assert!(!resp.is_ok());
+    assert!(
+        resp.error.unwrap().contains("daemon listener"),
+        "daemon_stop outside the daemon should be an explicit error"
     );
 }

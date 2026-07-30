@@ -59,7 +59,7 @@ mod tests {
         let handle = adapter.create(&spec).await.unwrap();
 
         let result = handle
-            .exec(&["echo".into(), "hello".into()], 10)
+            .exec(&["echo".into(), "hello".into()], 10, false, None, None)
             .await
             .unwrap();
         assert_eq!(result.stdout, "hello\n");
@@ -168,7 +168,10 @@ mod tests {
         assert_eq!(handle.pid(), 42);
         assert!(handle.is_alive());
 
-        let result = handle.exec(&["true".into()], 5).await.unwrap();
+        let result = handle
+            .exec(&["true".into()], 5, false, None, None)
+            .await
+            .unwrap();
         assert_eq!(result.stdout, "hello\n");
         assert_eq!(result.exit_code, 0);
     }

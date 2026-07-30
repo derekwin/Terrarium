@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use terrarium_fs::layer::resolve_layer;
+use terrarium_fs::layer::{resolve_layer, validate_layer_name};
 use terrarium_fs::LayerConfig;
 use tokio::time::{sleep, Instant};
 
@@ -65,15 +65,7 @@ pub async fn compose_fs(
     };
     let mut lowers: Vec<String> = Vec::new();
     for layer in &fs_spec.layers {
-        if !layer
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-        {
-            return Err(AdapterError::invalid_argument(format!(
-                "invalid layer name {:?}",
-                layer
-            )));
-        }
+        validate_layer_name(layer).map_err(AdapterError::invalid_argument)?;
         lowers.push(resolve_layer(&layer_cfg, layer)?);
     }
     // OverlayFS lowerdir is right-to-left priority: our layers list is
@@ -84,15 +76,7 @@ pub async fn compose_fs(
     let (upper, persistent) = match &fs_spec.upper {
         UpperPolicy::Ephemeral => (format!("{}/upper", dir), false),
         UpperPolicy::Persistent(pname) => {
-            if !pname
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-            {
-                return Err(AdapterError::invalid_argument(format!(
-                    "invalid upper name {:?}",
-                    pname
-                )));
-            }
+            validate_layer_name(pname).map_err(AdapterError::invalid_argument)?;
             (format!("{}/uppers/{}", config.fs_root, pname), true)
         }
     };

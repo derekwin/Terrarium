@@ -173,11 +173,19 @@ pub fn remove_layer(name: &str, layer_dir: &str) -> Result<(), String> {
 
 /// Validate a layer name against the allowed character set.
 ///
-/// Returns `Ok(())` when `name` matches `^[a-zA-Z0-9_.-]+$` and is
-/// non-empty, otherwise an error describing the violation.
+/// Returns `Ok(())` when `name` matches `^[a-zA-Z0-9_.-]+$`, is
+/// non-empty, and is not exactly `.` or `..` (which would resolve to
+/// path traversal against the layer dir). Dots inside names (e.g.
+/// `python3.12`) stay allowed.
 pub fn validate_layer_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("layer name must not be empty".to_string());
+    }
+    if name == "." || name == ".." {
+        return Err(format!(
+            "invalid layer name {:?}: \".\" and \"..\" are not allowed",
+            name
+        ));
     }
     if !name
         .chars()
@@ -215,4 +223,46 @@ fn find_mkfs_erofs() -> String {
             }
             "mkfs.erofs".into()
         })
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::validate_layer_name;
+
+    #[test]
+    fn accepts_normal_names() {
+        for name in ["base", "python3.12", "my-layer_v2", ".system"] {
+            assert!(
+                validate_layer_name(name).is_ok(),
+                "should accept {:?}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_and_bad_chars() {
+        for name in ["", "a/b", "a b", "a\\b", "..x/../y"] {
+            assert!(
+                validate_layer_name(name).is_err(),
+                "should reject {:?}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_exact_dot_names() {
+        // These match the allowed charset but resolve to path traversal.
+        assert!(validate_layer_name(".").is_err());
+        assert!(validate_layer_name("..").is_err());
+        // Dots inside a name stay allowed.
+        assert!(validate_layer_name("python3.12").is_ok());
+        assert!(validate_layer_name("..x").is_ok());
+        assert!(validate_layer_name("x..").is_ok());
+    }
 }

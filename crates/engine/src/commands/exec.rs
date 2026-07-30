@@ -10,13 +10,14 @@ pub(crate) async fn cmd_exec(mgr: &mut VmManager, cmd: Command) -> Response {
         return Response::err("Missing 'args' field");
     }
     let timeout = cmd.timeout_secs.unwrap_or(60).min(3600);
+    let sandbox = cmd.sandbox.unwrap_or(false);
 
     let mode = cmd.exec_mode.as_deref().unwrap_or("blocking");
     match mode {
         "background" => {
             let session_id = uuid::Uuid::new_v4().to_string();
             match mgr
-                .exec_background(&name, &cmd.args, timeout, &session_id)
+                .exec_background(&name, &cmd.args, timeout, sandbox, &session_id, None, None)
                 .await
             {
                 Ok(()) => Response::ok(serde_json::json!({
@@ -26,7 +27,7 @@ pub(crate) async fn cmd_exec(mgr: &mut VmManager, cmd: Command) -> Response {
                 Err(e) => Response::err(e.to_string()),
             }
         }
-        _ => match mgr.exec(&name, &cmd.args, timeout).await {
+        "blocking" => match mgr.exec(&name, &cmd.args, timeout, sandbox, None).await {
             Ok(r) => Response::ok(serde_json::json!({
                 "stdout": r.stdout,
                 "stderr": r.stderr,
@@ -34,5 +35,9 @@ pub(crate) async fn cmd_exec(mgr: &mut VmManager, cmd: Command) -> Response {
             })),
             Err(e) => Response::err(e.to_string()),
         },
+        other => Response::err(format!(
+            "invalid exec_mode {:?}: expected \"blocking\" or \"background\"",
+            other
+        )),
     }
 }

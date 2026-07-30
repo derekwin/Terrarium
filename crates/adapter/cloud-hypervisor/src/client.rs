@@ -159,13 +159,6 @@ impl ChClient {
         Ok(())
     }
 
-    pub async fn vm_power_off(&self) -> Result<()> {
-        let body = r#"{"action":"power_off"}"#;
-        self.request("PUT", "/api/v1/vm.shutdown", Some(body))
-            .await?;
-        Ok(())
-    }
-
     pub async fn vm_delete(&self) -> Result<()> {
         self.request("PUT", "/api/v1/vm.delete", None).await?;
         Ok(())
@@ -280,21 +273,6 @@ impl ChClient {
             Self::SNAPSHOT_TIMEOUT,
             "PUT",
             "/api/v1/vm.snapshot",
-            Some(&body.to_string()),
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Restore a VM from a snapshot. Uses the snapshot-class timeout (10 min).
-    pub async fn vm_restore(&self, snapshot_path: &str) -> Result<()> {
-        let body = serde_json::json!({
-            "source_url": format!("file://{}", snapshot_path),
-        });
-        self.request_with_timeout(
-            Self::SNAPSHOT_TIMEOUT,
-            "PUT",
-            "/api/v1/vm.restore",
             Some(&body.to_string()),
         )
         .await?;

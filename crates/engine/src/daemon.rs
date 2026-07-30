@@ -27,10 +27,18 @@ const MAX_COMMAND_LINE: usize = 64 * 1024;
 /// - `socket_path`: unix socket for local clients (chmod 0600)
 /// - `tcp_addr`: optional "host:port" for remote clients (token-gated)
 /// - `adapter`: VMM adapter (testable with MockVmAdapter)
+/// - `embedded`: true when the daemon runs inside a host process (PyO3
+///   FFI). In embedded mode `daemon_stop` is refused, because tearing
+///   down the process would kill the host.
+///
+/// Shutdown (SIGTERM/SIGINT or a `daemon_stop` command) converges on a
+/// single flow: the shutdown watch channel flips, both accept loops
+/// exit promptly, `shutdown_all` runs, and `run` returns.
 pub async fn run(
     socket_path: &str,
     tcp_addr: Option<&str>,
     adapter: Arc<dyn adapter_traits::VmAdapter>,
+    embedded: bool,
 ) -> std::io::Result<()> {
     let _ = std::fs::remove_file(socket_path);
 
@@ -41,20 +49,24 @@ pub async fn run(
     let manager = Arc::new(Mutex::new(VmManager::new(adapter, "/tmp".to_string())));
     let token: Option<String> = std::env::var("TERRA_TOKEN").ok().filter(|s| !s.is_empty());
 
-    // Handle SIGTERM/SIGINT for graceful shutdown.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let mgr_clone = Arc::clone(&manager);
-    tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = sigterm.recv() => {}
-        }
-        tracing::info!("Received shutdown signal, stopping all VMs");
-        mgr_clone.lock().await.shutdown_all().await;
-        let _ = shutdown_tx.send(true);
-    });
+    // Shutdown signal: SIGTERM/SIGINT flip the watch channel; the main
+    // loop below notices (even while blocked in accept) and performs the
+    // actual cleanup, so signal and `daemon_stop` share one flow.
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    {
+        let shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = sigterm.recv() => {}
+            }
+            tracing::info!("Received shutdown signal");
+            let _ = shutdown_tx.send(true);
+        });
+    }
 
     // Optional TCP listener for remote clients.
     if let Some(addr) = tcp_addr {
@@ -62,25 +74,34 @@ pub async fn run(
         tracing::info!(addr = %addr, token = token.is_some(), "TCP listener for remote clients");
         let mgr = Arc::clone(&manager);
         let token = token.clone();
-        let shutdown_rx_tcp = shutdown_rx.clone();
+        let mut shutdown_rx_tcp = shutdown_rx.clone();
+        let shutdown_tx_tcp = shutdown_tx.clone();
         tokio::spawn(async move {
             loop {
-                if *shutdown_rx_tcp.borrow() {
-                    break;
-                }
-                match tcp.accept().await {
-                    Ok((stream, peer)) => {
-                        let mgr = Arc::clone(&mgr);
-                        let token = token.clone();
-                        tokio::spawn(async move {
-                            handle_tcp_client(stream, &mgr, token.as_deref(), &peer.to_string())
+                tokio::select! {
+                    _ = shutdown_rx_tcp.changed() => break,
+                    accepted = tcp.accept() => match accepted {
+                        Ok((stream, peer)) => {
+                            let mgr = Arc::clone(&mgr);
+                            let token = token.clone();
+                            let shutdown_tx = shutdown_tx_tcp.clone();
+                            tokio::spawn(async move {
+                                handle_tcp_client(
+                                    stream,
+                                    &mgr,
+                                    token.as_deref(),
+                                    &peer.to_string(),
+                                    embedded,
+                                    &shutdown_tx,
+                                )
                                 .await;
-                        });
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "TCP accept error");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "TCP accept error");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    },
                 }
             }
         });
@@ -89,24 +110,51 @@ pub async fn run(
     }
 
     loop {
-        if *shutdown_rx.borrow() {
-            break;
-        }
-        match listener.accept().await {
-            Ok((stream, _addr)) => {
-                let mgr = Arc::clone(&manager);
-                tokio::spawn(async move {
-                    handle_client(stream, &mgr).await;
-                });
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Accept error");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
+        tokio::select! {
+            _ = shutdown_rx.changed() => break,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _addr)) => {
+                    let mgr = Arc::clone(&manager);
+                    let shutdown_tx = shutdown_tx.clone();
+                    tokio::spawn(async move {
+                        handle_client(stream, &mgr, embedded, &shutdown_tx).await;
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Accept error");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            },
         }
     }
 
+    tracing::info!("Shutting down, stopping all VMs");
+    manager.lock().await.shutdown_all().await;
     Ok(())
+}
+
+/// Dispatch one parsed command. `daemon_stop` is intercepted here because
+/// it needs the daemon's embedded flag; everything else goes through the
+/// shared `execute`. Returns the response plus whether a daemon stop was
+/// requested (the caller triggers the shutdown channel after writing the
+/// response, so the client still receives it).
+async fn dispatch(
+    cmd: Command,
+    manager: &Arc<Mutex<VmManager>>,
+    embedded: bool,
+) -> (Response, bool) {
+    if cmd.command == "daemon_stop" {
+        if embedded {
+            return (
+                Response::err("daemon_stop is not supported in embedded mode (in-process daemon)"),
+                false,
+            );
+        }
+        return (Response::ok_msg("daemon shutting down"), true);
+    }
+    let mut mgr = manager.lock().await;
+    mgr.reap_dead();
+    (execute(&mut mgr, cmd).await, false)
 }
 
 /// Token gate for remote connections: the first line must equal the
@@ -116,6 +164,8 @@ async fn handle_tcp_client(
     manager: &Arc<Mutex<VmManager>>,
     token: Option<&str>,
     peer: &str,
+    embedded: bool,
+    shutdown_tx: &tokio::sync::watch::Sender<bool>,
 ) {
     let (reader_half, mut writer_half) = stream.into_split();
     let mut reader = BufReader::new(reader_half);
@@ -165,18 +215,24 @@ async fn handle_tcp_client(
 
     tracing::info!(command = %cmd.command, name = ?cmd.name, %peer, "Executing remote command");
 
-    let mut mgr = manager.lock().await;
-    mgr.reap_dead();
-    let response = execute(&mut mgr, cmd).await;
+    let (response, stop) = dispatch(cmd, manager, embedded).await;
 
     let json = serde_json::to_string(&response)
         .unwrap_or_else(|_| r#"{"status":"error","error":"serialization failed"}"#.to_string());
     let _ = writer_half
         .write_all(format!("{}\n", json).as_bytes())
         .await;
+    if stop {
+        let _ = shutdown_tx.send(true);
+    }
 }
 
-async fn handle_client(stream: UnixStream, manager: &Arc<Mutex<VmManager>>) {
+async fn handle_client(
+    stream: UnixStream,
+    manager: &Arc<Mutex<VmManager>>,
+    embedded: bool,
+    shutdown_tx: &tokio::sync::watch::Sender<bool>,
+) {
     let (reader_half, mut writer_half) = stream.into_split();
     let mut reader = BufReader::new(reader_half);
     let mut line = String::new();
@@ -211,13 +267,14 @@ async fn handle_client(stream: UnixStream, manager: &Arc<Mutex<VmManager>>) {
 
     tracing::info!(command = %cmd.command, name = ?cmd.name, "Executing command");
 
-    let mut mgr = manager.lock().await;
-    mgr.reap_dead();
-    let response = execute(&mut mgr, cmd).await;
+    let (response, stop) = dispatch(cmd, manager, embedded).await;
 
     let json = serde_json::to_string(&response)
         .unwrap_or_else(|_| r#"{"status":"error","error":"serialization failed"}"#.to_string());
     let _ = writer_half
         .write_all(format!("{}\n", json).as_bytes())
         .await;
+    if stop {
+        let _ = shutdown_tx.send(true);
+    }
 }

@@ -7,6 +7,7 @@ mod exec;
 mod fs;
 mod network;
 mod pool;
+mod sandbox;
 mod session;
 mod snapshot;
 mod vm;
@@ -35,6 +36,18 @@ pub(crate) fn get_vm<'a>(
 /// the configured `system` (default "base") is auto-appended.
 pub(crate) const SYSTEM_BASES: [&str; 2] = ["base", "ubuntu"];
 
+/// The system base is implicit: tool layers stack on top of it. Append it
+/// unless the caller already ended the layer list with one.
+pub(crate) fn apply_system_base(cmd: &mut Command) {
+    if !cmd.layers.is_empty() {
+        let last = cmd.layers.last().map(|s| s.as_str()).unwrap_or("");
+        if !SYSTEM_BASES.contains(&last) {
+            let system = cmd.system.clone().unwrap_or_else(|| "base".into());
+            cmd.layers.push(system);
+        }
+    }
+}
+
 /// Execute a command against the given VM manager.
 pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
     match cmd.command.as_str() {
@@ -59,8 +72,17 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "pool_claim" => pool::cmd_pool_claim(mgr, cmd).await,
         "pool_release" => pool::cmd_pool_release(mgr, cmd).await,
         "session_status" => session::cmd_session_status(mgr, cmd),
-        "session_kill" => session::cmd_session_kill(mgr, cmd),
+        "session_kill" => session::cmd_session_kill(mgr, cmd).await,
         "session_list" => session::cmd_session_list(mgr),
+        "sandbox_create" => sandbox::cmd_sandbox_create(mgr, cmd).await,
+        "sandbox_exec" => sandbox::cmd_sandbox_exec(mgr, cmd).await,
+        "sandbox_list" => sandbox::cmd_sandbox_list(mgr, cmd),
+        "sandbox_info" => sandbox::cmd_sandbox_info(mgr, cmd),
+        "sandbox_kill" => sandbox::cmd_sandbox_kill(mgr, cmd).await,
+        "tenant_destroy" => sandbox::cmd_tenant_destroy(mgr, cmd).await,
+        // Handled by the daemon listener itself (it owns the shutdown
+        // channel); reaching this arm means there is no daemon to stop.
+        "daemon_stop" => Response::err("daemon_stop is only handled by the daemon listener"),
         _ => Response::err(format!("Unknown command: {}", cmd.command)),
     }
 }
@@ -73,9 +95,7 @@ pub(crate) fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
     let boot_vcpus = cmd.cpus.unwrap_or(2);
     let max_vcpus = cmd.max_cpus;
     let memory_mb = cmd.memory_mb.unwrap_or(512);
-    let max_memory_mb = cmd
-        .max_memory_mb
-        .or_else(|| cmd.hotplug_memory_gb.map(|gb| gb * 1024));
+    let max_memory_mb = cmd.max_memory_mb;
 
     Ok(VmSpec {
         name: vm_name,

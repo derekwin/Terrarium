@@ -147,12 +147,23 @@ impl VmHandle for ChVmHandle {
         &self,
         args: &[String],
         timeout_secs: u64,
+        sandbox: bool,
+        work_dir: Option<&str>,
+        exec_id: Option<&str>,
     ) -> Result<adapter_traits::ExecResult, AdapterError> {
-        let resp = self
-            .guest_cmd(&serde_json::json!({
-                "command": "exec", "args": args, "timeout_secs": timeout_secs,
-            }))
-            .await?;
+        let mut req = serde_json::json!({
+            "command": "exec", "args": args, "timeout_secs": timeout_secs,
+        });
+        if sandbox {
+            req["sandbox"] = serde_json::Value::Bool(true);
+        }
+        if let Some(work_dir) = work_dir {
+            req["work_dir"] = serde_json::Value::String(work_dir.to_string());
+        }
+        if let Some(exec_id) = exec_id {
+            req["exec_id"] = serde_json::Value::String(exec_id.to_string());
+        }
+        let resp = self.guest_cmd(&req).await?;
         if resp["status"].as_str() != Some("ok") {
             return Err(AdapterError::internal(format!(
                 "guest exec failed: {}",
@@ -165,6 +176,20 @@ impl VmHandle for ChVmHandle {
             stderr: d["stderr"].as_str().unwrap_or_default().to_string(),
             exit_code: d["exit_code"].as_i64().unwrap_or(-1) as i32,
         })
+    }
+
+    async fn kill_exec(&self, exec_id: &str) -> Result<(), AdapterError> {
+        // Fresh vsock connection per call (guest_cmd opens one).
+        let resp = self
+            .guest_cmd(&serde_json::json!({"command": "kill", "exec_id": exec_id}))
+            .await?;
+        if resp["status"].as_str() != Some("ok") {
+            return Err(AdapterError::internal(format!(
+                "guest kill failed: {}",
+                resp["message"].as_str().unwrap_or("unknown")
+            )));
+        }
+        Ok(())
     }
 
     async fn attach_fs(&self, fs_spec: &FsSpec) -> Result<(), AdapterError> {
