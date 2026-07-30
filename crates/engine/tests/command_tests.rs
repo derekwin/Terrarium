@@ -10,7 +10,7 @@ use std::sync::Arc;
 use common::MockVmAdapter;
 use terrarium_engine::commands::execute;
 use terrarium_engine::manager::VmManager;
-use terrarium_protocol::Command;
+use terrarium_protocol::{Command, ExecPolicy};
 
 // ---------------------------------------------------------------------------
 // Helper: shared VmManager factory
@@ -146,6 +146,65 @@ async fn test_exec_sandbox_flag() {
     assert!(resp.is_ok(), "sandboxed exec should succeed: {:?}", resp);
     let data = resp.data.expect("should have data");
     assert_eq!(data["stdout"], "hello world\n");
+}
+
+/// Exec with policy + sandbox:true → policy is forwarded to the adapter.
+#[tokio::test]
+async fn test_exec_policy_forwarded() {
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("ok\n", "", 0);
+    let exec_log = adapter.exec_log();
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+    execute(&mut mgr, Command::create("exec-vm", "/fake/vmlinux")).await;
+    exec_log.lock().unwrap().clear();
+
+    let policy = ExecPolicy {
+        read_paths: vec!["/opt/data".into()],
+        memory_mb: Some(512),
+        ..ExecPolicy::default()
+    };
+    let resp = execute(
+        &mut mgr,
+        Command::new("exec")
+            .with_name("exec-vm")
+            .with_args(vec!["echo".into(), "hello".into()])
+            .with_sandbox(true)
+            .with_policy(policy.clone()),
+    )
+    .await;
+    assert!(resp.is_ok(), "policy exec should succeed: {:?}", resp);
+    let log = exec_log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert!(log[0].sandbox);
+    assert_eq!(log[0].policy.as_ref(), Some(&policy));
+}
+
+/// Exec with a policy but sandbox:false/absent → explicit error.
+#[tokio::test]
+async fn test_exec_policy_requires_sandbox() {
+    let mut mgr = make_mgr();
+    execute(&mut mgr, Command::create("exec-vm", "/fake/vmlinux")).await;
+    for sandbox in [None, Some(false)] {
+        let mut cmd = Command::new("exec")
+            .with_name("exec-vm")
+            .with_args(vec!["echo".into(), "hello".into()])
+            .with_policy(ExecPolicy {
+                read_paths: vec!["/opt/data".into()],
+                ..ExecPolicy::default()
+            });
+        if let Some(s) = sandbox {
+            cmd = cmd.with_sandbox(s);
+        }
+        let resp = execute(&mut mgr, cmd).await;
+        assert!(!resp.is_ok(), "sandbox {:?} + policy must fail", sandbox);
+        assert!(
+            resp.error
+                .unwrap()
+                .contains("'policy' requires sandboxed exec"),
+            "error should name the policy/sandbox conflict"
+        );
+    }
 }
 
 /// Exec on a nonexistent VM → error.
@@ -517,5 +576,32 @@ async fn test_daemon_stop_outside_daemon() {
     assert!(
         resp.error.unwrap().contains("daemon listener"),
         "daemon_stop outside the daemon should be an explicit error"
+    );
+}
+
+/// Exec with an empty net_allow list → explicit error (zero --net-allow
+/// flags would silently leave the network unrestricted).
+#[tokio::test]
+async fn test_exec_policy_empty_net_allow_rejected() {
+    let mut mgr = make_mgr();
+    execute(&mut mgr, Command::create("exec-vm", "/fake/vmlinux")).await;
+    let resp = execute(
+        &mut mgr,
+        Command::new("exec")
+            .with_name("exec-vm")
+            .with_args(vec!["echo".into(), "hello".into()])
+            .with_sandbox(true)
+            .with_policy(ExecPolicy {
+                net_allow: Some(vec![]),
+                ..ExecPolicy::default()
+            }),
+    )
+    .await;
+    assert!(!resp.is_ok(), "empty net_allow must fail");
+    assert!(
+        resp.error
+            .unwrap()
+            .contains("net_allow must be a non-empty list"),
+        "error should name the net_allow constraint"
     );
 }

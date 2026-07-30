@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use adapter_traits::{AdapterError, VmAdapter, VmHandle, VmName, VmSpec};
+use adapter_traits::{AdapterError, ExecOpts, ExecPolicy, VmAdapter, VmHandle, VmName, VmSpec};
 
 /// One warm-pool slot: an idle or claimed VM.
 #[derive(Debug, Clone)]
@@ -44,6 +44,9 @@ pub struct SandboxRecord {
     pub workdir: String,
     /// Unix seconds when the sandbox was created.
     pub created_at: u64,
+    /// Sandlock policy stored at sandbox_create; inherited by sandbox_exec
+    /// unless the call carries an override.
+    pub policy: Option<ExecPolicy>,
 }
 
 /// Central VM registry for the controller.
@@ -121,11 +124,17 @@ impl VmManager {
         timeout_secs: u64,
         sandbox: bool,
         work_dir: Option<&str>,
+        policy: Option<ExecPolicy>,
     ) -> Result<adapter_traits::ExecResult, AdapterError> {
+        let mut opts = ExecOpts::new(args.to_vec(), timeout_secs).with_sandbox(sandbox);
+        if let Some(work_dir) = work_dir {
+            opts = opts.with_work_dir(work_dir);
+        }
+        opts.policy = policy;
         self.vms
             .get(name)
             .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?
-            .exec(args, timeout_secs, sandbox, work_dir, None)
+            .exec(&opts)
             .await
     }
 
@@ -325,6 +334,7 @@ impl VmManager {
         session_id: &str,
         work_dir: Option<&str>,
         sandbox_id: Option<String>,
+        policy: Option<ExecPolicy>,
     ) -> Result<(), AdapterError> {
         let handle = self
             .get_handle(name)
@@ -351,15 +361,14 @@ impl VmManager {
         );
 
         tokio::spawn(async move {
-            let result = handle
-                .exec(
-                    &args,
-                    timeout_secs,
-                    sandbox,
-                    work_dir.as_deref(),
-                    Some(&sid),
-                )
-                .await;
+            let mut opts = ExecOpts::new(args, timeout_secs)
+                .with_sandbox(sandbox)
+                .with_exec_id(&sid);
+            if let Some(work_dir) = work_dir {
+                opts = opts.with_work_dir(work_dir);
+            }
+            opts.policy = policy;
+            let result = handle.exec(&opts).await;
             let mut sessions = sessions.lock().unwrap();
             if let Some(info) = sessions.get_mut(&sid) {
                 // A killed session stays killed — never overwrite with the

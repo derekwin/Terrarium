@@ -36,6 +36,21 @@ pub(crate) fn get_vm<'a>(
 /// the configured `system` (default "base") is auto-appended.
 pub(crate) const SYSTEM_BASES: [&str; 2] = ["base", "ubuntu"];
 
+/// Validate a user-supplied exec policy before it reaches the guest.
+/// `net_allow`, when present, must be a non-empty list: an empty list
+/// emits zero `--net-allow` flags, which would silently leave the network
+/// unrestricted — the opposite of what a user passing `[]` intends.
+pub(crate) fn validate_policy(policy: &adapter_traits::ExecPolicy) -> Result<(), Response> {
+    if let Some(entries) = &policy.net_allow {
+        if entries.is_empty() {
+            return Err(Response::err(
+                "net_allow must be a non-empty list (omit the field for unrestricted network)",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The system base is implicit: tool layers stack on top of it. Append it
 /// unless the caller already ended the layer list with one.
 pub(crate) fn apply_system_base(cmd: &mut Command) {

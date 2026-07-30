@@ -69,7 +69,14 @@ async fn test_exec_delegates() {
     mgr.spawn(test_spec("exec-vm")).await.unwrap();
 
     let result = mgr
-        .exec("exec-vm", &["echo".into(), "hello".into()], 10, false, None)
+        .exec(
+            "exec-vm",
+            &["echo".into(), "hello".into()],
+            10,
+            false,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(result.stdout, "hello\n");
@@ -82,7 +89,7 @@ async fn test_exec_not_found() {
     let mgr = VmManager::new(adapter, "/tmp".into());
 
     let result = mgr
-        .exec("nonexistent", &["ls".into()], 10, false, None)
+        .exec("nonexistent", &["ls".into()], 10, false, None, None)
         .await;
     assert!(result.is_err(), "exec on unknown VM should fail");
 }

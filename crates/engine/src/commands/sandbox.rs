@@ -28,6 +28,7 @@ fn record_json(r: &SandboxRecord) -> serde_json::Value {
         "vm": r.vm_name,
         "workdir": r.workdir,
         "created_at": r.created_at,
+        "policy": r.policy,
     })
 }
 
@@ -46,6 +47,14 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
         return Response::err(format!("invalid tenant: {}", e));
     }
     let vm_name = format!("tenant-{}", tenant);
+    // Captured before `cmd` is consumed by the VM-create branch below.
+    let policy = cmd.policy.clone();
+    // Fail fast: an invalid stored policy would fail on every later exec.
+    if let Some(p) = policy.as_ref() {
+        if let Err(resp) = super::validate_policy(p) {
+            return resp;
+        }
+    }
 
     // Reuse an already-registered tenant VM (ignore the spec), else create
     // it via the same path as `create`.
@@ -71,7 +80,7 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
     // Ensure the workdir exists in the guest (unsandboxed). On failure
     // return an honest error and don't register a half-created sandbox.
     let mkdir = vec!["mkdir".to_string(), "-p".to_string(), workdir.clone()];
-    match mgr.exec(&vm_name, &mkdir, 30, false, None).await {
+    match mgr.exec(&vm_name, &mkdir, 30, false, None, None).await {
         Ok(r) if r.exit_code == 0 => {}
         Ok(r) => {
             return Response::err(format!(
@@ -91,6 +100,7 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
         vm_name: vm_name.clone(),
         workdir: workdir.clone(),
         created_at: now_secs(),
+        policy,
     };
     mgr.sandbox_insert(record);
     Response::ok(serde_json::json!({
@@ -101,10 +111,12 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
 }
 
 /// {"command":"sandbox_exec","id":"sb-...","args":[...],"timeout_secs":N,
-///  "sandbox":bool,"exec_mode":...}
+///  "sandbox":bool,"exec_mode":...,"policy":{...}}
 ///
 /// Runs in the tenant VM with cwd = the sandbox workdir. Confinement
-/// defaults to ON (absent `sandbox` → true).
+/// defaults to ON (absent `sandbox` → true). A per-call `policy` overrides
+/// the policy stored at sandbox_create; a policy with `sandbox:false` is
+/// rejected.
 pub(crate) async fn cmd_sandbox_exec(mgr: &mut VmManager, cmd: Command) -> Response {
     let id = match cmd.id.clone() {
         Some(i) => i,
@@ -119,6 +131,16 @@ pub(crate) async fn cmd_sandbox_exec(mgr: &mut VmManager, cmd: Command) -> Respo
     }
     let timeout = cmd.timeout_secs.unwrap_or(60).min(3600);
     let sandbox = cmd.sandbox.unwrap_or(true);
+    // Per-call policy overrides the one stored at sandbox_create.
+    let policy = cmd.policy.clone().or(record.policy.clone());
+    if !sandbox && policy.is_some() {
+        return Response::err("'policy' requires sandboxed exec (set 'sandbox': true)");
+    }
+    if let Some(p) = policy.as_ref() {
+        if let Err(resp) = super::validate_policy(p) {
+            return resp;
+        }
+    }
 
     let mode = cmd.exec_mode.as_deref().unwrap_or("blocking");
     match mode {
@@ -133,6 +155,7 @@ pub(crate) async fn cmd_sandbox_exec(mgr: &mut VmManager, cmd: Command) -> Respo
                     &session_id,
                     Some(&record.workdir),
                     Some(id.clone()),
+                    policy,
                 )
                 .await
             {
@@ -152,6 +175,7 @@ pub(crate) async fn cmd_sandbox_exec(mgr: &mut VmManager, cmd: Command) -> Respo
                     timeout,
                     sandbox,
                     Some(&record.workdir),
+                    policy,
                 )
                 .await
             {
@@ -226,7 +250,7 @@ pub(crate) async fn cmd_sandbox_kill(mgr: &mut VmManager, cmd: Command) -> Respo
         ));
     }
     let rm = vec!["rm".to_string(), "-rf".to_string(), record.workdir.clone()];
-    match mgr.exec(&record.vm_name, &rm, 30, false, None).await {
+    match mgr.exec(&record.vm_name, &rm, 30, false, None, None).await {
         Ok(r) if r.exit_code == 0 => {}
         Ok(r) => {
             return Response::err(format!(

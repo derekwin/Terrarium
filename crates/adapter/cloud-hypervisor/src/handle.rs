@@ -145,23 +145,23 @@ impl VmHandle for ChVmHandle {
 
     async fn exec(
         &self,
-        args: &[String],
-        timeout_secs: u64,
-        sandbox: bool,
-        work_dir: Option<&str>,
-        exec_id: Option<&str>,
+        opts: &adapter_traits::ExecOpts,
     ) -> Result<adapter_traits::ExecResult, AdapterError> {
         let mut req = serde_json::json!({
-            "command": "exec", "args": args, "timeout_secs": timeout_secs,
+            "command": "exec", "args": &opts.args, "timeout_secs": opts.timeout_secs,
         });
-        if sandbox {
+        if opts.sandbox {
             req["sandbox"] = serde_json::Value::Bool(true);
         }
-        if let Some(work_dir) = work_dir {
+        if let Some(work_dir) = &opts.work_dir {
             req["work_dir"] = serde_json::Value::String(work_dir.to_string());
         }
-        if let Some(exec_id) = exec_id {
+        if let Some(exec_id) = &opts.exec_id {
             req["exec_id"] = serde_json::Value::String(exec_id.to_string());
+        }
+        if let Some(policy) = &opts.policy {
+            req["policy"] = serde_json::to_value(policy)
+                .map_err(|e| AdapterError::internal(format!("serialize policy: {}", e)))?;
         }
         let resp = self.guest_cmd(&req).await?;
         if resp["status"].as_str() != Some("ok") {

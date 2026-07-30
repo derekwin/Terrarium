@@ -243,6 +243,89 @@ pub struct ResourceLimits {
     pub cpu_shares: Option<u64>,
 }
 
+/// Per-exec sandbox policy, applied by sandlock in the guest.
+///
+/// All fields are optional; an absent policy (None at the call site) keeps
+/// the hardcoded guest default. Path grants are APPEND-mode: the default
+/// policy (RO system dirs, RW workdir + /tmp, /dev grants) always applies
+/// and user grants add on top — there is no replace mode.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecPolicy {
+    /// Extra read-only path grants, appended to the default grants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_paths: Vec<String>,
+    /// Extra read-write path grants, appended to the default grants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_paths: Vec<String>,
+    /// sandlock `--net-allow` entries. Absent (None) → network
+    /// unrestricted (current default); present → deny-by-default egress
+    /// with these entries passed through verbatim. Must be non-empty when
+    /// present — an empty list is rejected by the engine/guest validation
+    /// layers (zero flags would silently leave egress unrestricted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_allow: Option<Vec<String>>,
+    /// sandlock `-m <n>M` memory limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    /// sandlock `-P <n>` process-count limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procs: Option<u32>,
+}
+
+/// Options for a single [`VmHandle::exec`] call.
+#[derive(Debug, Clone, Default)]
+pub struct ExecOpts {
+    /// Command argv (exec runs it inside the VM via the guest agent).
+    pub args: Vec<String>,
+    /// Per-command timeout in seconds.
+    pub timeout_secs: u64,
+    /// Run under sandlock (Landlock/seccomp) confinement in the guest.
+    pub sandbox: bool,
+    /// Guest-side working directory (None = agent default).
+    pub work_dir: Option<String>,
+    /// Register the process under this id in the guest so it can be
+    /// killed later via `kill_exec`.
+    pub exec_id: Option<String>,
+    /// Sandlock policy for this exec (only meaningful with `sandbox`).
+    pub policy: Option<ExecPolicy>,
+}
+
+impl ExecOpts {
+    /// Minimal blocking exec: just argv and a timeout.
+    pub fn new(args: Vec<String>, timeout_secs: u64) -> Self {
+        Self {
+            args,
+            timeout_secs,
+            ..Self::default()
+        }
+    }
+
+    /// Builder: run under sandlock confinement in the guest.
+    pub fn with_sandbox(mut self, sandbox: bool) -> Self {
+        self.sandbox = sandbox;
+        self
+    }
+
+    /// Builder: set the guest-side working directory.
+    pub fn with_work_dir(mut self, work_dir: impl Into<String>) -> Self {
+        self.work_dir = Some(work_dir.into());
+        self
+    }
+
+    /// Builder: register the exec under this id (for `kill_exec`).
+    pub fn with_exec_id(mut self, exec_id: impl Into<String>) -> Self {
+        self.exec_id = Some(exec_id.into());
+        self
+    }
+
+    /// Builder: attach a sandlock policy to this exec.
+    pub fn with_policy(mut self, policy: ExecPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+}
+
 /// Command to execute inside a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecCommand {
@@ -340,19 +423,13 @@ pub trait VmHandle: Send + Sync {
     async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), AdapterError>;
 
     /// Execute a command inside the VM (via the guest agent, e.g.
-    /// guest-proxy over vsock). `sandbox` requests sandlock
-    /// (Landlock/seccomp) confinement in the guest. `work_dir` sets the
-    /// guest-side working directory (None = agent default). `exec_id`
-    /// registers the process under that id in the guest so it can be
-    /// killed later via `kill_exec`. Default: not supported.
-    async fn exec(
-        &self,
-        _args: &[String],
-        _timeout_secs: u64,
-        _sandbox: bool,
-        _work_dir: Option<&str>,
-        _exec_id: Option<&str>,
-    ) -> Result<ExecResult, AdapterError> {
+    /// guest-proxy over vsock). See [`ExecOpts`] for the knobs: `sandbox`
+    /// requests sandlock (Landlock/seccomp) confinement in the guest,
+    /// `work_dir` sets the guest-side working directory (None = agent
+    /// default), `exec_id` registers the process under that id in the
+    /// guest so it can be killed later via `kill_exec`, and `policy`
+    /// customizes the sandlock policy. Default: not supported.
+    async fn exec(&self, _opts: &ExecOpts) -> Result<ExecResult, AdapterError> {
         Err(AdapterError::not_supported(
             "exec not supported by this backend",
         ))

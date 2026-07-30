@@ -8,6 +8,11 @@
 
 use serde::{Deserialize, Serialize};
 
+// The single definition of the exec policy lives in adapter-traits (it is
+// part of the VmHandle::exec contract); re-exported here so protocol
+// clients and the engine share one type instead of two divergent ones.
+pub use adapter_traits::ExecPolicy;
+
 /// A command sent from a client to the engine daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +86,12 @@ pub struct Command {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<bool>,
 
+    // exec / sandbox_create / sandbox_exec: per-exec sandlock policy.
+    // Only valid for sandboxed exec; sandbox_create stores it so later
+    // sandbox_exec calls inherit it (a per-call policy overrides).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<ExecPolicy>,
+
     // session commands: session_id for session_status / session_kill
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -120,6 +131,7 @@ impl Command {
             exec_mode: None,
             session_id: None,
             sandbox: None,
+            policy: None,
             tenant: None,
             id: None,
         }
@@ -231,6 +243,12 @@ impl Command {
         self
     }
 
+    /// Builder: set the per-exec sandlock policy.
+    pub fn with_policy(mut self, policy: ExecPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
     /// Builder: set session ID (for session_status / session_kill).
     pub fn with_session_id(mut self, id: &str) -> Self {
         self.session_id = Some(id.to_string());
@@ -296,5 +314,81 @@ impl Response {
     /// True if the response indicates success.
     pub fn is_ok(&self) -> bool {
         self.status == "ok"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Command with a full policy survives a JSON roundtrip unchanged.
+    #[test]
+    fn policy_roundtrip() {
+        let cmd = Command::new("sandbox_exec")
+            .with_id("sb-1234abcd")
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_sandbox(true)
+            .with_policy(ExecPolicy {
+                read_paths: vec!["/opt/data".into()],
+                write_paths: vec!["/output".into()],
+                net_allow: Some(vec!["api.openai.com:443".into(), "pypi.org".into()]),
+                memory_mb: Some(512),
+                procs: Some(20),
+            });
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: Command = serde_json::from_str(&json).unwrap();
+        let policy = back.policy.expect("policy must survive roundtrip");
+        assert_eq!(policy.read_paths, vec!["/opt/data"]);
+        assert_eq!(policy.write_paths, vec!["/output"]);
+        assert_eq!(
+            policy.net_allow,
+            Some(vec![
+                "api.openai.com:443".to_string(),
+                "pypi.org".to_string()
+            ])
+        );
+        assert_eq!(policy.memory_mb, Some(512));
+        assert_eq!(policy.procs, Some(20));
+    }
+
+    /// Absent policy → None, and the key is omitted on serialization.
+    #[test]
+    fn absent_policy_stays_none_and_is_omitted() {
+        let cmd: Command = serde_json::from_str(r#"{"command":"exec"}"#).unwrap();
+        assert!(cmd.policy.is_none());
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(!json.contains("policy"), "None policy must be omitted");
+    }
+
+    /// A present-but-empty net_allow list is distinct from absent at the
+    /// serde level (Some(vec![]) vs None), so it roundtrips faithfully.
+    /// NOTE: an empty list is a footgun (zero --net-allow flags =
+    /// unrestricted network) — the engine and guest-proxy validation
+    /// layers reject it; the protocol layer only carries it.
+    #[test]
+    fn empty_net_allow_is_preserved() {
+        let cmd: Command =
+            serde_json::from_str(r#"{"command":"exec","policy":{"net_allow":[]}}"#).unwrap();
+        assert_eq!(cmd.policy.as_ref().unwrap().net_allow, Some(vec![]));
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: Command = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.policy.unwrap().net_allow, Some(vec![]));
+    }
+
+    /// Unknown fields inside the policy object are rejected
+    /// (deny_unknown_fields).
+    #[test]
+    fn policy_rejects_unknown_fields() {
+        let res: Result<Command, _> =
+            serde_json::from_str(r#"{"command":"exec","policy":{"read_paths":["/x"],"bogus":1}}"#);
+        assert!(res.is_err(), "unknown policy field must be rejected");
+    }
+
+    /// Unknown top-level fields are still rejected with a policy present.
+    #[test]
+    fn command_rejects_unknown_fields() {
+        let res: Result<Command, _> =
+            serde_json::from_str(r#"{"command":"exec","policy":{},"bogus":1}"#);
+        assert!(res.is_err(), "unknown command field must be rejected");
     }
 }

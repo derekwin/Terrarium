@@ -9,7 +9,7 @@ use std::sync::Arc;
 use common::MockVmAdapter;
 use terrarium_engine::commands::execute;
 use terrarium_engine::manager::VmManager;
-use terrarium_protocol::Command;
+use terrarium_protocol::{Command, ExecPolicy};
 
 fn make_mgr() -> VmManager {
     let adapter = MockVmAdapter::new()
@@ -399,4 +399,275 @@ async fn test_tenant_destroy_cascades() {
     .await;
     assert!(!resp.is_ok());
     assert!(resp.error.unwrap().contains("not found"));
+}
+
+/// sandbox_create stores the policy in the record; sandbox_info and
+/// sandbox_list echo it back.
+#[tokio::test]
+async fn test_sandbox_create_stores_and_echoes_policy() {
+    let mut mgr = make_mgr();
+    let policy = ExecPolicy {
+        read_paths: vec!["/opt/data".into()],
+        write_paths: vec!["/output".into()],
+        net_allow: Some(vec!["pypi.org".into()]),
+        memory_mb: Some(512),
+        procs: Some(20),
+    };
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research")
+            .with_policy(policy.clone()),
+    )
+    .await;
+    assert!(resp.is_ok(), "sandbox_create: {:?}", resp);
+    let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+
+    // sandbox_info echoes the stored policy.
+    let resp = execute(&mut mgr, Command::new("sandbox_info").with_id(&id)).await;
+    assert!(resp.is_ok());
+    let echoed = &resp.data.unwrap()["policy"];
+    assert_eq!(echoed["read_paths"], serde_json::json!(["/opt/data"]));
+    assert_eq!(echoed["write_paths"], serde_json::json!(["/output"]));
+    assert_eq!(echoed["net_allow"], serde_json::json!(["pypi.org"]));
+    assert_eq!(echoed["memory_mb"], 512);
+    assert_eq!(echoed["procs"], 20);
+
+    // sandbox_list echoes it too.
+    let resp = execute(&mut mgr, Command::new("sandbox_list")).await;
+    let data = resp.data.unwrap();
+    let item = &data["sandboxes"][0];
+    assert_eq!(item["policy"]["memory_mb"], 512);
+    assert_eq!(item["policy"]["net_allow"], serde_json::json!(["pypi.org"]));
+
+    // A sandbox created without a policy echoes null.
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_create").with_tenant("research"),
+    )
+    .await;
+    let id2 = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+    let resp = execute(&mut mgr, Command::new("sandbox_info").with_id(&id2)).await;
+    assert!(resp.data.unwrap()["policy"].is_null());
+}
+
+/// sandbox_exec without a per-call policy inherits the stored one.
+#[tokio::test]
+async fn test_sandbox_exec_inherits_stored_policy() {
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("ok\n", "", 0);
+    let exec_log = adapter.exec_log();
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+
+    let stored = ExecPolicy {
+        read_paths: vec!["/opt/data".into()],
+        memory_mb: Some(256),
+        ..ExecPolicy::default()
+    };
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research")
+            .with_policy(stored.clone()),
+    )
+    .await;
+    let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+    exec_log.lock().unwrap().clear();
+
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["echo".into(), "hi".into()]),
+    )
+    .await;
+    assert!(resp.is_ok(), "sandbox_exec: {:?}", resp);
+    let log = exec_log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert!(log[0].sandbox);
+    assert_eq!(
+        log[0].policy.as_ref(),
+        Some(&stored),
+        "exec must inherit the stored policy"
+    );
+}
+
+/// A per-call policy on sandbox_exec overrides the stored one for that
+/// call only.
+#[tokio::test]
+async fn test_sandbox_exec_policy_override_precedence() {
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("ok\n", "", 0);
+    let exec_log = adapter.exec_log();
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+
+    let stored = ExecPolicy {
+        memory_mb: Some(256),
+        ..ExecPolicy::default()
+    };
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research")
+            .with_policy(stored.clone()),
+    )
+    .await;
+    let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+    exec_log.lock().unwrap().clear();
+
+    let override_policy = ExecPolicy {
+        memory_mb: Some(1024),
+        procs: Some(10),
+        ..ExecPolicy::default()
+    };
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_policy(override_policy.clone()),
+    )
+    .await;
+    assert!(resp.is_ok(), "override exec: {:?}", resp);
+    assert_eq!(
+        exec_log.lock().unwrap()[0].policy.as_ref(),
+        Some(&override_policy),
+        "per-call policy must win over the stored one"
+    );
+
+    // Next call without a policy falls back to the stored one.
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["echo".into(), "hi".into()]),
+    )
+    .await;
+    assert!(resp.is_ok());
+    assert_eq!(
+        exec_log.lock().unwrap()[1].policy.as_ref(),
+        Some(&stored),
+        "override must not mutate the stored policy"
+    );
+}
+
+/// sandbox_exec with sandbox:false plus a policy (per-call or stored) →
+/// explicit error.
+#[tokio::test]
+async fn test_sandbox_exec_policy_requires_sandbox() {
+    let mut mgr = make_mgr();
+    let stored = ExecPolicy {
+        memory_mb: Some(256),
+        ..ExecPolicy::default()
+    };
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research")
+            .with_policy(stored),
+    )
+    .await;
+    let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+
+    // Stored policy + sandbox:false → rejected.
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_sandbox(false),
+    )
+    .await;
+    assert!(!resp.is_ok(), "stored policy + sandbox:false must fail");
+    assert!(resp
+        .error
+        .unwrap()
+        .contains("'policy' requires sandboxed exec"));
+
+    // Per-call policy + sandbox:false on a policy-free sandbox → rejected.
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_create").with_tenant("research"),
+    )
+    .await;
+    let id2 = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id2)
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_sandbox(false)
+            .with_policy(ExecPolicy::default()),
+    )
+    .await;
+    assert!(!resp.is_ok(), "per-call policy + sandbox:false must fail");
+    assert!(resp
+        .error
+        .unwrap()
+        .contains("'policy' requires sandboxed exec"));
+}
+
+/// sandbox_create with an empty net_allow list → explicit error (fail
+/// fast: a stored invalid policy would fail on every later exec).
+#[tokio::test]
+async fn test_sandbox_create_empty_net_allow_rejected() {
+    let mut mgr = make_mgr();
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research")
+            .with_policy(ExecPolicy {
+                net_allow: Some(vec![]),
+                ..ExecPolicy::default()
+            }),
+    )
+    .await;
+    assert!(!resp.is_ok(), "empty net_allow must fail");
+    assert!(resp
+        .error
+        .unwrap()
+        .contains("net_allow must be a non-empty list"));
+}
+
+/// sandbox_exec with a per-call empty net_allow override → explicit
+/// error, even when the stored policy is valid.
+#[tokio::test]
+async fn test_sandbox_exec_empty_net_allow_rejected() {
+    let mut mgr = make_mgr();
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research")
+            .with_policy(ExecPolicy {
+                net_allow: Some(vec!["pypi.org".into()]),
+                ..ExecPolicy::default()
+            }),
+    )
+    .await;
+    let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_policy(ExecPolicy {
+                net_allow: Some(vec![]),
+                ..ExecPolicy::default()
+            }),
+    )
+    .await;
+    assert!(!resp.is_ok(), "empty net_allow override must fail");
+    assert!(resp
+        .error
+        .unwrap()
+        .contains("net_allow must be a non-empty list"));
 }

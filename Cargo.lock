@@ -621,6 +621,7 @@ dependencies = [
 name = "terrarium-protocol"
 version = "0.1.0"
 dependencies = [
+ "adapter-traits",
  "serde",
  "serde_json",
 ]

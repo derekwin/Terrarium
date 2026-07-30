@@ -197,6 +197,28 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
     let work_dir = work_dir.as_str();
     let timeout = cmd["timeout_secs"].as_u64().unwrap_or(60).min(3600);
     let use_sandbox = cmd["sandbox"].as_bool().unwrap_or(false);
+
+    // Optional per-exec sandlock policy. Only valid together with
+    // "sandbox": true — a policy on an unsandboxed exec would silently
+    // not apply, so reject it loudly instead.
+    let policy: Option<sandbox::SandboxPolicy> = match cmd.get("policy") {
+        Some(p) if !p.is_null() => match serde_json::from_value(p.clone()) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                let resp = serde_json::json!({"status": "error", "message": format!("invalid policy: {}", e)});
+                let _ = writeln!(stream, "{}", resp);
+                return;
+            }
+        },
+        // Absent, or an explicit JSON null (treated as absent).
+        _ => None,
+    };
+    if policy.is_some() && !use_sandbox {
+        let resp = serde_json::json!({"status": "error", "message": "policy requires sandboxed exec (set \"sandbox\": true)"});
+        let _ = writeln!(stream, "{}", resp);
+        return;
+    }
+
     let exec_id = match cmd["exec_id"].as_str() {
         Some(id) => match registry::validate_exec_id(id) {
             Ok(()) => Some(id),
@@ -212,7 +234,9 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
     let result = if use_sandbox {
         // Hard error when sandlock is absent — never silently fall back
         // to unsandboxed execution.
-        match sandbox::wrap_for_sandbox(&args, work_dir, |p| std::path::Path::new(p).exists()) {
+        match sandbox::wrap_for_sandbox(&args, work_dir, policy.as_ref(), |p| {
+            std::path::Path::new(p).exists()
+        }) {
             Ok(argv) => sandbox::exec_isolated(&argv[0], &argv, work_dir, timeout, exec_id),
             Err(e) => Err(e),
         }
@@ -237,5 +261,66 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
             let resp = serde_json::json!({"status": "error", "message": e});
             let _ = writeln!(stream, "{}", resp);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run exec_cmd against an in-memory stream and parse the response.
+    fn run_exec(cmd: serde_json::Value) -> serde_json::Value {
+        let mut stream = std::io::Cursor::new(Vec::new());
+        exec_cmd(&mut stream, &cmd);
+        let out = String::from_utf8(stream.into_inner()).unwrap();
+        serde_json::from_str(out.trim()).unwrap()
+    }
+
+    /// A policy on an unsandboxed exec would silently not apply — the
+    /// exec_cmd layer must reject it loudly.
+    #[test]
+    fn policy_without_sandbox_is_rejected() {
+        let resp = run_exec(serde_json::json!({
+            "command": "exec",
+            "args": ["echo", "hi"],
+            "policy": {"read_paths": ["/opt/data"]},
+        }));
+        assert_eq!(resp["status"], "error");
+        assert!(
+            resp["message"]
+                .as_str()
+                .unwrap()
+                .contains("policy requires sandboxed exec"),
+            "{:?}",
+            resp
+        );
+    }
+
+    /// Malformed policy objects are rejected before any exec happens.
+    #[test]
+    fn invalid_policy_shape_is_rejected() {
+        let resp = run_exec(serde_json::json!({
+            "command": "exec",
+            "args": ["echo", "hi"],
+            "sandbox": true,
+            "policy": {"bogus": 1},
+        }));
+        assert_eq!(resp["status"], "error");
+        assert!(
+            resp["message"].as_str().unwrap().contains("invalid policy"),
+            "{:?}",
+            resp
+        );
+    }
+
+    /// An explicit JSON null policy is treated as absent (no rejection).
+    #[test]
+    fn null_policy_is_absent() {
+        let resp = run_exec(serde_json::json!({
+            "command": "exec",
+            "args": ["echo", "hi"],
+            "policy": null,
+        }));
+        assert_eq!(resp["status"], "ok");
     }
 }

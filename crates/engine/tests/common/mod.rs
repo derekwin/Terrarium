@@ -28,8 +28,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use adapter_traits::{
-    AdapterError, ExecResult, FsSpec, NetworkQos, Snapshot, VmAdapter, VmCapabilities, VmHandle,
-    VmInfo, VmSpec,
+    AdapterError, ExecOpts, ExecPolicy, ExecResult, FsSpec, NetworkQos, Snapshot, VmAdapter,
+    VmCapabilities, VmHandle, VmInfo, VmSpec,
 };
 
 /// One recorded exec invocation (for assertions on engine→guest plumbing).
@@ -42,6 +42,7 @@ pub struct ExecCall {
     pub sandbox: bool,
     pub work_dir: Option<String>,
     pub exec_id: Option<String>,
+    pub policy: Option<ExecPolicy>,
 }
 
 // ---------------------------------------------------------------------------
@@ -172,30 +173,25 @@ impl VmHandle for MockVmHandle {
         Box::pin(async move { Ok(()) })
     }
 
-    fn exec<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+    fn exec<'life0, 'life1, 'async_trait>(
         &'life0 self,
-        args: &'life1 [String],
-        timeout_secs: u64,
-        sandbox: bool,
-        work_dir: Option<&'life2 str>,
-        exec_id: Option<&'life3 str>,
+        opts: &'life1 ExecOpts,
     ) -> Pin<Box<dyn Future<Output = Result<ExecResult, AdapterError>> + Send + 'async_trait>>
     where
         'life0: 'async_trait,
         'life1: 'async_trait,
-        'life2: 'async_trait,
-        'life3: 'async_trait,
         Self: 'async_trait,
     {
         Box::pin(async move {
             self.exec_log.lock().unwrap().push(ExecCall {
-                args: args.to_vec(),
-                timeout_secs,
-                sandbox,
-                work_dir: work_dir.map(String::from),
-                exec_id: exec_id.map(String::from),
+                args: opts.args.clone(),
+                timeout_secs: opts.timeout_secs,
+                sandbox: opts.sandbox,
+                work_dir: opts.work_dir.clone(),
+                exec_id: opts.exec_id.clone(),
+                policy: opts.policy.clone(),
             });
-            if let (Some(gate), Some(_)) = (&self.exec_gate, exec_id) {
+            if let (Some(gate), Some(_)) = (&self.exec_gate, &opts.exec_id) {
                 gate.notified().await;
             }
             let s = self.inner.lock().unwrap();

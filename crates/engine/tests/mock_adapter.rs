@@ -7,7 +7,9 @@ mod common;
 #[cfg(test)]
 mod tests {
     use super::common::MockVmAdapter;
-    use adapter_traits::{FsSpec, NetworkQos, Snapshot, UpperPolicy, VmAdapter, VmName, VmSpec};
+    use adapter_traits::{
+        ExecOpts, FsSpec, NetworkQos, Snapshot, UpperPolicy, VmAdapter, VmName, VmSpec,
+    };
 
     fn test_spec() -> VmSpec {
         VmSpec {
@@ -59,7 +61,7 @@ mod tests {
         let handle = adapter.create(&spec).await.unwrap();
 
         let result = handle
-            .exec(&["echo".into(), "hello".into()], 10, false, None, None)
+            .exec(&ExecOpts::new(vec!["echo".into(), "hello".into()], 10))
             .await
             .unwrap();
         assert_eq!(result.stdout, "hello\n");
@@ -169,7 +171,7 @@ mod tests {
         assert!(handle.is_alive());
 
         let result = handle
-            .exec(&["true".into()], 5, false, None, None)
+            .exec(&ExecOpts::new(vec!["true".into()], 5))
             .await
             .unwrap();
         assert_eq!(result.stdout, "hello\n");

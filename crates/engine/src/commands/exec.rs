@@ -11,13 +11,31 @@ pub(crate) async fn cmd_exec(mgr: &mut VmManager, cmd: Command) -> Response {
     }
     let timeout = cmd.timeout_secs.unwrap_or(60).min(3600);
     let sandbox = cmd.sandbox.unwrap_or(false);
+    if !sandbox && cmd.policy.is_some() {
+        return Response::err("'policy' requires sandboxed exec (set 'sandbox': true)");
+    }
+    if let Some(policy) = cmd.policy.as_ref() {
+        if let Err(resp) = super::validate_policy(policy) {
+            return resp;
+        }
+    }
+    let policy = cmd.policy.clone();
 
     let mode = cmd.exec_mode.as_deref().unwrap_or("blocking");
     match mode {
         "background" => {
             let session_id = uuid::Uuid::new_v4().to_string();
             match mgr
-                .exec_background(&name, &cmd.args, timeout, sandbox, &session_id, None, None)
+                .exec_background(
+                    &name,
+                    &cmd.args,
+                    timeout,
+                    sandbox,
+                    &session_id,
+                    None,
+                    None,
+                    policy,
+                )
                 .await
             {
                 Ok(()) => Response::ok(serde_json::json!({
@@ -27,7 +45,10 @@ pub(crate) async fn cmd_exec(mgr: &mut VmManager, cmd: Command) -> Response {
                 Err(e) => Response::err(e.to_string()),
             }
         }
-        "blocking" => match mgr.exec(&name, &cmd.args, timeout, sandbox, None).await {
+        "blocking" => match mgr
+            .exec(&name, &cmd.args, timeout, sandbox, None, policy)
+            .await
+        {
             Ok(r) => Response::ok(serde_json::json!({
                 "stdout": r.stdout,
                 "stderr": r.stderr,
