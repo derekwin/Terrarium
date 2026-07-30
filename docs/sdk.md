@@ -9,7 +9,7 @@ Terrarium SDK 提供三层 API，从高层到低层：
 | 层次 | 类 / 函数 | 适用场景 |
 |---|---|---|
 | **高层沙箱** | `terra.Sandbox`, `terra.AsyncSandbox` | 开箱即用，自动起 daemon，context manager 自动回收 |
-| **池 / 模板** | `terra.Pool`, `terra.Template` | 预热池 + 命名环境组合，适合批量任务 |
+| **池 / 模板** | `terra.Pool`, `terra.template.Template` | 预热池 + 命名环境组合，适合批量任务（`Template` 不在包顶层导出，需 `from terra.template import Template`） |
 | **底层直连** | `terra.TerraClient`, `terra.create()` | 原生 VM 操作，完全控制 |
 
 ## 三种使用方式
@@ -41,6 +41,8 @@ vm.destroy()                                       # 底层走 pool_release
 
 统一的沙箱抽象，**租户优先模型**：VM 是租户隔离边界，Sandbox 是 VM 内的会话。
 同一租户下的多个 Sandbox 共享一个 VM，各自拥有独立工作目录。
+Sandbox 是**引擎级实体**（`sandbox_*` 协议族）：引擎维护注册表
+tenant → VM、sandbox id → workdir，全部客户端（SDK/CLI）共享同一视图。
 
 #### 租户优先架构
 
@@ -70,7 +72,8 @@ sb = Sandbox(tenant="my-org", layers=["python312", "base"],
              kernel="k612", cpu=2, memory_mb=512)
 
 # 属性
-print(sb.id)        # 完整标识："tenant-my-org/sb-a3f2"（租户/会话）
+print(sb.id)        # 引擎分配的 id："sb-a3f2b1c4"（sb-<8hex>）
+print(sb.tenant)    # 租户标识："my-org"
 print(sb.vm)        # VM 名称："tenant-my-org"
 print(sb.status)    # "running" / "stopped" / "paused"
 print(sb.backend)   # "ch" (Cloud Hypervisor)
@@ -81,9 +84,12 @@ sb2 = Sandbox(tenant="research-team")   # 复用同一 VM，新工作目录
 sb3 = Sandbox(tenant="research-team")
 # sb1、sb2、sb3 在同一个 VM 内，各自拥有独立的 /workdir
 
-# exec — blocking 执行，返回 ExecResult
+# exec — blocking 执行，返回 ExecResult；默认经 sandlock（Landlock/seccomp）沙箱化
 result = sb.exec(["python3", "-c", "print(1+1)"])
 print(result.stdout, result.stderr, result.exit_code, result.duration_ms)
+
+# sandboxed=False — 逃生舱：不经权限隔离执行（如调试、安装系统软件包）
+result = sb.exec(["apk", "add", "curl"], sandboxed=False)
 
 # check=True — 非零退出码自动抛 ExecError
 try:
@@ -109,7 +115,7 @@ sb.resize(cpu=4, memory_mb=1024)
 metrics = sb.metrics()   # {cpu_count: 4, memory_mb: 1024}
 
 # 生命周期
-sb.kill()                # 移除会话工作目录，VM 保留供同租户其余 Sandbox 使用
+sb.kill()                # 终止本会话全部 running 会话 + 移除工作目录，VM 保留供同租户其余 Sandbox 使用
 Sandbox.destroy_tenant("my-org")  # 销毁租户 VM 及全部会话
 
 # Context manager — 自动 kill
@@ -117,7 +123,14 @@ with Sandbox(tenant="my-org", template="py312") as sb:
     print(sb.exec(["uname", "-a"]).stdout)
 ```
 
-> **注意：** `sb.kill()` 仅移除当前会话的工作目录，不会销毁 VM（同租户的其他 Sandbox 仍需使用）。要完全销毁租户 VM，使用 `Sandbox.destroy_tenant("tenant-name")`。
+> **注意：** `sb.kill()` 终止当前 sandbox 的 running 会话并移除其工作目录（引擎级 `sandbox_kill`），不会销毁 VM（同租户的其他 Sandbox 仍需使用）。要完全销毁租户 VM，使用 `Sandbox.destroy_tenant("tenant-name")`（引擎级 `tenant_destroy`，级联回收全部 sandbox）。
+
+> **沙箱化执行（`sandboxed=True`，默认）：** 命令在 guest 内经 sandlock
+> （Landlock/seccomp，由 `terra setup` 烘焙进系统层的 `/usr/bin/sandlock`）
+> 约束运行。默认策略：系统目录只读，仅本会话工作目录与 `/tmp` 可写，
+> 同 VM 其他会话的工作目录不可达，网络暂不限制。镜像缺少 sandlock 二进制
+> 时是硬错误（无静默回退）。仅当确实需要写系统路径（如调试、安装软件包）
+> 时才用 `sandboxed=False`。
 
 ### `terra.AsyncSandbox`
 
@@ -235,12 +248,14 @@ except TerraError as e:
 
 `TerraClient(socket_path=None, token=None)`——`socket_path` 可为 unix
 路径或 `tcp://host:port`；缺省读 `TERRA_SOCKET` 环境变量，再退化到
-托管默认路径（自动跳过无权限的 root 占用）。
+默认路径 `/tmp/terra.sock`。
 
 方法：`vm_create / vm_list / vm_info / vm_resize / vm_shutdown /
-vm_kill / vm_destroy / vm_exec(name, args, timeout_secs=60)` /
+vm_kill / vm_destroy / vm_exec(name, args, timeout_secs=60, sandbox=False)` /
 `vm_attach_fs / vm_detach_fs` / `pool_create / pool_list / pool_claim /
-pool_release`。错误统一抛 `TerraError`。
+pool_release` / `sandbox_create / sandbox_exec / sandbox_list /
+sandbox_info / sandbox_kill / tenant_destroy`（引擎级沙箱实体，见
+`docs/protocol.md`）。错误统一抛 `TerraError`。
 
 ### `Vm`
 
@@ -257,9 +272,9 @@ default_memory_mb / default_layers / default_net / token`。
 
 ### `terra.daemon.Daemon`
 
-`Daemon(config=None, socket=None, tcp=None, ...)`——启动引擎（自动
-解析引擎二进制：环境变量 → 托管 bin → repo 构建 → PATH → 制品 URL），
-`start()/stop()`，可作上下文管理器。
+`Daemon(config=None, socket=None, tcp=None, ...)`——经 PyO3 FFI
+（`terrarium_engine` crate）在进程内启动引擎，`start()/stop()`，
+可作上下文管理器。默认 socket 为 `/tmp/terra.sock`。
 
 SDK 用户通常无需手动管理 daemon——`Sandbox` / `Pool` 在首次使用时自动启动托管引擎。
 
@@ -269,7 +284,7 @@ SDK 用户通常无需手动管理 daemon——`Sandbox` / `Pool` 在首次使�
   ensure_engine() / publish_engine()`：二进制自动获取（GitHub/apt 解包/cargo/托管 bin）
 - `images.ensure(name) / ensure_all() / build_layer(src, name)`：guest
   镜像（repo 构建或 `TERRA_ARTIFACT_BASE` 制品）与 EROFS 层打包
-- `paths`：托管目录布局（`~/.local/share/terra/{bin,images,layers,state,run}`）
+- `paths`：托管目录布局（`~/.local/share/terra/{bin,images,layers,templates,state,run}`）
 
 ## `python -m terra`（CLI）
 
@@ -277,10 +292,9 @@ SDK 用户通常无需手动管理 daemon——`Sandbox` / `Pool` 在首次使�
 
 | 命令组 | 子命令 | 说明 |
 |---|---|---|
-| `sandbox` | `create`, `ls`, `info`, `exec`, `cp`, `resize`, `metrics`, `kill`, `destroy-tenant` | 高层沙箱操作（推荐入口，租户优先） |
-| `template` | `ls`, `create`, `info`, `remove` | 命名模板管理 |
-| `image` | `build kernel`, `build rootfs`, `build initramfs`, `ls`, `info`, `remove` | guest 镜像管理（内核/rootfs/initramfs 合并） |
-| `layer` | `ls`, `create`, `info`, `remove` | 文件系统层管理 |
+| `setup` | — | 一键环境搭建（内核 + rootfs + initramfs + base 层 + sandlock + 模板，幂等） |
+| `sandbox` | `create`, `ls`, `info`, `exec`, `cp`, `resize`, `metrics`, `kill`, `destroy-tenant` | 高层沙箱操作（引擎级实体，租户优先） |
+| `tool` | `create`, `ls`, `remove` | 工具层（在发行版模板上构建） |
 | `vm` | `create`, `ls`, `info`, `exec`, `resize`, `attach`, `detach`, `shutdown`, `kill`, `destroy` | 底层 VM 操作 |
 | `pool` | `create`, `ls`, `claim`, `release`, `scale`, `remove` | 预热池管理 |
 | `net` | `create`, `ls`, `remove` | NAT 网络管理 |
@@ -306,34 +320,37 @@ SDK 用户通常无需手动管理 daemon——`Sandbox` / `Pool` 在首次使�
 ### 典型工作流
 
 ```bash
-# 1) 首次搭建
-sudo env "PATH=$PATH" terra daemon start                    # 启动引擎（root 才有 NAT 网络）
-terra image build kernel -n k612 --version 6.12              # 构建内核
-terra image build rootfs -n alpine                           # 构建 alpine base rootfs
+# 1) 首次搭建（一条命令，幂等）
+terra setup alpine            # 内核 + rootfs + initramfs + base 层（含 sandlock）+ 模板；ubuntu 用 terra setup ubuntu
+terra daemon start            # 启动引擎（自动 sudo 提权；--no-root 免提权，仅无 --net VM）
 
 # 2) 高层沙箱（推荐日常使用）
-terra template create -n py312 --kernel k612 --rootfs alpine --layers python312,base
-terra sandbox create --tenant research-team --template py312 --net    # 租户优先沙箱
-terra sandbox ls                                                      # 列出沙箱
-terra sandbox exec tenant-research-team/sb-a3f2 -- python3 --version  # 执行命令
-terra sandbox metrics tenant-research-team/sb-a3f2                    # 查看资源
-terra sandbox kill tenant-research-team/sb-a3f2                       # 终止会话（保留 VM）
-terra sandbox destroy-tenant research-team                            # 销毁 VM + 全部会话
+terra sandbox create --template alpine --net    # 输出引擎 id 形如 sb-a3f2b1c4
+terra sandbox ls                                # 引擎注册表中的全部 sandbox
+terra sandbox exec sb-a3f2b1c4 -- echo hi       # 默认 sandlock 沙箱化
+terra sandbox metrics sb-a3f2b1c4               # 查看资源（CPU/内存属租户 VM）
+terra sandbox kill sb-a3f2b1c4                  # 终止会话 + 删工作目录，VM 保留
+terra sandbox destroy-tenant <tenant>           # 销毁租户 VM + 全部 sandbox
 
 # 3) 预热池（批量任务）
 terra pool create -n mypool --size 3                        # 创建 3 个预热 VM 的池
-terra pool claim --template py312                           # 认领就绪 Sandbox
+terra pool claim --template alpine                          # 认领就绪 Sandbox
 terra pool release <vm-name>                                # 归还池
 terra pool scale --size 5                                   # 缩放池大小
 
 # 4) 直接 VM（精细控制）
-terra vm create dev --kernel k612 --layers base --net
-terra vm exec dev -- python3 --version
+terra vm create dev --kernel default --layers base --net
+terra vm exec dev -- echo hi
 terra vm attach dev --layers python312                      # 热插 layer
 terra vm detach dev                                         # 卸载 layer
 terra vm destroy dev
 
-# 5) daemon 运维
+# 5) 工具层（在发行版模板上构建）
+terra tool create -n python312 --template alpine --script images/examples/python312.sh
+terra tool ls
+terra tool remove -n python312
+
+# 6) daemon 运维
 terra daemon status                                         # 查看状态
 terra daemon logs -f                                        # 实时日志
 terra daemon config                                         # 引擎/池/网络/层一览
@@ -342,48 +359,33 @@ terra daemon stop                                           # 优雅停止
 
 ### 命令参考
 
-**sandbox** — 高层沙箱（租户优先）
+**sandbox** — 高层沙箱（引擎级实体：id 形如 `sb-<8hex>`）
 
 ```
-terra sandbox create --tenant <name> --template <name> [--kernel <var>] [--cpu N] [--memory MB]
-                     [--net] [--env KEY=VALUE] [--timeout SEC] [--name <id>]
+terra sandbox create [--template <name>] [--layers L1,L2] [--kernel <var>]
+                     [--cpu N] [--memory MB] [--net] [--env KEY=VALUE] [--timeout SEC]
 terra sandbox ls
-terra sandbox info <id>          # id 格式：tenant-<tenant>/sb-<hex>
-terra sandbox exec <id> [--cwd PATH] [--env KEY=VALUE] [--timeout SEC] -- COMMAND...
-terra sandbox cp <src> <dst>    # 本地路径 或 <sandbox-id>:/path
-terra sandbox resize <id> --cpu N --memory MB
+terra sandbox info <id>
+terra sandbox exec <id> [--cwd PATH] [--env KEY=VALUE] [--timeout SEC] [--no-sandbox] -- COMMAND...
+terra sandbox cp <src> <dst>    # 本地路径 或 <id>:/path
+terra sandbox resize <id> [--cpu N] [--memory MB]   # 作用于整个租户 VM
 terra sandbox metrics <id>
-terra sandbox kill <id>          # 终止会话（不销毁 VM）
-terra sandbox destroy-tenant <tenant-name>  # 销毁租户 VM 及全部会话
+terra sandbox kill <id>          # 终止该 sandbox 的会话 + 删工作目录，租户 VM 保留
+terra sandbox destroy-tenant <tenant>   # 销毁租户 VM 及其全部 sandbox
 ```
 
-**template** — 命名模板
+`sandbox` 命令直接操作引擎注册表中的沙箱实体（`sandbox_*` 协议族）。
+`cp` / `resize` / `metrics` 接受 sandbox id 或 VM 名（id 解析失败时按
+VM 名回退）。`exec` 默认经 sandlock（Landlock/seccomp）沙箱化执行（同
+Python API 的 `sandboxed=True`）；`--no-sandbox` 为逃生舱。镜像缺少
+sandlock 二进制时报错（先跑 `terra setup` 将其烘焙进系统层）。
+
+**tool** — 工具层（系统资源由 `terra setup` 准备；工具层一律用 `tool create` 构建）
 
 ```
-terra template ls
-terra template create -n <name> --kernel <var> --rootfs alpine|ubuntu [--layers L1,L2]
-terra template info <name>
-terra template remove <name>
-```
-
-**image** — guest 镜像（内核/rootfs/initramfs 统一入口）
-
-```
-terra image ls
-terra image build kernel -n <name> --version <ver>
-terra image build rootfs -n <name>         # alpine 或 ubuntu
-terra image build initramfs --type virtiofs|agent [-n <name>]
-terra image info <name>
-terra image remove -n <name>
-```
-
-**layer** — 文件系统层
-
-```
-terra layer ls
-terra layer create -n <name> --rootfs alpine|ubuntu (--from-dir|--script|--from-image) [--kernel <var>]
-terra layer info <name>
-terra layer remove -n <name>
+terra tool create -n <name> --template <distro> [--script <file>] [--no-net] [--timeout SEC]
+terra tool ls
+terra tool remove -n <name>
 ```
 
 **vm** — 底层 VM
@@ -418,10 +420,22 @@ terra net ls
 terra net remove <name>
 ```
 
+**setup** — 一键环境搭建（幂等，各步骤已存在即跳过，`--force` 强制重建）
+
+```
+terra setup [alpine|ubuntu] [--kernel-version <ver>] [--force]
+```
+
+步骤：宿主二进制 → 默认内核 → 发行版 rootfs → initramfs（agent +
+virtiofs）→ base 层 → **guest 二进制**（构建静态 musl `sandlock`
+——`images/build-sandlock.sh`，钉在上游 tag `go/v0.8.5` 加本地
+`thirdparty/` 补丁——并连同当前 `guest-proxy` 一起装进系统层
+`/usr/bin/sandlock` 与 `bin/guest-proxy`）→ 模板（与发行版同名）。
+
 **daemon** — 引擎 daemon
 
 ```
-terra daemon start [--daemonize] [--tcp host:port]
+terra daemon start [--no-root] [--tcp host:port]   # 非 root 自动 sudo 提权；--no-root 免提权
 terra daemon status
 terra daemon config
 terra daemon logs [-f]
@@ -433,4 +447,4 @@ terra daemon destroy
 
 `vm attach-fs` / `vm detach-fs` 作为隐藏别名保留，功能同 `vm attach` / `vm detach`。
 `daemon ls` 已重命名为 `daemon status`。
-`kernel`、`rootfs` 顶层命令已合并入 `image` 命令组。
+`template`、`image`、`layer` 命令组已移除——系统资源统一由 `terra setup` 准备，工具层用 `tool create` 构建；模板由 `terra setup` 或 SDK 的 `Template` 类写入。

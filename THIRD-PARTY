@@ -1,3 +1,10 @@
 Cloud Hypervisor (https://github.com/cloud-hypervisor/cloud-hypervisor)
   License: Apache-2.0
   Usage: VMM base (fork in hypervisor/)
+
+sandlock (https://github.com/multikernel/sandlock)
+  License: Apache-2.0
+  Usage: in-guest exec confinement (Landlock/seccomp) — static musl binary
+  baked into the distro system layer at /usr/bin/sandlock by `terra setup`.
+  Built from pinned upstream tag go/v0.8.5 with a local patch
+  (thirdparty/sandlock-v0.8.5-musl.patch, registered in thirdparty/PATCHES.md)

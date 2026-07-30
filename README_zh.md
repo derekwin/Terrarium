@@ -14,7 +14,7 @@ Terrarium 是 Agent 执行环境的调度控制层。它将硬件级 VM 隔离�
 | 密度 | 高 | 低 | **高（页缓存共享的层）** |
 | 供给 | 快 | ~1s | **预热池（预启动 VM）** |
 | 环境 | OCI 镜像 | 磁盘镜像 | **可组合的命名层** |
-| 后端 | — | — | **可插拔（CH、Sandlock、OpenShell）** |
+| 后端 | — | — | **CH 微 VM + guest 内 Sandlock（`SandboxAdapter` trait 预留给未来后端）** |
 
 ## 架构
 
@@ -28,7 +28,7 @@ Terrarium 是 Agent 执行环境的调度控制层。它将硬件级 VM 隔离�
 │          ▼                             ▼                     │
 │  ┌───────────────┐            ┌────────────────┐            │
 │  │  CH Adapter   │            │ SandboxAdapter  │            │
-│  │  (VmAdapter)  │            │ Sandlock/OpenShell│          │
+│  │  (VmAdapter)  │            │    Sandlock     │          │
 │  └───────┬───────┘            └───────┬────────┘            │
 │          ▼                            ▼                      │
 │  ┌─────────────────────────────────────────────┐            │
@@ -45,7 +45,7 @@ Terrarium 是 Agent 执行环境的调度控制层。它将硬件级 VM 隔离�
 ```
 
 引擎通过两组 trait 与后端解耦：`VmAdapter`（Cloud Hypervisor）与
-`SandboxAdapter`（Sandlock、OpenShell）。
+`SandboxAdapter`（当前为 Sandlock；trait 保留为未来沙箱后端的扩展点）。
 
 ## 仓库结构
 
@@ -57,9 +57,8 @@ terrarium/
 │   ├── engine/               # 引擎 daemon：PyO3 库，7 个命令子模块
 │   ├── adapter/
 │   │   ├── traits/           # VmAdapter / SandboxAdapter trait、VmSpec、FsSpec、错误类型
-│   │   ├── cloud-hypervisor/ # CH adapter：5 模块（FS/VM 解耦）、virtiofs、热插、网络、landlock
-│   │   ├── sandlock/         # Sandlock adapter（Landlock ABI 能力门控）
-│   │   └── openshell/        # OpenShell adapter
+│   │   ├── cloud-hypervisor/ # CH adapter（FS/VM 解耦）、virtiofs、热插、网络、landlock
+│   │   └── sandlock/         # Sandlock adapter（Landlock/seccomp 权限隔离；SandboxAdapter 参考实现）
 │   ├── fs/                   # 独立文件系统 crate：EROFS、cpio、层构建/列举/删除（PyO3 绑定）
 │   ├── protocol/             # 共享 Command / Response 类型（单一事实源）
 │   ├── guest-proxy/          # guest 内代理：vsock 中继、exec、mount、umount
@@ -84,20 +83,20 @@ pip install -e .
 from terra.sandbox import Sandbox
 
 # Sandbox = 租户 VM 内的会话（租户优先模型）
-with Sandbox(tenant="my-org", template="py312", network=True) as sb:
-    result = sb.exec(["python3", "-c", "print(2+2)"])
-    print(result.stdout)              # "4\n"
+with Sandbox(tenant="my-org", template="alpine", network=True) as sb:
+    result = sb.exec("echo hello")
+    print(result.stdout)              # "hello\n"
     sb.files.write("/workdir/hello.txt", "Hello, Terrarium!")
     print(sb.files.read("/workdir/hello.txt"))
-    print(sb.id)                      # "tenant-my-org/sb-a3f2"
+    print(sb.id)                      # "sb-a3f2b1c4"（引擎分配的 id）
     print(sb.vm)                       # "tenant-my-org"
 
 # 多个 Sandbox 共享一个租户 VM
-sb1 = Sandbox(tenant="research-team", template="py312")
+sb1 = Sandbox(tenant="research-team", template="alpine")
 sb2 = Sandbox(tenant="research-team")   # 复用同一 VM，新工作目录
 sb3 = Sandbox(tenant="research-team")
 
-sb1.kill()  # 仅移除会话工作目录——VM 仍保留供其他 Sandbox 使用
+sb1.kill()  # 终止本会话（running 会话 + 工作目录）——VM 仍保留供其他 Sandbox 使用
 Sandbox.destroy_tenant("research-team")  # 销毁 VM 及所有会话
 ```
 
@@ -106,28 +105,33 @@ Sandbox.destroy_tenant("research-team")  # 销毁 VM 及所有会话
 ```python
 from terra.pool import Pool
 
-pool = Pool(template="py312", size=3)  # 3 个预热 VM
+pool = Pool(template="alpine", size=3)  # 3 个预热 VM
 sb1 = pool.acquire()                   # 共享池 VM 中的 Sandbox
 sb2 = pool.acquire()                   # 同一 VM，不同工作目录
-print(sb1.exec(["python3", "--version"]).stdout)
+print(sb1.exec(["uname", "-r"]).stdout)
 pool.release(sb1)                      # 归还池
 pool.release(sb2)
 ```
 
-**CLI**——资源分组，动词统一：
+**CLI**——三步跑起一个沙箱：
 
 ```bash
-sudo env "PATH=$PATH" terra daemon start                     # 引擎 daemon（root 才有 NAT 网络）
-terra image build kernel -n k612 --version 6.12               # 构建 guest 内核
-terra image build rootfs -n alpine                             # 构建发行版系统
-terra layer create -n python312 --rootfs alpine --script images/examples/python312.sh --kernel k612
-terra template create -n py312 --kernel k612 --rootfs alpine --layers python312,base
-terra sandbox create --tenant research-team --template py312 --net   # 租户优先沙箱
-terra sandbox kill tenant-research-team/sb-a3f2                        # 终止单个会话
-terra sandbox destroy-tenant research-team                             # 销毁 VM + 全部会话
-terra pool create -n mypool --size 3                                   # 预热池
-terra pool claim --template py312                                      # 认领就绪 Sandbox
-terra daemon config                                            # 引擎/池/网络/层一览
+terra setup alpine                             # 一次性：内核 + rootfs + initramfs + base 层（含 sandlock）+ 模板
+terra daemon start                             # 引擎 daemon（自动 sudo 提权；--no-root 免提权）
+terra sandbox create --template alpine --net   # 高层沙箱（VM 即租户边界）
+terra sandbox exec sb-xxxxxxxx -- echo hi      # 默认经 sandlock 沙箱化执行
+terra sandbox kill sb-xxxxxxxx                 # 终止会话（VM 保留）
+terra pool create -n mypool --size 3           # 预热池
+terra pool claim --template alpine             # 认领就绪 Sandbox
+terra daemon status                            # 引擎状态一览
+```
+
+`terra setup ubuntu` 对 ubuntu 做同样的事。工具层（python3 之类）基于发行版模板构建：
+
+```bash
+terra tool create -n python312 --template alpine --script images/examples/python312.sh
+terra tool ls
+terra tool remove -n python312
 ```
 
 **MCP**——将 agent 指向 stdio server：
@@ -138,11 +142,12 @@ terra daemon config                                            # 引擎/池/网�
 
 ## 特性
 
-- **高层 Sandbox API**——`terra.Sandbox` / `terra.AsyncSandbox`，采用租户优先模型：VM 是租户隔离边界，Sandbox 是 VM 内的会话。同一租户的多个 Sandbox 共享一个 VM，各自拥有独立工作目录。自动起 daemon，context manager 自动清理，支持文件操作（读/写/上传/下载/列举）、资源指标、在线扩缩。
+- **高层 Sandbox API**——`terra.Sandbox` / `terra.AsyncSandbox`，采用租户优先模型：VM 是租户隔离边界，Sandbox 是 VM 内的会话。Sandbox 是引擎级实体——引擎维护注册表（tenant → VM、sandbox → workdir），所有客户端共享同一视图。同一租户的多个 Sandbox 共享一个 VM，各自拥有独立工作目录。自动起 daemon，context manager 自动清理，支持文件操作（读/写/上传/下载/列举）、资源指标、在线扩缩。
+- **双层隔离**——租户之间是 KVM 微 VM；租户 VM 内部，每次 `Sandbox.exec` 都默认经 sandlock（Landlock/seccomp，由 `terra setup` 烘焙进系统层 `/usr/bin/sandlock`）约束运行。默认策略：系统目录只读，仅会话工作目录与 `/tmp` 可写，同 VM 其他会话的工作目录不可达；网络暂不限制。可用 `sandboxed=False` / `--no-sandbox` 逐次关闭。
 - **分层文件系统**——只读 EROFS 层在宿主侧星型组合（任意搭配、页缓存共享），经 virtiofs 暴露。发行版系统层来自配置驱动 pipeline（内置 alpine 与 ubuntu，新增仅需三行配置）。工具层通过在真实 VM 中配置环境、打包增量来构建——环境自证可用。
 - **预热池**——预启动的空转 VM 作为共享租户容器；acquire 返回池 VM 内的 Sandbox 会话。同一池的多次 acquire 共享同一 VM，各自拥有独立工作目录。任务结束归还复用。支持动态 `grow()` / `scale` 实时调整池大小。
-- **命名模板**——`terra.template.Template` 持久化内核 + 基础系统 + 工具层组合，CLI 与 SDK 统一通过名称引用。
-- **guest 内执行**——blocking 与 background 两种模式，经 guest agent 在 VM 内执行命令。支持会话追踪（`session_status`、`session_kill`、`session_list`）、单命令超时、结构化 `ExecResult`。
+- **命名模板**——`terra.template.Template` 持久化内核 + 基础系统 + 工具层组合，由 `terra setup` 或 SDK 写入，统一通过名称引用。
+- **guest 内执行**——blocking 与 background 两种模式，经 guest agent 在 VM 内执行命令。支持单命令超时、结构化 `ExecResult`。后台执行会话在协议层可追踪（`session_status`、`session_kill`、`session_list`），但目前没有随附客户端（CLI、SDK、MCP）暴露它们。
 - **网络**——`--net` 一键 NAT 联网（DHCP 即用），生命周期经 `terra net` 管理。
 - **动态扩缩**——CPU、内存免重启在线调整。
 - **零配置 Python SDK**——托管目录、二进制与镜像自动解析、daemon 自动启动、可编程宿主配置（`HostConfig`）。

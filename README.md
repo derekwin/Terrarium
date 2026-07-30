@@ -14,7 +14,7 @@ Terrarium is a scheduling and control layer for agent execution environments. It
 | Density | High | Low | **High (shared page-cache layers)** |
 | Provisioning | Fast | ~1s | **Warm pool (pre-booted VMs)** |
 | Environments | OCI image | Disk image | **Composable named layers** |
-| Backends | — | — | **Pluggable (CH, Sandlock, OpenShell)** |
+| Backends | — | — | **CH microVMs + in-guest Sandlock (`SandboxAdapter` trait for future backends)** |
 
 ## Architecture
 
@@ -28,7 +28,7 @@ Terrarium is a scheduling and control layer for agent execution environments. It
 │          ▼                             ▼                     │
 │  ┌───────────────┐            ┌────────────────┐            │
 │  │  CH Adapter   │            │ SandboxAdapter  │            │
-│  │  (VmAdapter)  │            │ Sandlock/OpenShell│          │
+│  │  (VmAdapter)  │            │    Sandlock     │          │
 │  └───────┬───────┘            └───────┬────────┘            │
 │          ▼                            ▼                      │
 │  ┌─────────────────────────────────────────────┐            │
@@ -45,7 +45,8 @@ Terrarium is a scheduling and control layer for agent execution environments. It
 ```
 
 The engine is decoupled from backends via two trait families:
-`VmAdapter` (Cloud Hypervisor) and `SandboxAdapter` (Sandlock, OpenShell).
+`VmAdapter` (Cloud Hypervisor) and `SandboxAdapter` (Sandlock today;
+the trait is kept as the extension point for future sandbox backends).
 
 ## Repository Structure
 
@@ -57,9 +58,8 @@ terrarium/
 │   ├── engine/               # Engine daemon: PyO3-backed lib with 7 command submodules
 │   ├── adapter/
 │   │   ├── traits/           # VmAdapter / SandboxAdapter traits, VmSpec, FsSpec, error types
-│   │   ├── cloud-hypervisor/ # CH adapter: 5 modules (FS/VM decoupled), virtiofs, hotplug, network, landlock
-│   │   ├── sandlock/         # Sandlock adapter (Landlock ABI capability gating)
-│   │   └── openshell/        # OpenShell adapter
+│   │   ├── cloud-hypervisor/ # CH adapter (FS/VM decoupled), virtiofs, hotplug, network, landlock
+│   │   └── sandlock/         # Sandlock adapter (Landlock/seccomp confinement; SandboxAdapter reference impl)
 │   ├── fs/                   # Independent filesystem crate: EROFS, cpio, layer build/list/remove (PyO3 bindings)
 │   ├── protocol/             # Shared Command / Response types (single source of truth)
 │   ├── guest-proxy/          # In-guest agent: vsock relay, exec, mount, umount
@@ -84,20 +84,20 @@ pip install -e .
 from terra.sandbox import Sandbox
 
 # Sandbox = session inside a tenant VM (tenant-first model)
-with Sandbox(tenant="my-org", template="py312", network=True) as sb:
-    result = sb.exec(["python3", "-c", "print(2+2)"])
-    print(result.stdout)              # "4\n"
+with Sandbox(tenant="my-org", template="alpine", network=True) as sb:
+    result = sb.exec("echo hello")
+    print(result.stdout)              # "hello\n"
     sb.files.write("/workdir/hello.txt", "Hello, Terrarium!")
     print(sb.files.read("/workdir/hello.txt"))
-    print(sb.id)                      # "tenant-my-org/sb-a3f2"
+    print(sb.id)                      # "sb-a3f2b1c4" (engine-allocated id)
     print(sb.vm)                      # "tenant-my-org"
 
 # Multiple sandboxes share one tenant VM
-sb1 = Sandbox(tenant="research-team", template="py312")
+sb1 = Sandbox(tenant="research-team", template="alpine")
 sb2 = Sandbox(tenant="research-team")   # reuses same VM, new workdir
 sb3 = Sandbox(tenant="research-team")
 
-sb1.kill()  # removes session workdir only — VM survives for siblings
+sb1.kill()  # kills this session (running execs + workdir) — VM survives for siblings
 Sandbox.destroy_tenant("research-team")  # destroys the VM and all sessions
 ```
 
@@ -106,28 +106,34 @@ Sandbox.destroy_tenant("research-team")  # destroys the VM and all sessions
 ```python
 from terra.pool import Pool
 
-pool = Pool(template="py312", size=3)  # 3 pre-booted VMs
+pool = Pool(template="alpine", size=3)  # 3 pre-booted VMs
 sb1 = pool.acquire()                   # Sandbox in a shared pool VM
 sb2 = pool.acquire()                   # same VM, different workdir
-print(sb1.exec(["python3", "--version"]).stdout)
+print(sb1.exec(["uname", "-r"]).stdout)
 pool.release(sb1)                      # back to idle
 pool.release(sb2)
 ```
 
-**CLI** — resource groups with uniform verbs:
+**CLI** — three steps to a running sandbox:
 
 ```bash
-sudo env "PATH=$PATH" terra daemon start                     # engine daemon (root enables NAT networking)
-terra image build kernel -n k612 --version 6.12               # build a guest kernel
-terra image build rootfs -n alpine                             # build a distro base system
-terra layer create -n python312 --rootfs alpine --script images/examples/python312.sh --kernel k612
-terra template create -n py312 --kernel k612 --rootfs alpine --layers python312,base
-terra sandbox create --tenant research-team --template py312 --net   # tenant-first sandbox
-terra sandbox kill tenant-research-team/sb-a3f2                       # kill one session
-terra sandbox destroy-tenant research-team                            # destroy VM + all sessions
-terra pool create -n mypool --size 3                                  # warm pool
-terra pool claim --template py312                                     # claim a ready sandbox
-terra daemon config                                            # engine, pool, net, layers at a glance
+terra setup alpine                             # one-time: kernel + rootfs + initramfs + base layer (with sandlock) + template
+terra daemon start                             # engine daemon (self-elevates via sudo; --no-root for rootless)
+terra sandbox create --template alpine --net   # high-level sandbox (VM = tenant)
+terra sandbox exec sb-xxxxxxxx -- echo hi      # sandboxed (sandlock) by default
+terra sandbox kill sb-xxxxxxxx                 # kill the session (VM survives)
+terra pool create -n mypool --size 3           # warm pool
+terra pool claim --template alpine             # claim a ready sandbox
+terra daemon status                            # engine state at a glance
+```
+
+`terra setup ubuntu` does the same for ubuntu. Tool layers (python3 and
+friends) are built on a distro template:
+
+```bash
+terra tool create -n python312 --template alpine --script images/examples/python312.sh
+terra tool ls
+terra tool remove -n python312
 ```
 
 **MCP** — point your agent at the stdio server:
@@ -138,11 +144,12 @@ terra daemon config                                            # engine, pool, n
 
 ## Features
 
-- **High-level Sandbox API** — `terra.Sandbox` / `terra.AsyncSandbox` with tenant-first model: VMs are tenant isolation boundaries, sandboxes are sessions within a VM. Multiple sandboxes in the same tenant share one VM with isolated workdirs. Automatic daemon start, context-manager cleanup, file operations (read/write/upload/download/list), metrics, and online resize.
+- **High-level Sandbox API** — `terra.Sandbox` / `terra.AsyncSandbox` with tenant-first model: VMs are tenant isolation boundaries, sandboxes are sessions within a VM. Sandboxes are engine-level entities — the engine keeps the registry (tenant → VM, sandbox → workdir), so every client shares one view. Multiple sandboxes in the same tenant share one VM with isolated workdirs. Automatic daemon start, context-manager cleanup, file operations (read/write/upload/download/list), metrics, and online resize.
+- **Two-layer isolation** — between tenants, KVM microVMs; within a tenant VM, every `Sandbox.exec` is confined by sandlock (Landlock/seccomp, baked into the system layer at `/usr/bin/sandlock` by `terra setup`). Default policy: read-only system dirs, read-write only the session workdir and `/tmp`, sibling sessions' workdirs unreachable; network unrestricted for now. Opt out per call with `sandboxed=False` / `--no-sandbox`.
 - **Layered filesystem** — read-only EROFS layers star-composed on the host (arbitrary combinations, shared page cache), exposed via virtiofs. Distro base layers come from a config-driven pipeline (alpine and ubuntu ship today; more are a 3-line config). Tool layers are built by configuring a real VM and packing the delta, so environments are runnable by construction.
 - **Warm pool** — pre-booted idle VMs as shared tenant containers; acquiring returns a sandbox session within a pool VM. Multiple acquires from the same pool share the same VM with isolated workdirs. Pool VMs release back to idle for reuse. Dynamic `grow()` / `scale` for live size adjustment.
-- **Named templates** — `terra.template.Template` persists kernel + base distro + tool layer compositions. `template create` / `template ls` / `template remove` managed from CLI or SDK.
-- **In-guest exec** — blocking and background execution inside VMs through the guest agent, with session tracking (`session_status`, `session_kill`, `session_list`), per-command timeouts, and structured `ExecResult`.
+- **Named templates** — `terra.template.Template` persists kernel + base distro + tool layer compositions, written by `terra setup` or the SDK.
+- **In-guest exec** — blocking and background execution inside VMs through the guest agent, per-command timeouts, and structured `ExecResult`. Background sessions are tracked at the protocol level (`session_status`, `session_kill`, `session_list`); no shipped client (CLI, SDK, MCP) exposes them yet.
 - **Networking** — one-flag NAT networking (`--net`) with DHCP; lifecycle managed via `terra net`.
 - **Dynamic resize** — CPU and memory online adjustment without reboot.
 - **Zero-config Python SDK** — managed directories, automatic binary and image resolution, daemon auto-start, programmable host configuration (`HostConfig`).

@@ -41,7 +41,7 @@ stdout 仅承载 JSON-RPC 消息。
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `terra_exec` | `name`, `args` (array), `timeout_secs?` | VM 内执行命令（guest agent 启动窗口自动重试） |
+| `terra_exec` | `name`, `args` (array), `timeout_secs?` | VM 内执行命令（guest agent 启动窗口自动重试）。注意：MCP 发送的是普通 exec（不带 `sandbox` 标志），**不经 sandlock 约束**——已知缺口，待补 |
 
 ### 池
 
