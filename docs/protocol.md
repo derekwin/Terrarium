@@ -37,7 +37,7 @@ TCP + token 时，客户端先发送一行 token，再发送命令行。
 
 | command | 字段 | 说明 |
 |---|---|---|
-| `exec` | `name`, `args`, `timeout_secs?`, `exec_mode?`, `sandbox?` | 经 guest-proxy（vsock）在 VM 内执行，返回 `{stdout, stderr, exit_code}`。`exec_mode` 可选 `"blocking"`（默认）或 `"background"`（返回 `{session_id}`）。`sandbox: true` 时在 guest 内经 sandlock（Landlock/seccomp）约束运行。默认 60s，上限 3600s |
+| `exec` | `name`, `args`, `timeout_secs?`, `exec_mode?`, `sandbox?`, `policy?` | 经 guest-proxy（vsock）在 VM 内执行，返回 `{stdout, stderr, exit_code}`。`exec_mode` 可选 `"blocking"`（默认）或 `"background"`（返回 `{session_id}`）。`sandbox: true` 时在 guest 内经 sandlock（Landlock/seccomp）约束运行。默认 60s，上限 3600s |
 
 `sandbox: true` 的默认策略（hardcode 在 guest-proxy）：只读授予
 `/usr /lib /lib64 /bin /sbin /etc /tmp`（按存在性过滤）与
@@ -62,12 +62,32 @@ Sandbox 是租户共享 VM（`tenant-<tenant>`）内的一个会话（独立工�
 
 | command | 字段 | 说明 |
 |---|---|---|
-| `sandbox_create` | `tenant`, `kernel?`, `initramfs?`, `layers?`, `system?`, `cpus?`, `memory_mb?`, `net?` | 幂等确保租户 VM 存在（已存在则复用，忽略 VM 规格字段；租户名按 VmName 白名单校验），分配 sandbox 并在 guest 建工作目录，返回 `{id: "sb-<8hex>", vm: "tenant-<tenant>", workdir: "/workdir/sb-<hex>"}` |
-| `sandbox_exec` | `id`, `args`, `timeout_secs?`, `exec_mode?`, `sandbox?` | 在租户 VM 内执行，cwd 由引擎设为该 sandbox 的工作目录。`sandbox` 缺省为 **true**（sandlock 约束）。blocking 返回 `{stdout, stderr, exit_code}`；`exec_mode: "background"` 返回 `{session_id, sandbox, status: "started"}` |
-| `sandbox_list` | `tenant?` | 列出 sandbox 记录（可按租户过滤），返回 `{sandboxes: [{id, tenant, vm, workdir, created_at}], count}` |
-| `sandbox_info` | `id` | 单个 sandbox 记录，字段同上 |
+| `sandbox_create` | `tenant`, `kernel?`, `initramfs?`, `layers?`, `system?`, `cpus?`, `memory_mb?`, `net?`, `policy?` | 幂等确保租户 VM 存在（已存在则复用，忽略 VM 规格字段；租户名按 VmName 白名单校验），分配 sandbox 并在 guest 建工作目录，返回 `{id: "sb-<8hex>", vm: "tenant-<tenant>", workdir: "/workdir/sb-<hex>"}`。`policy` 存入 sandbox 记录 |
+| `sandbox_exec` | `id`, `args`, `timeout_secs?`, `exec_mode?`, `sandbox?`, `policy?` | 在租户 VM 内执行，cwd 由引擎设为该 sandbox 的工作目录。`sandbox` 缺省为 **true**（sandlock 约束）。blocking 返回 `{stdout, stderr, exit_code}`；`exec_mode: "background"` 返回 `{session_id, sandbox, status: "started"}`。`policy` 为单次覆盖 |
+| `sandbox_list` | `tenant?` | 列出 sandbox 记录（可按租户过滤），返回 `{sandboxes: [{id, tenant, vm, workdir, created_at, policy}], count}` |
+| `sandbox_info` | `id` | 单个 sandbox 记录，字段同上（含存入的 `policy`） |
 | `sandbox_kill` | `id` | 真实终止该 sandbox 的全部 running 会话（killpg）→ guest 内 `rm -rf` 工作目录 → 删除注册记录；**共享租户 VM 保持运行**。返回 `{id, sessions_killed, status: "killed"}` |
 | `tenant_destroy` | `tenant` | 销毁租户 VM（语义同 `destroy`）并级联删除该租户全部 sandbox 记录，返回 `{tenant, vm, sandboxes_removed, status: "destroyed"}` |
+
+**`policy` 对象**（`exec` / `sandbox_create` / `sandbox_exec` 通用，同一形状）：
+
+```json
+{"read_paths": ["/opt/data"], "write_paths": ["/output"],
+ "net_allow": ["api.openai.com:443", "pypi.org"], "memory_mb": 512, "procs": 20}
+```
+
+- `read_paths` / `write_paths`：额外只读/读写路径授予，**追加**在内置默认
+  策略之上（不替换）；必须是绝对路径。
+- `net_allow`：缺省（字段省略）→ 出站网络不限制（现状默认）；出现 →
+  sandlock `--net-allow` 逐条放行、其余默认拒绝。**必须非空**——空列表在
+  客户端/引擎/guest-proxy 三层都是硬错误（"net_allow must be a non-empty
+  list (omit the field for unrestricted network)"），因为零条旗标会静默
+  变成不限制。
+- `memory_mb` / `procs`：sandlock 资源限制（`-m <n>M` / `-P <n>`）。
+- `policy` 与 `"sandbox": false` 同现 → 报错（策略只在沙箱化执行时有意义）。
+- 存放与覆盖：`sandbox_create` 的 policy 存入记录（`sandbox_info` /
+  `sandbox_list` 回显），后续 `sandbox_exec` 继承；`sandbox_exec` 自带的
+  policy 仅对该次调用生效，不影响已存策略。未知字段一律拒绝。
 
 ### 文件系统（分层 virtiofs）
 

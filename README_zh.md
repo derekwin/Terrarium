@@ -143,7 +143,7 @@ terra tool remove -n python312
 ## 特性
 
 - **高层 Sandbox API**——`terra.Sandbox` / `terra.AsyncSandbox`，采用租户优先模型：VM 是租户隔离边界，Sandbox 是 VM 内的会话。Sandbox 是引擎级实体——引擎维护注册表（tenant → VM、sandbox → workdir），所有客户端共享同一视图。同一租户的多个 Sandbox 共享一个 VM，各自拥有独立工作目录。自动起 daemon，context manager 自动清理，支持文件操作（读/写/上传/下载/列举）、资源指标、在线扩缩。
-- **双层隔离**——租户之间是 KVM 微 VM；租户 VM 内部，每次 `Sandbox.exec` 都默认经 sandlock（Landlock/seccomp，由 `terra setup` 烘焙进系统层 `/usr/bin/sandlock`）约束运行。默认策略：系统目录只读，仅会话工作目录与 `/tmp` 可写，同 VM 其他会话的工作目录不可达；网络暂不限制。可用 `sandboxed=False` / `--no-sandbox` 逐次关闭。
+- **双层隔离**——租户之间是 KVM 微 VM；租户 VM 内部，每次 `Sandbox.exec` 都默认经 sandlock（Landlock/seccomp，由 `terra setup` 烘焙进系统层 `/usr/bin/sandlock`）约束运行。默认策略：系统目录只读，仅会话工作目录与 `/tmp` 可写，同 VM 其他会话的工作目录不可达；网络暂不限制。策略可由用户控制——额外文件系统授予、出站白名单（`net_allow`）、内存/进程数限制，在创建 sandbox 时设定或逐次 exec 覆盖（`Sandbox(policy={...})` / CLI `--read-path/--write-path/--net-allow/--memory-mb/--procs`）。可用 `sandboxed=False` / `--no-sandbox` 逐次关闭。
 - **分层文件系统**——只读 EROFS 层在宿主侧星型组合（任意搭配、页缓存共享），经 virtiofs 暴露。发行版系统层来自配置驱动 pipeline（内置 alpine 与 ubuntu，新增仅需三行配置）。工具层通过在真实 VM 中配置环境、打包增量来构建——环境自证可用。
 - **预热池**——预启动的空转 VM 作为共享租户容器；acquire 返回池 VM 内的 Sandbox 会话。同一池的多次 acquire 共享同一 VM，各自拥有独立工作目录。任务结束归还复用。支持动态 `grow()` / `scale` 实时调整池大小。
 - **命名模板**——`terra.template.Template` 持久化内核 + 基础系统 + 工具层组合，由 `terra setup` 或 SDK 写入，统一通过名称引用。

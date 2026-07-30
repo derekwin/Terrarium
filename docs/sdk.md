@@ -100,6 +100,15 @@ except ExecError as e:
 # 自定义 cwd / env / timeout
 result = sb.exec(["ls", "-la"], cwd="/tmp", env={"LANG": "C.UTF-8"}, timeout=30)
 
+# 执行策略（policy）——创建时存放，引擎回显于 sb.policy
+sb = Sandbox(tenant="my-org", template="py312",
+             policy={"net_allow": ["api.openai.com:443"], "memory_mb": 512})
+print(sb.policy)    # {"net_allow": [...], "memory_mb": 512}
+
+# exec(policy=...) — 单次覆盖（仅该次调用生效，已存策略不受影响）
+result = sb.exec(["make", "test"],
+                 policy={"write_paths": ["/output"], "procs": 20})
+
 # 文件操作（通过 sb.files）
 sb.files.write("/workdir/hello.txt", "Hello from host!")
 content = sb.files.read("/workdir/hello.txt")
@@ -131,6 +140,12 @@ with Sandbox(tenant="my-org", template="py312") as sb:
 > 同 VM 其他会话的工作目录不可达，网络暂不限制。镜像缺少 sandlock 二进制
 > 时是硬错误（无静默回退）。仅当确实需要写系统路径（如调试、安装软件包）
 > 时才用 `sandboxed=False`。
+>
+> **policy dict**（`Sandbox(policy=...)` 存放、`exec(policy=...)` 单次覆盖）：
+> `read_paths` / `write_paths` 追加路径授予（须绝对路径）；`net_allow`
+> 使出站变为默认拒绝、仅放行列表项（**必须非空**，省略字段才是不限制）；
+> `memory_mb` / `procs` 为资源限制。policy 不能配 `sandboxed=False`（报错）。
+> 注意：`net_allow` 的出站 ACL 尚未在带 NAT 的环境实测（需 root daemon）。
 
 ### `terra.AsyncSandbox`
 
@@ -364,9 +379,12 @@ terra daemon stop                                           # 优雅停止
 ```
 terra sandbox create [--template <name>] [--layers L1,L2] [--kernel <var>]
                      [--cpu N] [--memory MB] [--net] [--env KEY=VALUE] [--timeout SEC]
-terra sandbox ls
-terra sandbox info <id>
-terra sandbox exec <id> [--cwd PATH] [--env KEY=VALUE] [--timeout SEC] [--no-sandbox] -- COMMAND...
+                     [--read-path PATH]... [--write-path PATH]...
+                     [--net-allow HOST[:PORT]]... [--memory-mb N] [--procs N]
+terra sandbox ls                     # 列出引擎注册表中的 sandbox（含 policy）
+terra sandbox info <id>              # 单个 sandbox（含存入的 policy）
+terra sandbox exec <id> [--cwd PATH] [--env KEY=VALUE] [--timeout SEC]
+                      [--no-sandbox] [--net-allow HOST[:PORT]]... -- COMMAND...
 terra sandbox cp <src> <dst>    # 本地路径 或 <id>:/path
 terra sandbox resize <id> [--cpu N] [--memory MB]   # 作用于整个租户 VM
 terra sandbox metrics <id>
@@ -379,6 +397,11 @@ terra sandbox destroy-tenant <tenant>   # 销毁租户 VM 及其全部 sandbox
 VM 名回退）。`exec` 默认经 sandlock（Landlock/seccomp）沙箱化执行（同
 Python API 的 `sandboxed=True`）；`--no-sandbox` 为逃生舱。镜像缺少
 sandlock 二进制时报错（先跑 `terra setup` 将其烘焙进系统层）。
+
+policy 旗标（`create` 存放、`exec --net-allow` 单次覆盖）对应协议
+`policy` 对象：路径授予须绝对路径且在默认策略上追加；`--net-allow`
+使出站默认拒绝、仅放行所列主机（至少给一条）；`--memory-mb` /
+`--procs` 为每次 exec 的资源限制。
 
 **tool** — 工具层（系统资源由 `terra setup` 准备；工具层一律用 `tool create` 构建）
 
