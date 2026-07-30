@@ -7,7 +7,6 @@ members = [
     "crates/adapter/traits",
     "crates/adapter/cloud-hypervisor",
     "crates/adapter/sandlock",
-    "crates/adapter/openshell",
     "crates/network",
     "crates/protocol",
     "crates/fs",
@@ -17,7 +16,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/terrarium/Terrarium"
+repository = "https://github.com/derekwin/Terrarium"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
