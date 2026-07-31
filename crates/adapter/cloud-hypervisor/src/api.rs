@@ -1,46 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// VM configuration used when creating a new VM.
-///
-/// Matches the Cloud Hypervisor `VmConfig` schema (CH openapi): the kernel
-/// lives under `payload`, and `console` is a `{mode: ...}` object — not
-/// top-level string fields.
-#[derive(Debug, Clone, Serialize)]
-pub struct VmConfig {
-    /// Boot payload: kernel image plus optional cmdline/initramfs.
-    pub payload: PayloadConfig,
-    /// vCPU configuration.
-    pub cpus: CpusConfig,
-    /// Memory configuration.
-    pub memory: MemoryConfig,
-    /// Disk configuration.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub disks: Vec<DiskConfig>,
-    /// Console configuration.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub console: Option<ConsoleConfig>,
-}
-
-/// Boot payload (the `payload` object of CH `VmConfig`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PayloadConfig {
-    /// Path to the kernel image (vmlinux.bin / bzImage).
-    pub kernel: String,
-    /// Kernel command line parameters.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cmdline: Option<String>,
-    /// Path to the initramfs image.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub initramfs: Option<String>,
-}
-
-/// Console configuration (CH expects a `{mode: ...}` object).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConsoleConfig {
-    /// Console mode: "Off", "Null", "Pty", "Serial", "Tty", or "File".
-    pub mode: String,
-}
-
 /// vCPU configuration for a VM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpusConfig {
@@ -66,16 +25,6 @@ pub struct MemoryConfig {
     pub hotplug_method: Option<String>,
 }
 
-/// Disk configuration for a VM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiskConfig {
-    /// Path to the disk image.
-    pub path: String,
-    /// Optional disk identifier for later operations like resize-disk.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-}
-
 /// Resize parameters: vCPUs and/or memory.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResizeConfig {
@@ -85,9 +34,6 @@ pub struct ResizeConfig {
     /// Desired amount of RAM in bytes (if changing).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub desired_ram: Option<u64>,
-    /// Desired balloon size in bytes (if changing).
-    #[serde(skip_serializing_if = "Option::is_none", rename = "desired_balloon")]
-    pub balloon_size: Option<u64>,
 }
 
 /// VM information from vm.info endpoint.

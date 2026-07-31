@@ -67,10 +67,7 @@ fn match_req(req: &str) -> String {
     let (method, path) = parse_request_line(req);
 
     match (method.as_str(), path.as_str()) {
-        ("PUT", "/api/v1/vm.create") => responses::HTTP_NO_CONTENT.to_string(),
-        ("PUT", "/api/v1/vm.boot") => responses::HTTP_NO_CONTENT.to_string(),
         ("PUT", "/api/v1/vm.shutdown") => responses::HTTP_NO_CONTENT.to_string(),
-        ("PUT", "/api/v1/vm.delete") => responses::HTTP_NO_CONTENT.to_string(),
         ("PUT", "/api/v1/vm.resize") => responses::HTTP_NO_CONTENT.to_string(),
         ("PUT", "/api/v1/vm.resize-disk") => responses::HTTP_NO_CONTENT.to_string(),
         ("PUT", "/api/v1/vm.add-disk") => responses::HTTP_NO_CONTENT.to_string(),
@@ -96,48 +93,12 @@ fn parse_request_line(req: &str) -> (String, String) {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_vm_create() {
+async fn test_vm_shutdown() {
     let server = start_mock_server();
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     let client = ChClient::new(&server.socket_path);
-    let config = VmConfig {
-        payload: PayloadConfig {
-            kernel: "/path/to/vmlinux.bin".into(),
-            cmdline: Some("console=ttyS0".into()),
-            initramfs: None,
-        },
-        cpus: CpusConfig { boot: 2, max: 16 },
-        memory: MemoryConfig {
-            size: 512 * 1024 * 1024,
-            hotplug_size: Some(32 * 1024 * 1024 * 1024),
-            hotplug_method: Some("VirtioMem".into()),
-        },
-        disks: vec![],
-        console: Some(ConsoleConfig { mode: "Off".into() }),
-    };
-
-    // vm.create returns HTTP 204 No Content on success
-    client.vm_create(&config).await.expect("vm_create");
-}
-
-#[tokio::test]
-async fn test_vm_boot_and_shutdown() {
-    let server = start_mock_server();
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let client = ChClient::new(&server.socket_path);
-    client.vm_boot().await.expect("vm_boot");
     client.vm_shutdown().await.expect("vm_shutdown");
-}
-
-#[tokio::test]
-async fn test_vm_delete() {
-    let server = start_mock_server();
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let client = ChClient::new(&server.socket_path);
-    client.vm_delete().await.expect("vm_delete");
 }
 
 #[tokio::test]
@@ -174,58 +135,8 @@ async fn test_vm_resize() {
 #[tokio::test]
 async fn test_connection_refused() {
     let client = ChClient::new("/tmp/nonexistent-ch-socket.sock");
-    let config = VmConfig {
-        payload: PayloadConfig {
-            kernel: "/path/to/vmlinux.bin".into(),
-            cmdline: None,
-            initramfs: None,
-        },
-        cpus: CpusConfig { boot: 1, max: 1 },
-        memory: MemoryConfig {
-            size: 256 * 1024 * 1024,
-            hotplug_size: None,
-            hotplug_method: None,
-        },
-        disks: vec![],
-        console: None,
-    };
-
-    let result = client.vm_create(&config).await;
+    let result = client.vm_info().await;
     assert!(result.is_err());
-}
-
-#[test]
-fn test_vm_config_serialization() {
-    // Lock the CH openapi VmConfig shape: kernel under `payload`, console
-    // as a {mode} object, hotplug_method explicit for virtio-mem.
-    let config = VmConfig {
-        payload: PayloadConfig {
-            kernel: "/path/to/vmlinux.bin".into(),
-            cmdline: Some("console=ttyS0".into()),
-            initramfs: None,
-        },
-        cpus: CpusConfig { boot: 2, max: 16 },
-        memory: MemoryConfig {
-            size: 512 * 1024 * 1024,
-            hotplug_size: Some(32 * 1024 * 1024 * 1024),
-            hotplug_method: Some("VirtioMem".into()),
-        },
-        disks: vec![DiskConfig {
-            path: "/tmp/overlay.qcow2".into(),
-            id: Some("root".into()),
-        }],
-        console: Some(ConsoleConfig { mode: "Off".into() }),
-    };
-
-    let json: serde_json::Value =
-        serde_json::from_str(&serde_json::to_string(&config).expect("serialize")).expect("parse");
-
-    assert_eq!(json["payload"]["kernel"], "/path/to/vmlinux.bin");
-    assert!(json.get("kernel").is_none(), "kernel must not be top-level");
-    assert_eq!(json["cpus"]["boot_vcpus"], 2);
-    assert_eq!(json["memory"]["hotplug_method"], "VirtioMem");
-    assert_eq!(json["console"]["mode"], "Off");
-    assert_eq!(json["disks"][0]["id"], "root");
 }
 
 #[test]
@@ -233,7 +144,6 @@ fn test_resize_config_serialization() {
     let config = ResizeConfig {
         desired_vcpus: Some(4),
         desired_ram: Some(8 * 1024 * 1024 * 1024),
-        balloon_size: None,
     };
 
     let json = serde_json::to_string(&config).expect("serialize");
@@ -241,5 +151,4 @@ fn test_resize_config_serialization() {
 
     assert_eq!(parsed["desired_vcpus"], 4);
     assert_eq!(parsed["desired_ram"], 8u64 * 1024 * 1024 * 1024);
-    assert!(parsed.get("balloon_size").is_none());
 }

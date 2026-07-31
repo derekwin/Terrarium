@@ -142,25 +142,8 @@ impl ChClient {
     // VM Lifecycle API
     // -----------------------------------------------------------------------
 
-    pub async fn vm_create(&self, config: &VmConfig) -> Result<()> {
-        let body = serde_json::to_string(config)?;
-        self.request("PUT", "/api/v1/vm.create", Some(&body))
-            .await?;
-        Ok(())
-    }
-
-    pub async fn vm_boot(&self) -> Result<()> {
-        self.request("PUT", "/api/v1/vm.boot", None).await?;
-        Ok(())
-    }
-
     pub async fn vm_shutdown(&self) -> Result<()> {
         self.request("PUT", "/api/v1/vm.shutdown", None).await?;
-        Ok(())
-    }
-
-    pub async fn vm_delete(&self) -> Result<()> {
-        self.request("PUT", "/api/v1/vm.delete", None).await?;
         Ok(())
     }
 
@@ -181,19 +164,6 @@ impl ChClient {
         let config = ResizeConfig {
             desired_vcpus,
             desired_ram,
-            balloon_size: None,
-        };
-        let body = serde_json::to_string(&config)?;
-        self.request("PUT", "/api/v1/vm.resize", Some(&body))
-            .await?;
-        Ok(())
-    }
-
-    pub async fn vm_balloon(&self, size: u64) -> Result<()> {
-        let config = ResizeConfig {
-            desired_vcpus: None,
-            desired_ram: None,
-            balloon_size: Some(size),
         };
         let body = serde_json::to_string(&config)?;
         self.request("PUT", "/api/v1/vm.resize", Some(&body))
