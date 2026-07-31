@@ -58,6 +58,87 @@ pub(crate) fn validate_policy(policy: &adapter_traits::ExecPolicy) -> Result<(),
     Ok(())
 }
 
+/// Shared blocking/background exec dispatch for `exec` and `sandbox_exec`:
+/// clamps the timeout, defaults the sandbox flag, gates and validates the
+/// policy, then routes to the manager. `sandbox_flag` is the caller's
+/// explicit value (None → `sandbox_default`); `sandbox_id`, when present,
+/// links a background session to an engine sandbox and adds the `sandbox`
+/// field to the response.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_exec(
+    mgr: &mut VmManager,
+    vm_name: &str,
+    args: &[String],
+    timeout_secs: Option<u64>,
+    sandbox_default: bool,
+    sandbox_flag: Option<bool>,
+    policy: Option<adapter_traits::ExecPolicy>,
+    work_dir: Option<&str>,
+    exec_mode: Option<String>,
+    sandbox_id: Option<String>,
+) -> Response {
+    if args.is_empty() {
+        return Response::err("Missing 'args' field");
+    }
+    let timeout = timeout_secs.unwrap_or(60).min(3600);
+    let sandbox = sandbox_flag.unwrap_or(sandbox_default);
+    if !sandbox && policy.is_some() {
+        return Response::err("'policy' requires sandboxed exec (set 'sandbox': true)");
+    }
+    if let Some(policy) = policy.as_ref() {
+        if let Err(resp) = validate_policy(policy) {
+            return resp;
+        }
+    }
+
+    let mode = exec_mode.as_deref().unwrap_or("blocking");
+    match mode {
+        "background" => {
+            let session_id = uuid::Uuid::new_v4().to_string();
+            match mgr
+                .exec_background(
+                    vm_name,
+                    args,
+                    timeout,
+                    sandbox,
+                    &session_id,
+                    work_dir,
+                    sandbox_id.clone(),
+                    policy,
+                )
+                .await
+            {
+                Ok(()) => {
+                    let mut data = serde_json::json!({
+                        "session_id": session_id,
+                        "status": "started",
+                    });
+                    if let Some(id) = sandbox_id {
+                        data["sandbox"] = serde_json::Value::String(id);
+                    }
+                    Response::ok(data)
+                }
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+        "blocking" => match mgr
+            .exec(vm_name, args, timeout, sandbox, work_dir, policy)
+            .await
+        {
+            Ok(r) => Response::ok(serde_json::json!({
+                "stdout": r.stdout,
+                "stderr": r.stderr,
+                "exit_code": r.exit_code,
+            })),
+            Err(e) => Response::err(e.to_string()),
+        },
+        other => Response::err(format!(
+            "invalid exec_mode {:?}: expected \"blocking\" or \"background\"",
+            other
+        )),
+    }
+}
+
 /// The system base is implicit: tool layers stack on top of it. Append it
 /// unless the caller already ended the layer list with one.
 pub(crate) fn apply_system_base(cmd: &mut Command) {

@@ -1,4 +1,4 @@
-use super::require_name;
+use super::{require_name, run_exec};
 use crate::manager::VmManager;
 use terrarium_protocol::{Command, Response};
 
@@ -7,59 +7,17 @@ pub(crate) async fn cmd_exec(mgr: &mut VmManager, cmd: Command) -> Response {
         Ok(n) => n,
         Err(resp) => return resp,
     };
-    if cmd.args.is_empty() {
-        return Response::err("Missing 'args' field");
-    }
-    let timeout = cmd.timeout_secs.unwrap_or(60).min(3600);
-    let sandbox = cmd.sandbox.unwrap_or(false);
-    if !sandbox && cmd.policy.is_some() {
-        return Response::err("'policy' requires sandboxed exec (set 'sandbox': true)");
-    }
-    if let Some(policy) = cmd.policy.as_ref() {
-        if let Err(resp) = super::validate_policy(policy) {
-            return resp;
-        }
-    }
-    let policy = cmd.policy.clone();
-
-    let mode = cmd.exec_mode.as_deref().unwrap_or("blocking");
-    match mode {
-        "background" => {
-            let session_id = uuid::Uuid::new_v4().to_string();
-            match mgr
-                .exec_background(
-                    &name,
-                    &cmd.args,
-                    timeout,
-                    sandbox,
-                    &session_id,
-                    None,
-                    None,
-                    policy,
-                )
-                .await
-            {
-                Ok(()) => Response::ok(serde_json::json!({
-                    "session_id": session_id,
-                    "status": "started",
-                })),
-                Err(e) => Response::err(e.to_string()),
-            }
-        }
-        "blocking" => match mgr
-            .exec(&name, &cmd.args, timeout, sandbox, None, policy)
-            .await
-        {
-            Ok(r) => Response::ok(serde_json::json!({
-                "stdout": r.stdout,
-                "stderr": r.stderr,
-                "exit_code": r.exit_code,
-            })),
-            Err(e) => Response::err(e.to_string()),
-        },
-        other => Response::err(format!(
-            "invalid exec_mode {:?}: expected \"blocking\" or \"background\"",
-            other
-        )),
-    }
+    run_exec(
+        mgr,
+        &name,
+        &cmd.args,
+        cmd.timeout_secs,
+        false, // VM-scoped exec defaults to unsandboxed.
+        cmd.sandbox,
+        cmd.policy.clone(),
+        None,
+        cmd.exec_mode.clone(),
+        None,
+    )
+    .await
 }

@@ -4,7 +4,7 @@
 //! isolation inside the VM is enforced guest-side by sandlock. The engine
 //! owns the registry: tenant → VM, sandbox id → {tenant, workdir}.
 
-use super::{apply_system_base, build_spec, DEFAULT_SYSTEM};
+use super::{apply_system_base, build_spec, run_exec, DEFAULT_SYSTEM};
 use crate::manager::{SandboxRecord, VmManager};
 use adapter_traits::VmName;
 use terrarium_protocol::{Command, Response};
@@ -199,72 +199,21 @@ pub(crate) async fn cmd_sandbox_exec(mgr: &mut VmManager, cmd: Command) -> Respo
         Some(r) => r,
         None => return Response::err(format!("Sandbox '{}' not found", id)),
     };
-    if cmd.args.is_empty() {
-        return Response::err("Missing 'args' field");
-    }
-    let timeout = cmd.timeout_secs.unwrap_or(60).min(3600);
-    let sandbox = cmd.sandbox.unwrap_or(true);
     // Per-call policy overrides the one stored at sandbox_create.
     let policy = cmd.policy.clone().or(record.policy.clone());
-    if !sandbox && policy.is_some() {
-        return Response::err("'policy' requires sandboxed exec (set 'sandbox': true)");
-    }
-    if let Some(p) = policy.as_ref() {
-        if let Err(resp) = super::validate_policy(p) {
-            return resp;
-        }
-    }
-
-    let mode = cmd.exec_mode.as_deref().unwrap_or("blocking");
-    match mode {
-        "background" => {
-            let session_id = uuid::Uuid::new_v4().to_string();
-            match mgr
-                .exec_background(
-                    &record.vm_name,
-                    &cmd.args,
-                    timeout,
-                    sandbox,
-                    &session_id,
-                    Some(&record.workdir),
-                    Some(id.clone()),
-                    policy,
-                )
-                .await
-            {
-                Ok(()) => Response::ok(serde_json::json!({
-                    "session_id": session_id,
-                    "sandbox": id,
-                    "status": "started",
-                })),
-                Err(e) => Response::err(e.to_string()),
-            }
-        }
-        "blocking" => {
-            match mgr
-                .exec(
-                    &record.vm_name,
-                    &cmd.args,
-                    timeout,
-                    sandbox,
-                    Some(&record.workdir),
-                    policy,
-                )
-                .await
-            {
-                Ok(r) => Response::ok(serde_json::json!({
-                    "stdout": r.stdout,
-                    "stderr": r.stderr,
-                    "exit_code": r.exit_code,
-                })),
-                Err(e) => Response::err(e.to_string()),
-            }
-        }
-        other => Response::err(format!(
-            "invalid exec_mode {:?}: expected \"blocking\" or \"background\"",
-            other
-        )),
-    }
+    run_exec(
+        mgr,
+        &record.vm_name,
+        &cmd.args,
+        cmd.timeout_secs,
+        true, // sandboxed by default.
+        cmd.sandbox,
+        policy,
+        Some(&record.workdir),
+        cmd.exec_mode.clone(),
+        Some(id.clone()),
+    )
+    .await
 }
 
 /// {"command":"sandbox_list","tenant"?}
