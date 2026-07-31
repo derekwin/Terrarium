@@ -165,6 +165,12 @@ impl Command {
         self
     }
 
+    /// Builder: set kernel path.
+    pub fn with_kernel(mut self, path: impl Into<String>) -> Self {
+        self.kernel = Some(path.into());
+        self
+    }
+
     /// Builder: set vCPUs.
     pub fn with_cpus(mut self, cpus: u8) -> Self {
         self.cpus = Some(cpus);
