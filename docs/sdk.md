@@ -74,7 +74,8 @@ sb = Sandbox(tenant="my-org", layers=["python312", "base"],
 # 属性
 print(sb.id)        # 引擎分配的 id："sb-a3f2b1c4"（sb-<8hex>）
 print(sb.tenant)    # 租户标识："my-org"
-print(sb.vm)        # VM 名称："tenant-my-org"
+print(sb.vm)        # VM 名称：冷启动 "tenant-my-org"；池认领则 "pool-N"
+print(sb.pool_backed)  # True → 租户 VM 来自预热池（毫秒级热启动）
 print(sb.status)    # "running" / "stopped" / "paused"
 print(sb.backend)   # "ch" (Cloud Hypervisor)
 
@@ -125,14 +126,16 @@ metrics = sb.metrics()   # {cpu_count: 4, memory_mb: 1024}
 
 # 生命周期
 sb.kill()                # 终止本会话全部 running 会话 + 移除工作目录，VM 保留供同租户其余 Sandbox 使用
-Sandbox.destroy_tenant("my-org")  # 销毁租户 VM 及全部会话
+Sandbox.destroy_tenant("my-org")  # 销毁/归还租户 VM 及全部会话（池 VM 洗净归还，冷启动 VM 销毁）
 
 # Context manager — 自动 kill
 with Sandbox(tenant="my-org", template="py312") as sb:
     print(sb.exec(["uname", "-a"]).stdout)
 ```
 
-> **注意：** `sb.kill()` 终止当前 sandbox 的 running 会话并移除其工作目录（引擎级 `sandbox_kill`），不会销毁 VM（同租户的其他 Sandbox 仍需使用）。要完全销毁租户 VM，使用 `Sandbox.destroy_tenant("tenant-name")`（引擎级 `tenant_destroy`，级联回收全部 sandbox）。
+> **注意：** `sb.kill()` 终止当前 sandbox 的 running 会话并移除其工作目录（引擎级 `sandbox_kill`），不会销毁 VM（同租户的其他 Sandbox 仍需使用）。要完全销毁租户 VM，使用 `Sandbox.destroy_tenant("tenant-name")`（引擎级 `tenant_destroy`，级联回收全部 sandbox；若该租户 VM 来自预热池则洗净归还池中复用，而非销毁）。
+>
+> **预热池集成：** 租户首次创建 sandbox 时，引擎优先从预热池认领一台空闲 VM（`pool` 参数，默认 True，毫秒级热启动）；池空或无池则回退冷启动（秒级）。`Sandbox(..., pool=False)` 强制冷启动专用 `tenant-<t>` VM。池认领的租户 VM 名是 `pool-N`（`sb.pool_backed == True`），同租户后续 sandbox 依旧复用该 VM。
 
 > **沙箱化执行（`sandboxed=True`，默认）：** 命令在 guest 内经 sandlock
 > （Landlock/seccomp，由 `terra setup` 烘焙进系统层的 `/usr/bin/sandlock`）
