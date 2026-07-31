@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use base64::Engine as _;
 use crate::client::send_to_engine;
+use base64::Engine as _;
 use terrarium_protocol::Command;
 
 /// All MCP sandbox sessions share one tenant VM ("mcp") — the VM is
@@ -325,8 +325,8 @@ fn ensure_session(
         }
     }
     let resp = send_retry(&c);
-    let data = resp_data(&resp)
-        .ok_or_else(|| format!("session '{}' create failed: {}", name, resp))?;
+    let data =
+        resp_data(&resp).ok_or_else(|| format!("session '{}' create failed: {}", name, resp))?;
     let id = data["id"]
         .as_str()
         .ok_or_else(|| format!("session '{}' create: no id in response: {}", name, resp))?
@@ -352,7 +352,10 @@ fn sh_quote(s: &str) -> String {
 
 /// Join argv into a single shell command line.
 fn sh_join(args: &[String]) -> String {
-    args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ")
+    args.iter()
+        .map(|a| sh_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn session_arg(args: &serde_json::Value) -> String {
