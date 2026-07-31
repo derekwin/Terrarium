@@ -1,3 +1,4 @@
+use super::require_name;
 use crate::manager::VmManager;
 use terrarium_protocol::{Command, Response};
 
@@ -77,11 +78,11 @@ pub(crate) async fn cmd_pool_claim(mgr: &mut VmManager, cmd: Command) -> Respons
 }
 
 pub(crate) async fn cmd_pool_release(mgr: &mut VmManager, cmd: Command) -> Response {
-    let name = match cmd.name.as_deref() {
-        Some(n) => n,
-        None => return Response::err("Missing 'name' field"),
+    let name = match require_name(&cmd) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    match mgr.pool_release(name).await {
+    match mgr.pool_release(&name).await {
         Ok(()) => Response::ok_msg(&format!("pool VM '{}' released", name)),
         Err(e) => Response::err(e.to_string()),
     }

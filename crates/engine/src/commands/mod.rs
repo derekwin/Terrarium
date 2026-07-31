@@ -16,21 +16,28 @@ use crate::manager::VmManager;
 use adapter_traits::{VmHandle, VmName, VmSpec};
 pub(crate) use terrarium_protocol::{Command, Response};
 
+/// Extract the required `name` field from a command.
+pub(crate) fn require_name(cmd: &Command) -> Result<String, Response> {
+    cmd.name
+        .clone()
+        .ok_or_else(|| Response::err("Missing 'name' field"))
+}
+
 /// Extract VM name from a command and look up the VM handle.
 /// Returns an error if the name is missing or the VM is not found.
 pub(crate) fn get_vm<'a>(
     mgr: &'a VmManager,
     cmd: &Command,
 ) -> Result<(&'a dyn VmHandle, String), Response> {
-    let name = cmd
-        .name
-        .clone()
-        .ok_or_else(|| Response::err("Missing 'name' field"))?;
+    let name = require_name(cmd)?;
     let vm = mgr
         .get(&name)
         .ok_or_else(|| Response::err(format!("VM '{}' not found", name)))?;
     Ok((vm, name))
 }
+
+/// Default system layer appended when the caller's layer list has none.
+pub(crate) const DEFAULT_SYSTEM: &str = "base";
 
 /// System base layers: if the caller's layer list doesn't end with one,
 /// the configured `system` (default "base") is auto-appended.
@@ -57,7 +64,7 @@ pub(crate) fn apply_system_base(cmd: &mut Command) {
     if !cmd.layers.is_empty() {
         let last = cmd.layers.last().map(|s| s.as_str()).unwrap_or("");
         if !SYSTEM_BASES.contains(&last) {
-            let system = cmd.system.clone().unwrap_or_else(|| "base".into());
+            let system = cmd.system.clone().unwrap_or_else(|| DEFAULT_SYSTEM.into());
             cmd.layers.push(system);
         }
     }

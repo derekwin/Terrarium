@@ -1,4 +1,4 @@
-use super::{apply_system_base, build_spec};
+use super::{apply_system_base, build_spec, require_name};
 use crate::manager::VmManager;
 use terrarium_protocol::{Command, Response};
 
@@ -76,9 +76,9 @@ pub(crate) async fn cmd_resize(mgr: &VmManager, cmd: Command) -> Response {
 }
 
 pub(crate) async fn cmd_shutdown(mgr: &mut VmManager, cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing 'name' field"),
+    let name = match require_name(&cmd) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
     match mgr.shutdown(&name).await {
         Ok(()) => Response::ok_msg(&format!("VM '{}' shut down", name)),
@@ -87,9 +87,9 @@ pub(crate) async fn cmd_shutdown(mgr: &mut VmManager, cmd: Command) -> Response 
 }
 
 pub(crate) async fn cmd_kill(mgr: &mut VmManager, cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing 'name' field"),
+    let name = match require_name(&cmd) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
     match mgr.kill(&name).await {
         Ok(()) => Response::ok_msg(&format!("VM '{}' killed", name)),
@@ -98,9 +98,9 @@ pub(crate) async fn cmd_kill(mgr: &mut VmManager, cmd: Command) -> Response {
 }
 
 pub(crate) async fn cmd_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
-    let name = match cmd.name {
-        Some(n) => n,
-        None => return Response::err("Missing 'name' field"),
+    let name = match require_name(&cmd) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
     match mgr.destroy(&name).await {
         Ok(()) => {

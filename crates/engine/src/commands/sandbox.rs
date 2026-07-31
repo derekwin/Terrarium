@@ -4,7 +4,7 @@
 //! isolation inside the VM is enforced guest-side by sandlock. The engine
 //! owns the registry: tenant → VM, sandbox id → {tenant, workdir}.
 
-use super::{apply_system_base, build_spec};
+use super::{apply_system_base, build_spec, DEFAULT_SYSTEM};
 use crate::manager::{SandboxRecord, VmManager};
 use adapter_traits::VmName;
 use terrarium_protocol::{Command, Response};
@@ -57,7 +57,7 @@ async fn ensure_tenant_vm(
     if cmd.pool.unwrap_or(true) {
         let mut pool_layers = cmd.layers.clone();
         if pool_layers.is_empty() {
-            pool_layers.push(cmd.system.clone().unwrap_or_else(|| "base".into()));
+            pool_layers.push(cmd.system.clone().unwrap_or_else(|| DEFAULT_SYSTEM.into()));
         }
         if let Ok(name) = mgr.pool_claim_matching(pool_layers, Some(cmd.net)).await {
             // Spec asks for cpus/memory differing from the pool boot
