@@ -200,17 +200,6 @@ pub struct FsSpec {
     pub upper: UpperPolicy,
 }
 
-/// Network QoS configuration for a VM.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct NetworkQos {
-    /// Egress bandwidth limit in kbps (0 = unlimited).
-    pub egress_kbps: u64,
-    /// Ingress bandwidth limit in kbps (0 = unlimited).
-    pub ingress_kbps: u64,
-    /// Priority class (0 = lowest, higher = preferred under congestion).
-    pub priority: u32,
-}
-
 /// VM info returned by the adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmInfo {
@@ -412,15 +401,6 @@ pub trait VmHandle: Send + Sync {
     /// Resize vCPUs and/or memory. Backends that don't support this
     /// return an error; the engine checks capabilities() first.
     async fn resize(&self, cpu: Option<u32>, memory: Option<u64>) -> Result<(), AdapterError>;
-
-    /// Resize an existing disk (online expand). Not supported by all backends.
-    async fn resize_disk(&self, disk_id: &str, size: u64) -> Result<(), AdapterError>;
-
-    /// Hot-add a new disk. Not supported by all backends.
-    async fn add_disk(&self, path: &str, disk_id: &str) -> Result<(), AdapterError>;
-
-    /// Apply network QoS (rate limiting + priority). Implemented via tc on TAP.
-    async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), AdapterError>;
 
     /// Execute a command inside the VM (via the guest agent, e.g.
     /// guest-proxy over vsock). See [`ExecOpts`] for the knobs: `sandbox`

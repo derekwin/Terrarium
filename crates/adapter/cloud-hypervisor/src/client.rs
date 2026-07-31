@@ -211,25 +211,6 @@ impl ChClient {
         Ok(())
     }
 
-    pub async fn vm_resize_disk(&self, disk_id: &str, size: u64) -> Result<()> {
-        let body = serde_json::json!({
-            "id": disk_id,
-            "desired_size": size,
-        });
-        self.request("PUT", "/api/v1/vm.resize-disk", Some(&body.to_string()))
-            .await?;
-        Ok(())
-    }
-
-    pub async fn vm_add_disk(&self, path: &str) -> Result<()> {
-        let body = serde_json::json!({
-            "path": path,
-        });
-        self.request("PUT", "/api/v1/vm.add-disk", Some(&body.to_string()))
-            .await?;
-        Ok(())
-    }
-
     /// Hot-plug a virtiofs device backed by an already-running virtiofsd.
     /// Returns the device id reported by CH (needed for remove-device).
     pub async fn vm_add_fs(&self, tag: &str, socket: &str) -> Result<String> {

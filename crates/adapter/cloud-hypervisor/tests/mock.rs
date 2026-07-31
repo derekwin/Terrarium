@@ -172,30 +172,6 @@ async fn test_vm_resize() {
 }
 
 #[tokio::test]
-async fn test_vm_resize_disk() {
-    let server = start_mock_server();
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let client = ChClient::new(&server.socket_path);
-    client
-        .vm_resize_disk("root", 20 * 1024 * 1024 * 1024)
-        .await
-        .expect("resize_disk");
-}
-
-#[tokio::test]
-async fn test_vm_add_disk() {
-    let server = start_mock_server();
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let client = ChClient::new(&server.socket_path);
-    client
-        .vm_add_disk("/tmp/extra.raw")
-        .await
-        .expect("add_disk");
-}
-
-#[tokio::test]
 async fn test_connection_refused() {
     let client = ChClient::new("/tmp/nonexistent-ch-socket.sock");
     let config = VmConfig {

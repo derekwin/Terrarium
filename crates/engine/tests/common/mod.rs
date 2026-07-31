@@ -28,8 +28,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use adapter_traits::{
-    AdapterError, ExecOpts, ExecPolicy, ExecResult, FsSpec, NetworkQos, Snapshot, VmAdapter,
-    VmCapabilities, VmHandle, VmInfo, VmSpec,
+    AdapterError, ExecOpts, ExecPolicy, ExecResult, FsSpec, Snapshot, VmAdapter, VmCapabilities,
+    VmHandle, VmInfo, VmSpec,
 };
 
 /// One recorded exec invocation (for assertions on engine→guest plumbing).
@@ -129,45 +129,6 @@ impl VmHandle for MockVmHandle {
     ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
     where
         'life0: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move { Ok(()) })
-    }
-
-    fn resize_disk<'life0, 'life1, 'async_trait>(
-        &'life0 self,
-        _disk_id: &'life1 str,
-        _size: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move { Err(AdapterError::not_supported("resize_disk")) })
-    }
-
-    fn add_disk<'life0, 'life1, 'life2, 'async_trait>(
-        &'life0 self,
-        _path: &'life1 str,
-        _disk_id: &'life2 str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        'life2: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move { Err(AdapterError::not_supported("add_disk")) })
-    }
-
-    fn set_network_qos<'life0, 'life1, 'async_trait>(
-        &'life0 self,
-        _qos: &'life1 NetworkQos,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        'life1: 'async_trait,
         Self: 'async_trait,
     {
         Box::pin(async move { Ok(()) })

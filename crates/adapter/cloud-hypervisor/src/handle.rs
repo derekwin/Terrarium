@@ -7,9 +7,7 @@ use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use adapter_traits::{
-    AdapterError, FsSpec, NetworkQos, Snapshot, VmHandle, VmInfo, VmName, VmSpec,
-};
+use adapter_traits::{AdapterError, FsSpec, Snapshot, VmHandle, VmInfo, VmName, VmSpec};
 use async_trait::async_trait;
 use tokio::time::sleep;
 
@@ -127,20 +125,6 @@ impl VmHandle for ChVmHandle {
             .vm_resize(cpu.map(|c| c as u8), memory)
             .await
             .map_err(|e| AdapterError::internal(format!("vm.resize: {}", e)))
-    }
-
-    async fn resize_disk(&self, disk_id: &str, size: u64) -> Result<(), AdapterError> {
-        self.client
-            .vm_resize_disk(disk_id, size)
-            .await
-            .map_err(|e| AdapterError::internal(format!("vm.resize-disk: {}", e)))
-    }
-
-    async fn add_disk(&self, path: &str, _disk_id: &str) -> Result<(), AdapterError> {
-        self.client
-            .vm_add_disk(path)
-            .await
-            .map_err(|e| AdapterError::internal(format!("vm.add-disk: {}", e)))
     }
 
     async fn exec(
@@ -264,11 +248,6 @@ impl VmHandle for ChVmHandle {
         }
         tracing::info!(name = %self.name, "fs detached");
         Ok(())
-    }
-
-    async fn set_network_qos(&self, qos: &NetworkQos) -> Result<(), AdapterError> {
-        let tap = format!("tap-{}", self.name);
-        terrarium_network::apply_tc_qos(&tap, qos).map_err(AdapterError::internal)
     }
 
     async fn pause(&self) -> Result<(), AdapterError> {

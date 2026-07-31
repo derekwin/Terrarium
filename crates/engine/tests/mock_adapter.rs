@@ -7,9 +7,7 @@ mod common;
 #[cfg(test)]
 mod tests {
     use super::common::MockVmAdapter;
-    use adapter_traits::{
-        ExecOpts, FsSpec, NetworkQos, Snapshot, UpperPolicy, VmAdapter, VmName, VmSpec,
-    };
+    use adapter_traits::{ExecOpts, FsSpec, Snapshot, UpperPolicy, VmAdapter, VmName, VmSpec};
 
     fn test_spec() -> VmSpec {
         VmSpec {
@@ -134,24 +132,6 @@ mod tests {
 
         // Resize is a no-op success in the mock
         handle.resize(Some(2), Some(512)).await.unwrap();
-        // resize_disk is NotSupported
-        assert!(handle.resize_disk("vda", 1024).await.is_err());
-        // add_disk is NotSupported
-        assert!(handle.add_disk("/dev/vdb", "vdb").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_network_qos_noop() {
-        let adapter = MockVmAdapter::new();
-        let spec = test_spec();
-        let handle = adapter.create(&spec).await.unwrap();
-
-        let qos = NetworkQos {
-            egress_kbps: 1000,
-            ingress_kbps: 500,
-            priority: 1,
-        };
-        handle.set_network_qos(&qos).await.unwrap();
     }
 
     #[tokio::test]

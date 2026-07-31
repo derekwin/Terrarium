@@ -170,19 +170,19 @@ fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult
     // Environment: pass via process environment instead of --env argv
     // flags — argv is world-readable via /proc/<pid>/cmdline.
     // env_clear + whitelist replaces sandlock's --clean-env: the child
-    // inherits exactly the requested variables and nothing else.
+    // inherits exactly the requested variables and nothing else — the
+    // clear is UNCONDITIONAL (an empty env map must not mean "inherit
+    // the daemon's whole environment", which would leak TERRA_TOKEN).
     // NOTE: assumes sandlock passes its own environment through to the
     // confined process; verify against the real sandlock binary.
     let mut process = Command::new("sandlock");
-    if !handle.env.is_empty() {
-        process.env_clear();
-        // sandlock itself still needs PATH to resolve the target binary.
-        if let Ok(path) = std::env::var("PATH") {
-            process.env("PATH", path);
-        }
-        for (k, v) in &handle.env {
-            process.env(k, v);
-        }
+    process.env_clear();
+    // sandlock itself still needs PATH to resolve the target binary.
+    if let Ok(path) = std::env::var("PATH") {
+        process.env("PATH", path);
+    }
+    for (k, v) in &handle.env {
+        process.env(k, v);
     }
 
     // Command and its args
