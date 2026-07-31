@@ -172,6 +172,12 @@ class Sandbox:
         not specify its own *timeout*).
     metadata:
         Arbitrary user metadata dictionary.
+    pool:
+        When the tenant has no VM yet, claim an idle warm-pool VM
+        (default True — millisecond hot start).  False forces a
+        cold-booted dedicated ``tenant-<t>`` VM.  The tenant VM is
+        ``pool-N`` when pool-backed; ``tenant_destroy`` releases it
+        back to the pool instead of destroying it.
     """
 
     # ── construction ──────────────────────────────────────────────
@@ -191,6 +197,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         timeout: int = 600,
         metadata: dict | None = None,
+        pool: bool = True,
     ):
         # -- identity ---------------------------------------------------------
         self._tenant: str = tenant or uuid4().hex[:8]
@@ -203,13 +210,16 @@ class Sandbox:
         dm.ensure_running()
 
         # -- resolve the VM spec (only needed when the tenant VM is new) ------
+        # The tenant may already own a VM — either a dedicated
+        # ``tenant-<t>`` (cold boot) or a claimed warm-pool VM (``pool-N``).
+        # The engine indexes both by tenant (sandbox record → VM), so probe
+        # the sandbox registry instead of guessing the VM name.
         client = TerraClient()
-        vm_exists: bool = False
         try:
-            client.vm_info(self._vm_name)
-            vm_exists = True
+            existing = client.sandbox_list(self._tenant).get("sandboxes", [])
         except ClientError:
-            vm_exists = False
+            existing = []
+        vm_exists = bool(existing)
 
         vmspec: dict = {}
         if not vm_exists:
@@ -266,7 +276,7 @@ class Sandbox:
         for _ in range(20):
             try:
                 resp = client.sandbox_create(
-                    self._tenant, policy=self._policy or None, **vmspec
+                    self._tenant, policy=self._policy or None, pool=pool, **vmspec
                 )
                 break
             except ClientError as e:
@@ -286,7 +296,8 @@ class Sandbox:
         self._default_timeout = timeout
         self._backend: str = "ch"  # default; can be detected from info later
         self._env: dict[str, str] = dict(env or {})
-        self._from_pool: bool = False
+        self._from_pool: bool = False  # legacy Pool.acquire() sessions only
+        self._pool_backed: bool = bool(resp.get("pool", False))
         self.metadata: dict = metadata or {}
 
     # ── properties ─────────────────────────────────────────────────
@@ -306,6 +317,11 @@ class Sandbox:
     def vm(self) -> str:
         """The tenant VM name this sandbox runs in."""
         return self._vm_name
+
+    @property
+    def pool_backed(self) -> bool:
+        """True when the tenant VM was claimed from the warm pool."""
+        return self._pool_backed
 
     @property
     def tenant(self) -> str:

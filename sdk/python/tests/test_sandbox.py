@@ -20,12 +20,12 @@ from terra.sandbox import Sandbox
 
 
 def teardown_module():
-    """Destroy tenant VMs created by the suite.
+    """Destroy tenant VMs and pool VMs created by the suite.
 
     ``Sandbox.kill`` only removes the session workdir — the tenant VM
     stays running and would leak (as a CH process) when the embedded
     daemon dies with the test process. Tenant VMs are named
-    ``tenant-<tenant>``; only those are touched.
+    ``tenant-<tenant>``, pool VMs ``pool-N``; only those are touched.
     """
     from terra.client import TerraClient, TerraError
 
@@ -36,7 +36,7 @@ def teardown_module():
         return
     for vm in vms:
         name = vm.get("name", "")
-        if name.startswith("tenant-"):
+        if name.startswith(("tenant-", "pool-")):
             try:
                 client.vm_destroy(name)
             except TerraError:
@@ -350,3 +350,79 @@ class TestSandboxProperties:
         """metadata is a plain dict, initially empty by default."""
         with Sandbox(layers=["base"], cpu=1, memory_mb=256) as sb:
             assert isinstance(sb.metadata, dict)
+
+
+class TestPoolBackedSandbox:
+    """Engine sandboxes backed by warm-pool VMs (S-M3).
+
+    These tests create real pool VMs, so they must run AFTER the classes
+    above — those assert cold-boot VM names (``tenant-<t>``) and would
+    break if an idle pool slot existed.  The module teardown destroys
+    both ``tenant-`` and ``pool-`` VMs.
+    """
+
+    @staticmethod
+    def _ensure_pool(size: int = 1) -> None:
+        from terra import images
+        from terra._engine import DaemonManager
+        from terra.client import TerraClient
+
+        DaemonManager().ensure_running()
+        client = TerraClient()
+        if not client.pool_list().get("pool"):
+            client.pool_create(size, kernel=str(images.ensure("vmlinux.bin")))
+
+    def test_claims_warm_pool_vm(self):
+        """sandbox_create claims an idle pool VM; destroy_tenant releases it."""
+        from terra.client import TerraClient
+
+        client = TerraClient()
+        self._ensure_pool(1)
+        tenant = f"pooled{uuid4().hex[:6]}"
+        sb = Sandbox(tenant=tenant, layers=["base"], cpu=1, memory_mb=256)
+        try:
+            assert sb.pool_backed is True, "expected a pool-backed tenant VM"
+            assert sb.vm.startswith("pool-"), sb.vm
+            # Second sandbox of the same tenant: no template needed — the
+            # engine indexes the tenant's pool-backed VM.
+            sb2 = Sandbox(tenant=tenant)
+            try:
+                assert sb2.pool_backed is True
+                assert sb2.vm == sb.vm
+                assert sb2.exec("echo ok").exit_code == 0
+            finally:
+                sb2.kill()
+        finally:
+            Sandbox.destroy_tenant(tenant)
+        slots = [s for s in client.pool_list().get("pool", [])]
+        assert all(not s["claimed"] for s in slots), f"slot not released: {slots}"
+        assert client.sandbox_list(tenant).get("sandboxes") == []
+
+    def test_no_pool_forces_cold_boot(self):
+        """pool=False cold-boots a dedicated tenant-<t> VM."""
+        tenant = f"nopool{uuid4().hex[:6]}"
+        sb = Sandbox(tenant=tenant, layers=["base"], cpu=1, memory_mb=256,
+                     pool=False)
+        try:
+            assert sb.pool_backed is False
+            assert sb.vm == f"tenant-{tenant}"
+        finally:
+            Sandbox.destroy_tenant(tenant)
+
+    def test_pool_exhausted_cold_fallback(self):
+        """No idle slot → sandbox_create cold-boots the tenant VM."""
+        self._ensure_pool(1)
+        ta = f"poolfa{uuid4().hex[:6]}"
+        tb = f"poolfb{uuid4().hex[:6]}"
+        sba = Sandbox(tenant=ta, layers=["base"], cpu=1, memory_mb=256)
+        try:
+            assert sba.pool_backed is True
+            sbb = Sandbox(tenant=tb, layers=["base"], cpu=1, memory_mb=256)
+            try:
+                assert sbb.pool_backed is False, "exhausted pool → cold boot"
+                assert sbb.vm == f"tenant-{tb}"
+            finally:
+                sbb.kill()
+        finally:
+            Sandbox.destroy_tenant(ta)
+            Sandbox.destroy_tenant(tb)

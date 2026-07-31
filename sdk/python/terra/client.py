@@ -255,7 +255,8 @@ class TerraClient:
 
     # ── first-class sandboxes (S-M2) ────────────────────────────────
 
-    def sandbox_create(self, tenant: str, policy: dict | None = None, **vmspec) -> dict:
+    def sandbox_create(self, tenant: str, policy: dict | None = None, *,
+                       pool: bool = True, **vmspec) -> dict:
         """Create a sandbox on the tenant's shared VM.
 
         Idempotent: an existing tenant VM is reused and the VM-spec
@@ -263,9 +264,15 @@ class TerraClient:
         are ignored. ``policy`` is the stored exec policy (see
         ``validate_policy``); per-call ``sandbox_exec`` policies
         override it once without changing it.
-        Returns ``{id, vm, workdir}``.
+        ``pool`` (default True): claim the tenant VM from the warm pool
+        when idle slots are available; False forces a cold-booted
+        dedicated ``tenant-<t>`` VM.
+        Returns ``{id, vm, workdir, pool}`` — ``pool`` tells whether the
+        tenant VM is warm-pool backed (vm name is then ``pool-N``).
         """
         cmd = {"command": "sandbox_create", "tenant": tenant}
+        if not pool:
+            cmd["pool"] = False
         cmd.update(vmspec)
         if policy is not None:
             cmd["policy"] = validate_policy(policy)
