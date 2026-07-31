@@ -63,7 +63,7 @@ terrarium/
 │   ├── protocol/             # 共享 Command / Response 类型（单一事实源）
 │   ├── guest-proxy/          # guest 内代理：vsock 中继、exec、mount、umount
 │   ├── network/              # Tap / NAT / dnsmasq DHCP、tc QoS
-│   └── mcp/                  # MCP server（stdio JSON-RPC，13 个用户面工具）
+│   └── mcp/                  # MCP server（stdio JSON-RPC，15 个用户面工具）
 ├── sdk/python/               # Python SDK（terra 包：Sandbox、Pool、Template、client、daemon、assets、images）
 ├── images/                   # Guest 内核 / rootfs / initramfs 构建脚本与示例
 └── docs/                     # 协议、SDK、MCP 文档与设计 ADR
