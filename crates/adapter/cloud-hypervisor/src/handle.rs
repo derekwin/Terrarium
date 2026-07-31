@@ -176,6 +176,19 @@ impl VmHandle for ChVmHandle {
         Ok(())
     }
 
+    async fn ping(&self) -> Result<(), AdapterError> {
+        let resp = self
+            .guest_cmd(&serde_json::json!({"command": "ping"}))
+            .await?;
+        if resp["status"].as_str() != Some("ok") {
+            return Err(AdapterError::internal(format!(
+                "guest ping failed: {}",
+                resp["message"].as_str().unwrap_or("unknown")
+            )));
+        }
+        Ok(())
+    }
+
     async fn attach_fs(&self, fs_spec: &FsSpec) -> Result<(), AdapterError> {
         if self.fs.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             return Err(AdapterError::internal(

@@ -423,6 +423,14 @@ pub trait VmHandle: Send + Sync {
         ))
     }
 
+    /// Ping the guest agent (readiness probe, e.g. before slating a
+    /// freshly booted pool VM as claimable). Default: not supported.
+    async fn ping(&self) -> Result<(), AdapterError> {
+        Err(AdapterError::not_supported(
+            "ping not supported by this backend",
+        ))
+    }
+
     /// Hot-plug a layered filesystem into a running VM (warm-pool attach:
     /// compose layers on the host, hot-add the virtiofs device, and mount
     /// it inside the guest via the guest-proxy vsock channel).
