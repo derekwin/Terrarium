@@ -166,6 +166,7 @@ terra tool remove -n python312
 - ✅ CH base, engine daemon, adapter layer, Python SDK
 - ✅ virtiofs layered filesystem, warm pool, NAT networking, layer build-by-doing
 - ✅ High-level Sandbox / Pool / Template API, exception hierarchy, async support
+- ✅ Warm-pool-backed tenant sandboxes (claim on create, release on destroy); MCP session-scoped exec
 - 🔲 Pool auto-scaling, snapshot fault tolerance, density benchmarks, observability
 
 ## License
