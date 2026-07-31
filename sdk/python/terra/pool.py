@@ -34,14 +34,10 @@ import logging
 from uuid import uuid4
 
 from .client import TerraClient
-from .sandbox import Sandbox
+from .sandbox import Sandbox, _SYSTEM_MAP
 from .template import Template
 
 _log = logging.getLogger(__name__)
-
-
-# Template base label → engine system layer name.
-_SYSTEM_MAP: dict[str, str] = {"alpine": "base", "ubuntu": "ubuntu"}
 
 
 class Pool:

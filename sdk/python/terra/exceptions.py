@@ -51,14 +51,6 @@ class TerraError(Exception):
         super().__init__(message)
 
 
-class EngineError(TerraError):
-    """Engine daemon-level error (daemon start, protocol, transport)."""
-
-
-class BuildError(TerraError):
-    """Layer / image / kernel build or resolution failure."""
-
-
 class SandboxError(TerraError):
     """Base for errors related to a specific sandbox / VM."""
 
@@ -69,10 +61,6 @@ class SandboxTimeoutError(SandboxError):
 
 class SandboxStateError(SandboxError):
     """Operation on a sandbox in an invalid state (shut down, recycled, etc.)."""
-
-
-class ResourceError(SandboxError):
-    """Sandbox resource exhaustion (OOM, disk full, etc.)."""
 
 
 class ExecError(SandboxError):

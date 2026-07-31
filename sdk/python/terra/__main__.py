@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import assets, images, paths
 from .client import TerraClient, TerraError
-from .sandbox import Sandbox
+from .sandbox import Sandbox, _SYSTEM_MAP
 from .template import Template
 
 # ═══════════════════════════════════════════════════════════════════
@@ -403,7 +403,7 @@ def cmd_setup(args) -> int:
     """
     distro = args.distro
     force = args.force
-    system_layer = _DISTRO_SYSTEM_LAYER[distro]
+    system_layer = _SYSTEM_MAP[distro]
 
     def stage(msg: str) -> None:
         print(f"\n==> {msg}")
@@ -524,9 +524,6 @@ def _build_kernel_image(name: str, version: str, *, force: bool = False) -> int:
 
 # ── internal build helpers ───────────────────────────────────────
 
-# Distro label → engine system layer name (sandbox.py/template.py agree).
-_DISTRO_SYSTEM_LAYER = {"alpine": "base", "ubuntu": "ubuntu"}
-
 
 def _refresh_layer_guest_proxy(system_layer: str, *, force: bool = False) -> int:
     """Sync <layer>/bin/guest-proxy with the current musl build.
@@ -605,7 +602,7 @@ def _ensure_distro_rootfs(distro: str, *, force: bool = False) -> Path:
     import terrarium_fs
 
     rdir = paths.rootfs_dir()
-    if distro not in _DISTRO_SYSTEM_LAYER:
+    if distro not in _SYSTEM_MAP:
         raise ValueError(f"unsupported distro {distro!r}")
     if not force:
         for cand in (rdir / f"{distro}.cpio", rdir / f"{distro}.cpio.gz"):
@@ -664,7 +661,7 @@ def cmd_tool_create(args) -> int:
             fix=f"Create the distro environment first: terra setup {args.template}",
             exit_code=EXIT_NOTFOUND,
         )
-    system = _DISTRO_SYSTEM_LAYER.get(t.base)
+    system = _SYSTEM_MAP.get(t.base)
     if system is None:
         return _err(
             f"Unsupported template base {t.base!r}",
@@ -944,8 +941,7 @@ def cmd_pool_claim(args) -> int:
     """Claim an idle pool VM."""
     if args.template:
         t = Template.load(args.template)
-        system_map = {"alpine": "base", "ubuntu": "ubuntu"}
-        system = system_map.get(t.base, t.base)
+        system = _SYSTEM_MAP.get(t.base, t.base)
         layers = t.layers + [system]
     elif args.layers:
         layers = _parse_multi(args.layers)

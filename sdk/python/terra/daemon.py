@@ -83,6 +83,68 @@ def build_daemon_env(
     return env
 
 
+def daemon_ping(socket_path: str) -> bool:
+    """Return *True* if a daemon on *socket_path* answers a lightweight ``list`` command.
+
+    A connected socket that sends bytes back is good enough — the
+    response is not parsed. Used by :meth:`Daemon.start` readiness
+    polling and by the internal DaemonManager.
+    """
+    try:
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(1)
+        s.connect(socket_path)
+        s.sendall(b'{"command":"list"}\n')
+        s.recv(1024)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def fix_socket_owner(socket_path: str, timeout: float = 5.0) -> None:
+    """Best-effort chown of the daemon socket to the original user.
+
+    When the daemon was started via sudo, chown the socket so regular
+    CLI commands work without sudo. Polls up to *timeout* seconds for
+    the socket file to appear after launch.
+    """
+    uid = os.environ.get("SUDO_UID")
+    gid = os.environ.get("SUDO_GID")
+    if uid and gid:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if Path(socket_path).exists():
+                try:
+                    os.chown(socket_path, int(uid), int(gid))
+                except OSError:
+                    pass
+                break
+            time.sleep(0.05)
+
+
+def daemon_stop(socket_path: str) -> str:
+    """Send the ``daemon_stop`` wire command and classify the outcome.
+
+    Returns one of:
+    - ``"stopped"`` — the daemon acknowledged and is shutting down;
+    - ``"refused"`` — an embedded (in-process) daemon refused the stop
+      by design (it dies with its host process);
+    - ``"gone"`` — the daemon was unreachable (already shut down).
+
+    Any other engine error is raised as :class:`DaemonError`.
+    """
+    try:
+        TerraClient(socket_path=socket_path)._send({"command": "daemon_stop"})
+    except _ClientError as e:
+        if EMBEDDED_STOP_REFUSAL not in str(e):
+            raise DaemonError(f"daemon_stop failed: {e}") from e
+        return "refused"
+    except (OSError, TimeoutError):
+        return "gone"
+    return "stopped"
+
+
 class Daemon:
     """Manage an engine daemon via in-process Rust FFI (PyO3)."""
 
@@ -144,28 +206,13 @@ class Daemon:
 
         # When started via sudo, chown the socket to the original user
         # so regular CLI commands work without sudo.
-        uid = os.environ.get("SUDO_UID")
-        gid = os.environ.get("SUDO_GID")
-        if uid and gid:
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                if Path(self.socket).exists():
-                    try:
-                        os.chown(self.socket, int(uid), int(gid))
-                    except OSError:
-                        pass
-                    break
-                time.sleep(0.05)
+        fix_socket_owner(self.socket, timeout=timeout)
 
         deadline = time.time() + timeout
         while time.time() < deadline:
-            try:
-                s = _socket.socket(_socket.AF_UNIX)
-                s.connect(self.socket)
-                s.close()
+            if daemon_ping(self.socket):
                 return self
-            except (ConnectionRefusedError, FileNotFoundError):
-                time.sleep(0.1)
+            time.sleep(0.1)
         raise DaemonError(f"daemon socket did not appear within {timeout}s")
 
     def stop(self, timeout: float = 15.0) -> None:
@@ -179,15 +226,7 @@ class Daemon:
         unreachable daemon is already gone. Any other engine error is
         raised as :class:`DaemonError`.
         """
-        try:
-            TerraClient(socket_path=self.socket)._send({"command": "daemon_stop"})
-        except _ClientError as e:
-            if EMBEDDED_STOP_REFUSAL not in str(e):
-                raise DaemonError(f"daemon_stop failed: {e}") from e
-            # embedded refusal — no-op (dies with the host process)
-        except (OSError, TimeoutError):
-            pass  # daemon already gone
-        else:
+        if daemon_stop(self.socket) == "stopped":
             self._reap_service_daemon(timeout)
         if self._log_file:
             self._log_file.close()

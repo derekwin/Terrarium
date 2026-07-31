@@ -39,6 +39,7 @@ from typing import Callable, ClassVar
 
 from . import images, paths
 from .client import TerraClient, TerraError
+from .sandbox import _SYSTEM_MAP  # imported back from sandbox.py, which imports us
 
 
 @dataclass
@@ -203,8 +204,7 @@ class Template:
             kernel_path = str(images.resolve_kernel("default"))
 
         # Map the base label to the actual distro system layer name.
-        system_map = {"alpine": "base", "ubuntu": "ubuntu"}
-        system = system_map.get(template.base)
+        system = _SYSTEM_MAP.get(template.base)
         if system is None:
             raise ValueError(
                 f"Unsupported base {template.base!r}; expected 'alpine' or 'ubuntu'"

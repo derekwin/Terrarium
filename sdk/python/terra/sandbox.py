@@ -29,6 +29,11 @@ Usage::
 
 from __future__ import annotations
 
+# Template base label → engine system layer name. Defined before the
+# .template import below: template.py imports it back from here, so it
+# must already exist when this module starts importing .template.
+_SYSTEM_MAP: dict[str, str] = {"alpine": "base", "ubuntu": "ubuntu"}
+
 import base64
 import shlex
 from dataclasses import dataclass
@@ -46,10 +51,6 @@ from .exceptions import (
     SandboxTimeoutError,
     SandboxStateError,
 )
-
-# Template base label → engine system layer name.
-_SYSTEM_MAP: dict[str, str] = {"alpine": "base", "ubuntu": "ubuntu"}
-
 
 @dataclass
 class FileInfo:

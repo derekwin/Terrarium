@@ -8,13 +8,7 @@ from __future__ import annotations
 import json
 import socket
 
-
-class TerraError(Exception):
-    """Raised when the engine daemon returns an error response."""
-
-    def __init__(self, message: str):
-        super().__init__(message)
-        self.message = message
+from .exceptions import TerraError
 
 
 _POLICY_KEYS = {"read_paths", "write_paths", "net_allow", "memory_mb", "procs"}
