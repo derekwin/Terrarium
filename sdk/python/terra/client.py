@@ -318,6 +318,10 @@ class TerraClient:
         return self._send({"command": "sandbox_kill", "id": id})
 
     def tenant_destroy(self, tenant: str) -> dict:
-        """Destroy the tenant VM and all its sandbox records."""
+        """Destroy the tenant VM and all its sandbox records.
+
+        Accepts the bare tenant id or the full VM name (``tenant-<id>``).
+        """
+        tenant = tenant.removeprefix("tenant-")
         return self._send({"command": "tenant_destroy", "tenant": tenant})
 
