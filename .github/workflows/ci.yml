@@ -28,6 +28,9 @@ jobs:
       # Tests
       - run: cargo test --all
 
+      # Release-profile build (catches release-only failures)
+      - run: cargo build --release --all
+
       # Security audit
       - run: cargo install cargo-audit --locked
       - run: cargo audit
