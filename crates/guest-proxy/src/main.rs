@@ -21,7 +21,42 @@ use std::time::Duration;
 const SOCKET_PATH: &str = "/tmp/sandboxd.sock";
 const VSOCK_PORT: u32 = 1024;
 
+/// Whether a sysfs entry name is a CPU directory (`cpuN`, N a number).
+fn is_cpu_dir(name: &str) -> bool {
+    name.len() > 3 && name.starts_with("cpu") && name[3..].chars().all(|c| c.is_ascii_digit())
+}
+
+/// CPU hotplug helper: CH hot-adds vCPUs offline — the guest must
+/// online them itself (writes to /sys/devices/system/cpu/cpuN/online).
+/// Poll sysfs every 2s and online any CPU whose `online` file reads 0.
+/// cpu0 has no `online` file on x86 — missing files are skipped.
+/// Runs for the VM's lifetime; individual errors are ignored (a CPU
+/// may be mid-removal) so the thread never panics the process.
+fn start_cpu_onliner() {
+    thread::spawn(|| loop {
+        if let Ok(entries) = std::fs::read_dir("/sys/devices/system/cpu") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !is_cpu_dir(&name) {
+                    continue;
+                }
+                let online = entry.path().join("online");
+                let needs_online = std::fs::read_to_string(&online)
+                    .map(|s| s.trim() == "0")
+                    .unwrap_or(false);
+                if needs_online && std::fs::write(&online, "1").is_ok() {
+                    eprintln!("guest-proxy: onlined hot-added {}", name);
+                }
+            }
+        }
+        thread::sleep(Duration::from_secs(2));
+    });
+}
+
 fn main() {
+    start_cpu_onliner();
+
     // vsock listener for the host (FS-M4 hot-plug path). Optional: the
     // device may be absent (plain boots), then we just skip it.
     match vsock::listen(VSOCK_PORT) {
@@ -322,5 +357,17 @@ mod tests {
             "policy": null,
         }));
         assert_eq!(resp["status"], "ok");
+    }
+
+    /// cpuN directory detection: real CPUs match, lookalikes don't.
+    #[test]
+    fn cpu_dir_detection() {
+        assert!(is_cpu_dir("cpu0"));
+        assert!(is_cpu_dir("cpu12"));
+        assert!(!is_cpu_dir("cpu"));
+        assert!(!is_cpu_dir("cpufreq"));
+        assert!(!is_cpu_dir("cpuidle"));
+        assert!(!is_cpu_dir("cpu1x"));
+        assert!(!is_cpu_dir("other"));
     }
 }

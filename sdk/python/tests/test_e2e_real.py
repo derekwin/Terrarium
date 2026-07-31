@@ -337,6 +337,16 @@ def test_resize_cpus() -> None:
     client = _state["client"]
     client.vm_resize("sdk-t1", cpus=4)
     _wait_for(lambda: client.vm_info("sdk-t1")["cpus"] == 4, 10, "cpu resize")
+    # Guest-visible: hot-added vCPUs must come online (guest-proxy
+    # onliner), not just show up in CH's vm.info. (The busybox rootfs
+    # has no nproc — count processors in /proc/cpuinfo.)
+    _wait_for(
+        lambda: _guest_exec(
+            "sdk-t1", ["grep", "-c", "processor", "/proc/cpuinfo"]
+        ).strip() == "4",
+        15,
+        "guest-visible cpu hot-add (cpuinfo)",
+    )
 
 
 def test_resize_memory() -> None:

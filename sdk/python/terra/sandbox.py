@@ -251,6 +251,9 @@ class Sandbox:
                 "initramfs": str(images.resolve_rootfs("virtiofs")),
                 "layers": list(layers),
                 "cpus": cpu or 1,
+                # CPU headroom for online resize (mirrors the old
+                # client.vm_create default; memory stays fixed-size).
+                "max_cpus": 16,
                 "memory_mb": memory_mb or 256,
                 "net": bool(network),
             }
