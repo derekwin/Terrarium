@@ -281,11 +281,13 @@ pub fn call_tool(name: &str, args: &serde_json::Value, sessions: &mut SessionReg
 // ── session-scoped tools ──────────────────────────────────────────
 
 /// Send a command, retrying transient guest-agent boot races (a VM is
-/// "Running" before its vsock agent answers).
-fn send_retry(cmd: &Command) -> String {
+/// "Running" before its vsock agent answers). The transport is
+/// injectable so unit tests can swap the engine socket for a scripted
+/// responder.
+fn send_retry_with(send: &impl Fn(&Command) -> String, cmd: &Command) -> String {
     let mut resp = String::new();
     for _ in 0..8 {
-        resp = send_to_engine(cmd);
+        resp = send(cmd);
         if !resp.contains("handshake") && !resp.contains("vsock") {
             break;
         }
@@ -302,6 +304,7 @@ fn ensure_session(
     sessions: &mut SessionRegistry,
     name: &str,
     layers: &[String],
+    send: &impl Fn(&Command) -> String,
 ) -> Result<String, String> {
     if let Some(id) = sessions.get(name) {
         return Ok(id.clone());
@@ -324,7 +327,7 @@ fn ensure_session(
             c = c.with_initramfs(&i);
         }
     }
-    let resp = send_retry(&c);
+    let resp = send_retry_with(send, &c);
     let data =
         resp_data(&resp).ok_or_else(|| format!("session '{}' create failed: {}", name, resp))?;
     let id = data["id"]
@@ -333,6 +336,54 @@ fn ensure_session(
         .to_string();
     sessions.insert(name.to_string(), id.clone());
     Ok(id)
+}
+
+/// True if the response is the engine's exact miss message for a dead
+/// sandbox record (crates/engine/src/commands/sandbox.rs — sandbox_get
+/// miss). The structured `error` field is compared with exact equality,
+/// so nothing else can trigger a self-heal: ok responses carrying exec
+/// stdout (even text echoing the cached id — the id is visible to the
+/// agent as its `/workdir/<id>`), `VM '<name>' not found`, `Session
+/// '<id>' not found`, and pool errors are all structurally distinct.
+fn is_sandbox_miss(resp: &str, id: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(resp)
+        .ok()
+        .and_then(|v| {
+            v["error"]
+                .as_str()
+                .map(|e| e == format!("Sandbox '{}' not found", id))
+        })
+        .unwrap_or(false)
+}
+
+/// Execute against a session, self-healing a stale cached id after an
+/// engine restart (the engine's sandbox records are gone). When the
+/// engine's structured response reports the cached sandbox as missing,
+/// drop the id and retry once with a freshly created session — the new
+/// sandbox gets a fresh engine-allocated id, so a second miss is a real
+/// error and is returned as-is (no loop). The miss check is exact-match
+/// on the error field, so exec output can never masquerade as a miss.
+fn session_exec(
+    sessions: &mut SessionRegistry,
+    session: &str,
+    layers: &[String],
+    build: impl Fn(&str) -> Command,
+    send: &impl Fn(&Command) -> String,
+) -> String {
+    let id = match ensure_session(sessions, session, layers, send) {
+        Ok(id) => id,
+        Err(e) => return error_json(&e),
+    };
+    let resp = send_retry_with(send, &build(&id));
+    if is_sandbox_miss(&resp, &id) {
+        sessions.remove(session);
+        match ensure_session(sessions, session, layers, send) {
+            Ok(new_id) => send_retry_with(send, &build(&new_id)),
+            Err(e) => error_json(&e),
+        }
+    } else {
+        resp
+    }
 }
 
 /// Extract the `data` object of an ok response.
@@ -392,10 +443,6 @@ fn terra_exec(args: &serde_json::Value, sessions: &mut SessionRegistry) -> Strin
         .unwrap_or(true);
     let cwd = args.get("cwd").and_then(|a| a.as_str());
 
-    let id = match ensure_session(sessions, &session, &layers) {
-        Ok(id) => id,
-        Err(e) => return error_json(&e),
-    };
     let mut final_args = argv;
     if let Some(cwd) = cwd {
         final_args = vec![
@@ -404,14 +451,22 @@ fn terra_exec(args: &serde_json::Value, sessions: &mut SessionRegistry) -> Strin
             format!("cd {} && {}", sh_quote(cwd), sh_join(&final_args)),
         ];
     }
-    let mut c = Command::new("sandbox_exec")
-        .with_id(&id)
-        .with_args(final_args)
-        .with_sandbox(sandboxed);
-    if let Some(t) = args.get("timeout_secs").and_then(|a| a.as_u64()) {
-        c = c.with_timeout_secs(t);
-    }
-    send_retry(&c)
+    session_exec(
+        sessions,
+        &session,
+        &layers,
+        |id| {
+            let mut c = Command::new("sandbox_exec")
+                .with_id(id)
+                .with_args(final_args.clone())
+                .with_sandbox(sandboxed);
+            if let Some(t) = args.get("timeout_secs").and_then(|a| a.as_u64()) {
+                c = c.with_timeout_secs(t);
+            }
+            c
+        },
+        &send_to_engine,
+    )
 }
 
 fn terra_session_read(args: &serde_json::Value, sessions: &mut SessionRegistry) -> String {
@@ -420,15 +475,17 @@ fn terra_session_read(args: &serde_json::Value, sessions: &mut SessionRegistry) 
     if path.is_empty() {
         return error_json("missing 'path'");
     }
-    let id = match ensure_session(sessions, &session, &[]) {
-        Ok(id) => id,
-        Err(e) => return error_json(&e),
-    };
-    send_retry(
-        &Command::new("sandbox_exec")
-            .with_id(&id)
-            .with_args(vec!["cat".into(), path.into()])
-            .with_sandbox(true),
+    session_exec(
+        sessions,
+        &session,
+        &[],
+        |id| {
+            Command::new("sandbox_exec")
+                .with_id(id)
+                .with_args(vec!["cat".into(), path.into()])
+                .with_sandbox(true)
+        },
+        &send_to_engine,
     )
 }
 
@@ -439,23 +496,228 @@ fn terra_session_write(args: &serde_json::Value, sessions: &mut SessionRegistry)
     if path.is_empty() {
         return error_json("missing 'path'");
     }
-    let id = match ensure_session(sessions, &session, &[]) {
-        Ok(id) => id,
-        Err(e) => return error_json(&e),
-    };
     let b64 = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
-    send_retry(
-        &Command::new("sandbox_exec")
-            .with_id(&id)
-            .with_args(vec![
-                "sh".into(),
-                "-c".into(),
-                format!("echo {} | base64 -d > {}", b64, sh_quote(path)),
-            ])
-            .with_sandbox(true),
+    session_exec(
+        sessions,
+        &session,
+        &[],
+        |id| {
+            Command::new("sandbox_exec")
+                .with_id(id)
+                .with_args(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    format!("echo {} | base64 -d > {}", b64, sh_quote(path)),
+                ])
+                .with_sandbox(true)
+        },
+        &send_to_engine,
     )
 }
 
 fn error_json(msg: &str) -> String {
     serde_json::json!({"status": "error", "error": msg}).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Scripted engine stub: replays `script` responses in order and
+    /// records every command sent (as "command:id") for assertions.
+    struct MockEngine {
+        script: std::cell::RefCell<std::collections::VecDeque<String>>,
+        calls: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl MockEngine {
+        fn new(script: &[&str]) -> Self {
+            Self {
+                script: std::cell::RefCell::new(script.iter().map(|s| s.to_string()).collect()),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn send(&self, cmd: &Command) -> String {
+            self.calls.borrow_mut().push(format!(
+                "{}:{}",
+                cmd.command,
+                cmd.id.clone().unwrap_or_default()
+            ));
+            self.script
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| r#"{"status":"error","error":"unexpected engine call"}"#.into())
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    fn exec_builder(id: &str) -> Command {
+        Command::new("sandbox_exec")
+            .with_id(id)
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_sandbox(true)
+    }
+
+    #[test]
+    fn heals_stale_cached_session_after_engine_restart() {
+        let mut sessions = SessionRegistry::new();
+        sessions.insert("default".into(), "sb-deadbeef".into());
+        let engine = MockEngine::new(&[
+            r#"{"status":"error","error":"Sandbox 'sb-deadbeef' not found"}"#,
+            r#"{"status":"ok","data":{"id":"sb-cafe1234","vm":"tenant-mcp","workdir":"/workdir/sb-cafe1234","pool":false}}"#,
+            r#"{"status":"ok","data":{"stdout":"hello\n","stderr":"","exit_code":0}}"#,
+        ]);
+        let send = |c: &Command| engine.send(c);
+
+        let resp = session_exec(&mut sessions, "default", &[], exec_builder, &send);
+
+        assert!(
+            resp.contains("\"stdout\":\"hello"),
+            "exec must succeed after self-heal: {resp}"
+        );
+        assert_eq!(
+            sessions.get("default").map(String::as_str),
+            Some("sb-cafe1234")
+        );
+        assert_eq!(
+            engine.calls(),
+            vec![
+                "sandbox_exec:sb-deadbeef".to_string(),
+                "sandbox_create:".to_string(),
+                "sandbox_exec:sb-cafe1234".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_working_session_untouched() {
+        let mut sessions = SessionRegistry::new();
+        sessions.insert("s1".into(), "sb-alive".into());
+        let engine = MockEngine::new(&[
+            r#"{"status":"ok","data":{"stdout":"ok\n","stderr":"","exit_code":0}}"#,
+        ]);
+        let send = |c: &Command| engine.send(c);
+
+        let resp = session_exec(&mut sessions, "s1", &[], exec_builder, &send);
+
+        assert!(resp.contains("\"exit_code\":0"), "{resp}");
+        assert_eq!(sessions.get("s1").map(String::as_str), Some("sb-alive"));
+        assert_eq!(engine.calls(), vec!["sandbox_exec:sb-alive".to_string()]);
+    }
+
+    #[test]
+    fn vm_missing_error_does_not_trigger_self_heal() {
+        let mut sessions = SessionRegistry::new();
+        sessions.insert("s1".into(), "sb-gone".into());
+        let engine =
+            MockEngine::new(&[r#"{"status":"error","error":"VM 'tenant-mcp' not found"}"#]);
+        let send = |c: &Command| engine.send(c);
+
+        let resp = session_exec(&mut sessions, "s1", &[], exec_builder, &send);
+
+        assert!(resp.contains("VM 'tenant-mcp' not found"), "{resp}");
+        assert_eq!(
+            sessions.get("s1").map(String::as_str),
+            Some("sb-gone"),
+            "a VM-level error must not drop the cached sandbox id"
+        );
+        assert_eq!(engine.calls(), vec!["sandbox_exec:sb-gone".to_string()]);
+    }
+
+    #[test]
+    fn echoed_sandbox_text_in_stdout_does_not_trigger_self_heal() {
+        // The cached sandbox id is NOT secret — the agent's cwd is
+        // `/workdir/<id>`, and exec stdout is embedded in ok responses.
+        // A command echoing `Sandbox '<cached-id>' not found` must not be
+        // mistaken for a dead record (that would drop the session, wipe
+        // its workdir via re-creation, and re-execute the command).
+        let mut sessions = SessionRegistry::new();
+        sessions.insert("s1".into(), "sb-alive".into());
+        let engine = MockEngine::new(&[
+            r#"{"status":"ok","data":{"stdout":"Sandbox 'sb-alive' not found\n","stderr":"","exit_code":0}}"#,
+        ]);
+        let send = |c: &Command| engine.send(c);
+
+        let resp = session_exec(&mut sessions, "s1", &[], exec_builder, &send);
+
+        assert!(resp.contains("\"exit_code\":0"), "{resp}");
+        assert_eq!(sessions.get("s1").map(String::as_str), Some("sb-alive"));
+        assert_eq!(engine.calls(), vec!["sandbox_exec:sb-alive".to_string()]);
+    }
+
+    #[test]
+    fn second_miss_is_returned_without_retry_loop() {
+        let mut sessions = SessionRegistry::new();
+        sessions.insert("s1".into(), "sb-dead".into());
+        let engine = MockEngine::new(&[
+            r#"{"status":"error","error":"Sandbox 'sb-dead' not found"}"#,
+            r#"{"status":"ok","data":{"id":"sb-fresh","vm":"tenant-mcp","workdir":"/workdir/sb-fresh","pool":false}}"#,
+            r#"{"status":"error","error":"Sandbox 'sb-fresh' not found"}"#,
+        ]);
+        let send = |c: &Command| engine.send(c);
+
+        let resp = session_exec(&mut sessions, "s1", &[], exec_builder, &send);
+
+        assert!(resp.contains("Sandbox 'sb-fresh' not found"), "{resp}");
+        assert_eq!(
+            sessions.get("s1").map(String::as_str),
+            Some("sb-fresh"),
+            "re-created id stays cached even though its exec failed"
+        );
+        assert_eq!(
+            engine.calls(),
+            vec![
+                "sandbox_exec:sb-dead".to_string(),
+                "sandbox_create:".to_string(),
+                "sandbox_exec:sb-fresh".to_string(),
+            ],
+            "exactly one retry — no second self-heal"
+        );
+    }
+
+    #[test]
+    fn fresh_session_creation_failure_is_reported() {
+        let mut sessions = SessionRegistry::new();
+        let engine =
+            MockEngine::new(&[r#"{"status":"error","error":"pool VM info failed: nope"}"#]);
+        let send = |c: &Command| engine.send(c);
+
+        let resp = session_exec(&mut sessions, "s1", &[], exec_builder, &send);
+
+        assert!(resp.contains("create failed"), "{resp}");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn re_create_failure_after_heal_drops_stale_id() {
+        // Stale id detected → re-create fails → the error is returned and
+        // the stale id is gone from the registry, so the next call starts
+        // fresh instead of failing against the dead sandbox again.
+        let mut sessions = SessionRegistry::new();
+        sessions.insert("s1".into(), "sb-dead".into());
+        let engine = MockEngine::new(&[
+            r#"{"status":"error","error":"Sandbox 'sb-dead' not found"}"#,
+            r#"{"status":"error","error":"pool VM info failed: nope"}"#,
+        ]);
+        let send = |c: &Command| engine.send(c);
+
+        let resp = session_exec(&mut sessions, "s1", &[], exec_builder, &send);
+
+        assert!(resp.contains("create failed"), "{resp}");
+        assert!(
+            !sessions.contains_key("s1"),
+            "stale id must be removed so the next call re-creates"
+        );
+        assert_eq!(
+            engine.calls(),
+            vec![
+                "sandbox_exec:sb-dead".to_string(),
+                "sandbox_create:".to_string(),
+            ]
+        );
+    }
 }
