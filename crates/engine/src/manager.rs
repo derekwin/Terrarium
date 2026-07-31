@@ -326,36 +326,54 @@ impl VmManager {
         self.vms.keys().map(|s| s.as_ref()).collect()
     }
 
-    /// Gracefully shut down a VM by name and remove it from the registry.
+    /// Atomically remove `name` from every auxiliary registry: the VM map,
+    /// the net-enabled set, warm-pool slots, sandbox records pointing at
+    /// this VM, and any in-flight background sessions on it (marked
+    /// `terminated` — their VM is gone, so they can never complete; the
+    /// completion task never overwrites a non-running status). Returns the
+    /// removed handle when the VM was registered.
+    fn unregister(&mut self, name: &str) -> Option<Arc<dyn VmHandle>> {
+        let handle = self.vms.remove(name);
+        self.net_vms.remove(name);
+        self.pool.retain(|s| s.name != name);
+        self.sandboxes.retain(|_, r| r.vm_name != name);
+        {
+            let mut sessions = self.sessions.lock().unwrap();
+            for info in sessions.values_mut() {
+                if info.vm_name == name && info.status == "running" {
+                    info.status = "terminated".to_string();
+                }
+            }
+        }
+        handle
+    }
+
+    /// Gracefully shut down a VM by name and remove it — and all of its
+    /// registry state (pool slot, net tracking, sandbox and session
+    /// records) — from the registry.
     pub async fn shutdown(&mut self, name: &str) -> Result<(), AdapterError> {
         let handle = self
-            .vms
-            .remove(name)
+            .unregister(name)
             .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
         handle.shutdown().await
     }
 
-    /// Force-kill a VM by removing it from the registry; the handle's
-    /// Drop kills the process.
+    /// Force-kill a VM by removing it — and all of its registry state —
+    /// from the registry; the handle's Drop kills the process.
     pub async fn kill(&mut self, name: &str) -> Result<(), AdapterError> {
-        self.vms
-            .remove(name)
+        self.unregister(name)
             .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
         Ok(())
     }
 
-    /// Destroy a VM: stop it and remove it from the registry.
-    /// Never touches persistent data. Sandbox records pointing at this VM
-    /// are dropped too — no dangling records after a direct destroy.
+    /// Destroy a VM: stop it and remove it — and all of its registry
+    /// state — from the registry. Never touches persistent data.
+    ///
+    /// Since the unified `unregister`, `destroy` behaves exactly like
+    /// [`Self::shutdown`]; the thin alias is kept so the protocol commands
+    /// retain their distinct semantics.
     pub async fn destroy(&mut self, name: &str) -> Result<(), AdapterError> {
-        let handle = self
-            .vms
-            .remove(name)
-            .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
-        self.pool.retain(|s| s.name != name);
-        self.net_vms.remove(name);
-        self.sandboxes.retain(|_, r| r.vm_name != name);
-        handle.shutdown().await
+        self.shutdown(name).await
     }
 
     /// Shut down all VMs and clear the registry.
@@ -386,9 +404,7 @@ impl VmManager {
             };
             if remove {
                 tracing::warn!(%name, "Reaping dead VM");
-                self.vms.remove(&name);
-                self.net_vms.remove(name.as_ref());
-                self.pool.retain(|s| s.name != name.as_ref());
+                self.unregister(name.as_ref());
                 dead.push(name);
             }
         }

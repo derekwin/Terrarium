@@ -479,7 +479,8 @@ async fn test_session_kill_running_session() {
     assert_eq!(resp.data.unwrap()["status"], "killed");
 }
 
-/// session_kill of a session whose VM is gone → honest error.
+/// Destroying a VM terminates its orphaned sessions; session_kill of such
+/// a session → honest error (never fake success).
 #[tokio::test]
 async fn test_session_kill_vm_gone() {
     let gate = Arc::new(tokio::sync::Notify::new());
@@ -503,6 +504,13 @@ async fn test_session_kill_vm_gone() {
         .to_string();
 
     execute(&mut mgr, Command::new("destroy").with_name("exec-vm")).await;
+    // Destroy must terminate the orphaned session, not leave it "running".
+    let resp = execute(
+        &mut mgr,
+        Command::new("session_status").with_session_id(&session_id),
+    )
+    .await;
+    assert_eq!(resp.data.unwrap()["status"], "terminated");
     let resp = execute(
         &mut mgr,
         Command::new("session_kill").with_session_id(&session_id),
@@ -510,8 +518,8 @@ async fn test_session_kill_vm_gone() {
     .await;
     assert!(!resp.is_ok());
     assert!(
-        resp.error.unwrap().contains("not found"),
-        "killing a session on a gone VM should error honestly"
+        resp.error.unwrap().contains("not running"),
+        "killing a terminated session should error honestly"
     );
     gate.notify_one();
 }

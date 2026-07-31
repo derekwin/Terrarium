@@ -11,7 +11,7 @@ use std::sync::Arc;
 use adapter_traits::{VmName, VmSpec};
 use common::MockVmAdapter;
 
-use terrarium_engine::manager::VmManager;
+use terrarium_engine::manager::{SandboxRecord, VmManager};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -135,6 +135,139 @@ async fn test_destroy_removes_and_cleans() {
     // Net tracking cleaned up.
     assert!(!mgr.has_net("destroy-vm"));
     assert_eq!(mgr.net_in_use(), 0);
+}
+
+/// Shutting down a warm-pool VM must drop its pool slot: a surviving slot
+/// would claim a dead VM.
+#[tokio::test]
+async fn test_shutdown_cleans_pool_slot() {
+    let adapter = Arc::new(MockVmAdapter::new());
+    let mut mgr = VmManager::new(adapter, "/tmp".into());
+
+    mgr.pool_create(1, "/fake/vmlinux", "/fake/agent.cpio.gz", false)
+        .await
+        .unwrap();
+    assert_eq!(mgr.pool_list().len(), 1);
+
+    mgr.shutdown("pool-0").await.unwrap();
+
+    assert!(mgr.pool_list().is_empty(), "pool slot must not dangle");
+    assert!(mgr.list_names().is_empty());
+}
+
+/// Killing a pool VM must drop its slot and its net registration (a stale
+/// net_vms entry would block net_down via net_in_use).
+#[tokio::test]
+async fn test_kill_cleans_pool_slot_and_net() {
+    let adapter = Arc::new(MockVmAdapter::new());
+    let mut mgr = VmManager::new(adapter, "/tmp".into());
+
+    mgr.pool_create(1, "/fake/vmlinux", "/fake/agent.cpio.gz", true)
+        .await
+        .unwrap();
+    assert_eq!(mgr.pool_list().len(), 1);
+    assert!(mgr.has_net("pool-0"));
+    assert_eq!(mgr.net_in_use(), 1);
+
+    mgr.kill("pool-0").await.unwrap();
+
+    assert!(mgr.pool_list().is_empty(), "pool slot must not dangle");
+    assert!(!mgr.has_net("pool-0"));
+    assert_eq!(mgr.net_in_use(), 0);
+}
+
+/// Shutting down a net VM must drop its net registration too.
+#[tokio::test]
+async fn test_shutdown_cleans_net_tracking() {
+    let adapter = Arc::new(MockVmAdapter::new());
+    let mut mgr = VmManager::new(adapter, "/tmp".into());
+
+    let mut spec = test_spec("net-shutdown-vm");
+    spec.net = true;
+    mgr.spawn(spec).await.unwrap();
+    assert_eq!(mgr.net_in_use(), 1);
+
+    mgr.shutdown("net-shutdown-vm").await.unwrap();
+
+    assert!(!mgr.has_net("net-shutdown-vm"));
+    assert_eq!(mgr.net_in_use(), 0);
+}
+
+/// Destroying a VM drops its sandbox records and terminates any in-flight
+/// background sessions on it (their VM is gone, so they can never
+/// complete — they must not stay "running" forever).
+#[tokio::test]
+async fn test_destroy_cleans_sandboxes_and_sessions() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let adapter = Arc::new(
+        MockVmAdapter::new()
+            .with_alive(true)
+            .with_exec_gate(gate.clone()),
+    );
+    let mut mgr = VmManager::new(adapter, "/tmp".into());
+
+    mgr.spawn(test_spec("tenant-x")).await.unwrap();
+    mgr.sandbox_insert(SandboxRecord {
+        id: "sb-1".into(),
+        tenant: "x".into(),
+        vm_name: "tenant-x".into(),
+        workdir: "/workdir/sb-1".into(),
+        created_at: 0,
+        policy: None,
+        pool_backed: false,
+    });
+    let sid = "session-1".to_string();
+    mgr.exec_background(
+        "tenant-x",
+        &["sleep".into(), "100".into()],
+        60,
+        true,
+        &sid,
+        Some("/workdir/sb-1"),
+        Some("sb-1".into()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(mgr.session_status(&sid).unwrap().status, "running");
+
+    mgr.destroy("tenant-x").await.unwrap();
+
+    assert!(mgr.sandbox_list(None).is_empty(), "sandbox records must go");
+    assert_eq!(
+        mgr.session_status(&sid).unwrap().status,
+        "terminated",
+        "orphaned session must not stay running"
+    );
+    assert!(mgr
+        .session_list()
+        .iter()
+        .all(|s| s.vm_name != "tenant-x" || s.status != "running"));
+
+    gate.notify_one();
+}
+
+/// Reaping a dead VM drops its sandbox records too.
+#[tokio::test]
+async fn test_reap_dead_cleans_sandbox_records() {
+    let adapter = Arc::new(MockVmAdapter::new().with_alive(false));
+    let mut mgr = VmManager::new(adapter, "/tmp".into());
+
+    mgr.spawn(test_spec("dead-vm")).await.unwrap();
+    mgr.sandbox_insert(SandboxRecord {
+        id: "sb-dead".into(),
+        tenant: "t".into(),
+        vm_name: "dead-vm".into(),
+        workdir: "/workdir/sb-dead".into(),
+        created_at: 0,
+        policy: None,
+        pool_backed: false,
+    });
+
+    let reaped = mgr.reap_dead();
+    assert_eq!(reaped.len(), 1);
+
+    assert!(mgr.sandbox_list(None).is_empty(), "sandbox records must go");
 }
 
 #[tokio::test]
