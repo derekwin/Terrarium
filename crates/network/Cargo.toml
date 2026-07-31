@@ -5,5 +5,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-adapter-traits = { path = "../adapter/traits" }
+adapter-traits = { path = "../adapter/traits", version = "0.1.0" }
 tracing = { workspace = true }

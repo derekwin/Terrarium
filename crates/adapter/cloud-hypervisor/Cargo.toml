@@ -6,9 +6,9 @@ license.workspace = true
 
 [dependencies]
 libc = "0.2"
-adapter-traits = { path = "../traits" }
-terrarium-fs = { path = "../../fs" }
-terrarium-network = { path = "../../network" }
+adapter-traits = { path = "../traits", version = "0.1.0" }
+terrarium-fs = { path = "../../fs", version = "0.1.0" }
+terrarium-network = { path = "../../network", version = "0.1.0" }
 async-trait = "0.1"
 serde = { workspace = true }
 serde_json = { workspace = true }

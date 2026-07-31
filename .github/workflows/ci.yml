@@ -32,6 +32,9 @@ jobs:
       - run: cargo install cargo-audit --locked
       - run: cargo audit
 
+      # License + dependency policy gate (cargo-deny)
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   python:
     runs-on: ubuntu-latest
     steps:
