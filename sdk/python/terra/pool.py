@@ -127,21 +127,9 @@ class Pool:
         claim = self._client.pool_claim(self._layers)
         session_id = f"sb-{uuid4().hex[:4]}"
         workdir = f"/workdir/{session_id}"
-        sb = Sandbox.__new__(Sandbox)
-        sb._tenant = "pool"
-        sb._id = None  # not an engine sandbox — legacy vm_exec path
-        sb._session_id = session_id
-        sb._vm_name = claim["name"]
-        sb._workdir = workdir
-        sb._client = self._client
-        sb._alive = True
-        sb._default_timeout = 600
-        sb._backend = "ch"
-        sb._env = {}
-        sb._from_pool = True
-        sb.metadata = {}
-        sb._client.vm_exec(sb._vm_name, ["mkdir", "-p", sb._workdir], timeout_secs=5)
-        return sb
+        return Sandbox._from_claimed_vm(
+            self._client, claim["name"], workdir, session_id
+        )
 
     def release(self, sandbox: Sandbox) -> None:
         """Release a claimed pool VM back to idle.

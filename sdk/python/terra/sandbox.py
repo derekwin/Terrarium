@@ -301,6 +301,38 @@ class Sandbox:
         self._pool_backed: bool = bool(resp.get("pool", False))
         self.metadata: dict = metadata or {}
 
+    @classmethod
+    def _from_claimed_vm(
+        cls,
+        client: TerraClient,
+        vm_name: str,
+        workdir: str,
+        session_id: str,
+        *,
+        timeout: int = 600,
+    ) -> "Sandbox":
+        """Build a pool-claimed session (legacy path: not an engine sandbox).
+
+        Used by Pool.acquire: the session shares the claimed pool VM but
+        has no engine-side sandbox record, so exec/kill take the vm_exec
+        path (_from_pool=True). All state mirrors Sandbox.__init__'s layout.
+        """
+        sb = cls.__new__(cls)
+        sb._tenant = "pool"
+        sb._id = None
+        sb._session_id = session_id
+        sb._vm_name = vm_name
+        sb._workdir = workdir
+        sb._client = client
+        sb._alive = True
+        sb._default_timeout = timeout
+        sb._backend = "ch"
+        sb._env = {}
+        sb._from_pool = True
+        sb.metadata = {}
+        sb._client.vm_exec(sb._vm_name, ["mkdir", "-p", sb._workdir], timeout_secs=5)
+        return sb
+
     # ── properties ─────────────────────────────────────────────────
 
     @property
