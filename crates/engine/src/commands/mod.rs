@@ -12,8 +12,10 @@ mod session;
 mod snapshot;
 mod vm;
 
+use std::sync::Arc;
+
 use crate::manager::VmManager;
-use adapter_traits::{VmHandle, VmName, VmSpec};
+use adapter_traits::{AdapterError, ExecOpts, ExecResult, VmHandle, VmName, VmSpec};
 pub(crate) use terrarium_protocol::{Command, Response};
 
 /// Extract the required `name` field from a command.
@@ -123,21 +125,95 @@ pub(crate) async fn run_exec(
                 Err(e) => Response::err(e.to_string()),
             }
         }
-        "blocking" => match mgr
-            .exec(vm_name, args, timeout, sandbox, work_dir, policy)
-            .await
-        {
-            Ok(r) => Response::ok(serde_json::json!({
-                "stdout": r.stdout,
-                "stderr": r.stderr,
-                "exit_code": r.exit_code,
-            })),
-            Err(e) => Response::err(e.to_string()),
-        },
+        "blocking" => blocking_exec_response(
+            mgr.exec(vm_name, args, timeout, sandbox, work_dir, policy)
+                .await,
+        ),
         other => Response::err(format!(
             "invalid exec_mode {:?}: expected \"blocking\" or \"background\"",
             other
         )),
+    }
+}
+
+/// A blocking exec resolved while the manager lock is held. The `Arc`
+/// handle keeps the VM alive and the fully-built `ExecOpts` needs no
+/// further registry access, so the exec itself can run lock-free — a
+/// long-running exec (up to its timeout) must not serialize every other
+/// command behind `Mutex<VmManager>`.
+pub(crate) struct PreparedExec {
+    pub handle: Arc<dyn VmHandle>,
+    pub opts: ExecOpts,
+}
+
+/// Resolve a blocking `exec` / `sandbox_exec` command to its handle and
+/// options. Runs under the manager lock (cheap registry lookups); the
+/// caller drops the lock before awaiting `handle.exec`.
+///
+/// Replicates the exact validation order of `run_exec` — and, for
+/// sandbox_exec, the record lookup of `cmd_sandbox_exec` — so error
+/// messages and their precedence stay byte-identical to the shared
+/// `execute` path. Background mode never reaches here: the daemon falls
+/// back to `execute` for it (it registers its session under the lock and
+/// returns immediately; its spawned task already runs lock-free).
+pub(crate) fn prepare_blocking_exec(
+    mgr: &VmManager,
+    cmd: &Command,
+) -> Result<PreparedExec, Response> {
+    let (name, sandbox_default, work_dir, stored_policy) = match cmd.command.as_str() {
+        "exec" => (require_name(cmd)?, false, None, None),
+        "sandbox_exec" => {
+            let id = cmd
+                .id
+                .clone()
+                .ok_or_else(|| Response::err("Missing 'id' field"))?;
+            let record = mgr
+                .sandbox_get(&id)
+                .ok_or_else(|| Response::err(format!("Sandbox '{}' not found", id)))?;
+            (record.vm_name, true, Some(record.workdir), record.policy)
+        }
+        other => return Err(Response::err(format!("Unknown command: {}", other))),
+    };
+
+    if cmd.args.is_empty() {
+        return Err(Response::err("Missing 'args' field"));
+    }
+    let timeout = cmd.timeout_secs.unwrap_or(60).min(3600);
+    let sandbox = cmd.sandbox.unwrap_or(sandbox_default);
+    let policy = cmd.policy.clone().or(stored_policy);
+    if !sandbox && policy.is_some() {
+        return Err(Response::err(
+            "'policy' requires sandboxed exec (set 'sandbox': true)",
+        ));
+    }
+    if let Some(policy) = policy.as_ref() {
+        validate_policy(policy)?;
+    }
+
+    let handle = mgr.get_handle(&name).ok_or_else(|| {
+        Response::err(AdapterError::not_found(format!("VM '{}' not found", name)).to_string())
+    })?;
+
+    let mut opts = ExecOpts::new(cmd.args.clone(), timeout).with_sandbox(sandbox);
+    if let Some(work_dir) = work_dir {
+        opts = opts.with_work_dir(work_dir);
+    }
+    opts.policy = policy;
+    Ok(PreparedExec { handle, opts })
+}
+
+/// Build the blocking-exec response — `{stdout, stderr, exit_code}` on
+/// success, `{status:"error", error:<msg>}` on failure. Shared by the
+/// lock-free daemon path and `run_exec` so the wire format is identical
+/// whichever path served the command.
+pub(crate) fn blocking_exec_response(result: Result<ExecResult, AdapterError>) -> Response {
+    match result {
+        Ok(r) => Response::ok(serde_json::json!({
+            "stdout": r.stdout,
+            "stderr": r.stderr,
+            "exit_code": r.exit_code,
+        })),
+        Err(e) => Response::err(e.to_string()),
     }
 }
 

@@ -15,7 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
-use crate::commands::{execute, Command};
+use crate::commands::{blocking_exec_response, execute, prepare_blocking_exec, Command};
 use crate::manager::VmManager;
 use terrarium_protocol::Response;
 
@@ -154,6 +154,28 @@ async fn dispatch(
     }
     let mut mgr = manager.lock().await;
     mgr.reap_dead();
+
+    // Blocking exec is the one command that can run for up to its full
+    // timeout (3600s). Resolve everything under the lock — handle Arc +
+    // ExecOpts — then drop the lock before awaiting `handle.exec`, so a
+    // long-running exec no longer serializes every other command behind
+    // `Mutex<VmManager>`. Background execs keep the shared `execute` path
+    // below: they register their session under the lock and return
+    // immediately (their spawned task already runs lock-free), and an
+    // invalid exec_mode must still produce the shared-path error.
+    if matches!(cmd.command.as_str(), "exec" | "sandbox_exec")
+        && cmd.exec_mode.as_deref().unwrap_or("blocking") == "blocking"
+    {
+        match prepare_blocking_exec(&mgr, &cmd) {
+            Ok(prepared) => {
+                drop(mgr); // the exec itself runs without the manager lock
+                let result = prepared.handle.exec(&prepared.opts).await;
+                return (blocking_exec_response(result), false);
+            }
+            Err(resp) => return (resp, false),
+        }
+    }
+
     (execute(&mut mgr, cmd).await, false)
 }
 

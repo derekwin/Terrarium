@@ -69,6 +69,10 @@ pub struct MockVmHandle {
     /// genuinely "running" background session. Plain blocking execs
     /// (mkdir, rm, ...) never park.
     exec_gate: Option<Arc<tokio::sync::Notify>>,
+    /// When set, exec calls WITHOUT an exec_id (blocking execs) park on
+    /// this gate before returning — lets tests observe a blocking exec
+    /// that is genuinely in flight (e.g. the daemon lock-free path).
+    blocking_exec_gate: Option<Arc<tokio::sync::Notify>>,
     /// Shared ping counter (readiness probe assertions).
     ping_count: Arc<Mutex<u32>>,
     /// First N pings fail ("agent not up yet"), then pings succeed.
@@ -88,6 +92,7 @@ impl MockVmHandle {
         exec_log: Arc<Mutex<Vec<ExecCall>>>,
         kill_log: Arc<Mutex<Vec<String>>>,
         exec_gate: Option<Arc<tokio::sync::Notify>>,
+        blocking_exec_gate: Option<Arc<tokio::sync::Notify>>,
         ping_count: Arc<Mutex<u32>>,
         ping_ready_after: u32,
     ) -> Self {
@@ -104,6 +109,7 @@ impl MockVmHandle {
             exec_log,
             kill_log,
             exec_gate,
+            blocking_exec_gate,
             ping_count,
             ping_ready_after,
         }
@@ -161,6 +167,9 @@ impl VmHandle for MockVmHandle {
                 policy: opts.policy.clone(),
             });
             if let (Some(gate), Some(_)) = (&self.exec_gate, &opts.exec_id) {
+                gate.notified().await;
+            }
+            if let (Some(gate), None) = (&self.blocking_exec_gate, &opts.exec_id) {
                 gate.notified().await;
             }
             let s = self.inner.lock().unwrap();
@@ -295,6 +304,7 @@ pub struct MockVmAdapter {
     exec_log: Arc<Mutex<Vec<ExecCall>>>,
     kill_log: Arc<Mutex<Vec<String>>>,
     exec_gate: Option<Arc<tokio::sync::Notify>>,
+    blocking_exec_gate: Option<Arc<tokio::sync::Notify>>,
     ping_count: Arc<Mutex<u32>>,
     ping_ready_after: u32,
 }
@@ -316,6 +326,7 @@ impl MockVmAdapter {
             exec_log: Arc::new(Mutex::new(Vec::new())),
             kill_log: Arc::new(Mutex::new(Vec::new())),
             exec_gate: None,
+            blocking_exec_gate: None,
             ping_count: Arc::new(Mutex::new(0)),
             ping_ready_after: 0,
         }
@@ -340,6 +351,14 @@ impl MockVmAdapter {
     #[allow(dead_code)]
     pub fn with_exec_gate(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
         self.exec_gate = Some(gate);
+        self
+    }
+
+    /// Park execs WITHOUT an exec_id (blocking execs) on this gate until
+    /// `notify_one()` — keeps a blocking exec genuinely in flight.
+    #[allow(dead_code)]
+    pub fn with_blocking_exec_gate(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.blocking_exec_gate = Some(gate);
         self
     }
 
@@ -406,6 +425,7 @@ impl MockVmAdapter {
             self.exec_log.clone(),
             self.kill_log.clone(),
             self.exec_gate.clone(),
+            self.blocking_exec_gate.clone(),
             self.ping_count.clone(),
             self.ping_ready_after,
         )
