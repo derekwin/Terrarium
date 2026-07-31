@@ -69,6 +69,11 @@ pub(crate) fn ch_args(
         args.push("--fs".into());
         args.push(format!("tag=rootfs,socket={},num_queues=1", fs_sock));
     }
+    // Free-page reporting: the guest proactively reports freed pages so
+    // the host reclaims them passively (~97% RSS reclaim measured, R-M1).
+    // Always on — zero-size balloon, no guest-visible semantics change.
+    args.push("--balloon".into());
+    args.push("size=0,free_page_reporting=on".into());
     if let Some(tap) = tap {
         args.push("--net".into());
         args.push(format!("tap={}", tap));
@@ -160,5 +165,60 @@ pub(crate) async fn wait_for_socket(
             )));
         }
         sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adapter_traits::VmName;
+
+    fn spec(max_memory_mb: Option<u64>) -> VmSpec {
+        VmSpec {
+            name: VmName::new("test".to_string()).unwrap(),
+            kernel: "/k".into(),
+            cmdline: None,
+            boot_vcpus: 1,
+            max_vcpus: Some(4),
+            memory_mb: 512,
+            max_memory_mb,
+            initramfs: Some("/i".into()),
+            net: false,
+            fs: None,
+            backend_config: None,
+        }
+    }
+
+    fn arg_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|a| a == flag)
+            .map(|i| args[i + 1].as_str())
+    }
+
+    /// Every spawn carries the FPR balloon (R-M2): zero-size balloon with
+    /// free page reporting, regardless of memory hotplug configuration.
+    #[test]
+    fn balloon_fpr_always_present() {
+        for max in [None, Some(4096)] {
+            let args = ch_args(&spec(max), "/s", None, "/v", None);
+            assert_eq!(
+                arg_after(&args, "--balloon"),
+                Some("size=0,free_page_reporting=on"),
+                "args: {:?}",
+                args
+            );
+        }
+    }
+
+    /// The memory arg keeps its existing shape with and without hotplug.
+    #[test]
+    fn memory_arg_shape() {
+        let args = ch_args(&spec(Some(4096)), "/s", None, "/v", None);
+        assert_eq!(
+            arg_after(&args, "--memory"),
+            Some("size=512M,hotplug_method=virtio-mem,hotplug_size=4G,shared=on")
+        );
+        let args = ch_args(&spec(None), "/s", None, "/v", None);
+        assert_eq!(arg_after(&args, "--memory"), Some("size=512M,shared=on"));
     }
 }
