@@ -30,11 +30,14 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 from .client import TerraClient
 from .sandbox import Sandbox
 from .template import Template
+
+_log = logging.getLogger(__name__)
 
 
 # Template base label → engine system layer name.
@@ -98,11 +101,18 @@ class Pool:
 
     def _create_pool(self) -> None:
         """Create the warm-pool VMs (idempotent — re-creates if needed)."""
-        self._client.pool_create(
+        resp = self._client.pool_create(
             self._size,
             kernel=self._kernel or None,
             net=self._net,
         )
+        failed = resp.get("failed", [])
+        if failed:
+            _log.warning(
+                "warm pool: %d of %d VMs never became ready: %s",
+                len(failed), self._size,
+                "; ".join(f"{f['name']}: {f['error']}" for f in failed),
+            )
 
     # ── acquire / release ──────────────────────────────────────────
 

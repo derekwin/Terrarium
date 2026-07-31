@@ -187,6 +187,7 @@ def cmd_sandbox_create(args) -> int:
             policy=policy,
             env=_parse_kv_pairs(args.env),
             timeout=args.timeout,
+            pool=not args.no_pool,
         )
         out = {
             "id": sb.id,
@@ -194,6 +195,7 @@ def cmd_sandbox_create(args) -> int:
             "vm": sb.vm,
             "status": sb.status,
             "backend": sb.backend,
+            "pool_backed": sb.pool_backed,
         }
         # The CLI returns the handle to the user — don't let Sandbox.__del__
         # kill the freshly created record when this process exits.
@@ -1349,6 +1351,8 @@ Common workflows:
     sp.add_argument("--memory", type=int, default=256, metavar="MB", help="memory in MiB (default: 256)")
     sp.add_argument("--disk", type=int, metavar="MB", help="disk size in MiB (reserved)")
     sp.add_argument("--net", action="store_true", help="attach NAT networking")
+    sp.add_argument("--no-pool", action="store_true",
+                    help="force a cold-booted dedicated tenant VM instead of claiming from the warm pool")
     sp.add_argument("--env", nargs="*", help="environment variables (KEY=VALUE)")
     sp.add_argument("--timeout", type=int, default=600, help="default command timeout (seconds)")
     sp.add_argument("--backend", default="auto", choices=["auto", "ch", "sandlock"])
