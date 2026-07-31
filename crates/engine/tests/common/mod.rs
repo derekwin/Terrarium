@@ -69,6 +69,10 @@ pub struct MockVmHandle {
     /// genuinely "running" background session. Plain blocking execs
     /// (mkdir, rm, ...) never park.
     exec_gate: Option<Arc<tokio::sync::Notify>>,
+    /// Shared ping counter (readiness probe assertions).
+    ping_count: Arc<Mutex<u32>>,
+    /// First N pings fail ("agent not up yet"), then pings succeed.
+    ping_ready_after: u32,
 }
 
 impl MockVmHandle {
@@ -84,6 +88,8 @@ impl MockVmHandle {
         exec_log: Arc<Mutex<Vec<ExecCall>>>,
         kill_log: Arc<Mutex<Vec<String>>>,
         exec_gate: Option<Arc<tokio::sync::Notify>>,
+        ping_count: Arc<Mutex<u32>>,
+        ping_ready_after: u32,
     ) -> Self {
         Self {
             inner: Mutex::new(MockState {
@@ -98,6 +104,8 @@ impl MockVmHandle {
             exec_log,
             kill_log,
             exec_gate,
+            ping_count,
+            ping_ready_after,
         }
     }
 }
@@ -176,6 +184,24 @@ impl VmHandle for MockVmHandle {
         Box::pin(async move {
             self.kill_log.lock().unwrap().push(exec_id.to_string());
             Ok(())
+        })
+    }
+
+    fn ping<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let mut n = self.ping_count.lock().unwrap();
+            *n += 1;
+            if *n <= self.ping_ready_after {
+                Err(AdapterError::internal("guest agent not ready"))
+            } else {
+                Ok(())
+            }
         })
     }
 
@@ -290,6 +316,8 @@ pub struct MockVmAdapter {
     exec_log: Arc<Mutex<Vec<ExecCall>>>,
     kill_log: Arc<Mutex<Vec<String>>>,
     exec_gate: Option<Arc<tokio::sync::Notify>>,
+    ping_count: Arc<Mutex<u32>>,
+    ping_ready_after: u32,
 }
 
 impl MockVmAdapter {
@@ -310,7 +338,23 @@ impl MockVmAdapter {
             exec_log: Arc::new(Mutex::new(Vec::new())),
             kill_log: Arc::new(Mutex::new(Vec::new())),
             exec_gate: None,
+            ping_count: Arc::new(Mutex::new(0)),
+            ping_ready_after: 0,
         }
+    }
+
+    /// Make the first N pings fail (guest agent still booting), then
+    /// succeed — exercises the pool readiness wait.
+    #[allow(dead_code)]
+    pub fn with_ping_ready_after(mut self, n: u32) -> Self {
+        self.ping_ready_after = n;
+        self
+    }
+
+    /// Shared count of ping calls made on handles from this adapter.
+    #[allow(dead_code)]
+    pub fn ping_count(&self) -> Arc<Mutex<u32>> {
+        self.ping_count.clone()
     }
 
     /// Park execs that carry an exec_id (background sessions) on this
@@ -404,6 +448,8 @@ impl MockVmAdapter {
             self.exec_log.clone(),
             self.kill_log.clone(),
             self.exec_gate.clone(),
+            self.ping_count.clone(),
+            self.ping_ready_after,
         )
     }
 }

@@ -104,6 +104,11 @@ pub struct Command {
     // sandbox_exec / sandbox_info / sandbox_kill: sandbox id (sb-<hex>)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+
+    // sandbox_create: allow claiming the tenant VM from the warm pool
+    // (default true; false forces a cold-booted dedicated VM)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<bool>,
 }
 
 impl Command {
@@ -134,6 +139,7 @@ impl Command {
             policy: None,
             tenant: None,
             id: None,
+            pool: None,
         }
     }
 
@@ -264,6 +270,13 @@ impl Command {
     /// Builder: set sandbox id (for sandbox_exec / sandbox_info / sandbox_kill).
     pub fn with_id(mut self, id: &str) -> Self {
         self.id = Some(id.to_string());
+        self
+    }
+
+    /// Builder: allow/forbid claiming the tenant VM from the warm pool
+    /// (sandbox_create; default allow).
+    pub fn with_pool(mut self, pool: bool) -> Self {
+        self.pool = Some(pool);
         self
     }
 

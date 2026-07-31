@@ -19,6 +19,8 @@ pub struct PoolSlot {
     pub claimed: bool,
     /// Layers attached when claimed.
     pub layers: Vec<String>,
+    /// Whether this VM was booted with networking (claim matching).
+    pub net: bool,
 }
 
 /// Information about a background exec session.
@@ -47,6 +49,19 @@ pub struct SandboxRecord {
     /// Sandlock policy stored at sandbox_create; inherited by sandbox_exec
     /// unless the call carries an override.
     pub policy: Option<ExecPolicy>,
+    /// True when the tenant VM is a claimed warm-pool VM (pool-N);
+    /// tenant_destroy releases it back to the pool instead of destroying.
+    pub pool_backed: bool,
+}
+
+/// Outcome of `pool_create`: which VMs became ready and which failed
+/// their guest-agent readiness probe (and were destroyed again).
+#[derive(Debug, Default)]
+pub struct PoolCreateOutcome {
+    /// Names of VMs that are ready and slotted idle.
+    pub ready: Vec<String>,
+    /// (name, error) for VMs that never became ready.
+    pub failed: Vec<(String, String)>,
 }
 
 /// Central VM registry for the controller.
@@ -65,6 +80,9 @@ pub struct VmManager {
     sessions: Arc<Mutex<HashMap<String, SessionInfo>>>,
     /// Engine-level sandboxes (id → record).
     sandboxes: HashMap<String, SandboxRecord>,
+    /// Guest-agent readiness probe: attempts × interval (pool_create).
+    ready_attempts: u32,
+    ready_interval: std::time::Duration,
 }
 
 impl VmManager {
@@ -79,7 +97,17 @@ impl VmManager {
             snapshot_dir,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             sandboxes: HashMap::new(),
+            ready_attempts: 50,
+            ready_interval: std::time::Duration::from_millis(200),
         }
+    }
+
+    /// Override the guest-agent readiness probe used by `pool_create`
+    /// (mainly for tests; defaults are 50 attempts × 200ms).
+    pub fn with_readiness_probe(mut self, attempts: u32, interval_ms: u64) -> Self {
+        self.ready_attempts = attempts;
+        self.ready_interval = std::time::Duration::from_millis(interval_ms);
+        self
     }
 
     /// Return the directory used for snapshot artifacts.
@@ -139,15 +167,17 @@ impl VmManager {
     }
 
     /// Create `size` idle warm-pool VMs (agent initramfs, no fs).
-    /// Returns the names of the newly created pool VMs.
+    /// Each VM's guest agent is pinged before its slot goes idle; a VM
+    /// that never becomes ready is destroyed again and reported in
+    /// `PoolCreateOutcome::failed` (never silently slotted).
     pub async fn pool_create(
         &mut self,
         size: u32,
         kernel: &str,
         agent_initramfs: &str,
         net: bool,
-    ) -> Result<Vec<String>, AdapterError> {
-        let mut created = Vec::new();
+    ) -> Result<PoolCreateOutcome, AdapterError> {
+        let mut outcome = PoolCreateOutcome::default();
         for _ in 0..size {
             let name = format!("pool-{}", self.pool_next_id);
             self.pool_next_id += 1;
@@ -166,14 +196,47 @@ impl VmManager {
                 backend_config: None,
             };
             self.spawn(spec).await?;
-            self.pool.push(PoolSlot {
-                name: name.clone(),
-                claimed: false,
-                layers: Vec::new(),
-            });
-            created.push(name);
+            match self.wait_agent_ready(&name).await {
+                Ok(()) => {
+                    self.pool.push(PoolSlot {
+                        name: name.clone(),
+                        claimed: false,
+                        layers: Vec::new(),
+                        net,
+                    });
+                    outcome.ready.push(name);
+                }
+                Err(e) => {
+                    tracing::warn!(vm = %name, error = %e, "pool VM never became ready; destroying");
+                    if let Err(de) = self.destroy(&name).await {
+                        tracing::warn!(vm = %name, error = %de, "cleanup of unready pool VM failed");
+                    }
+                    outcome.failed.push((name, e.to_string()));
+                }
+            }
         }
-        Ok(created)
+        Ok(outcome)
+    }
+
+    /// Wait for a VM's guest agent to answer a ping, with bounded retries.
+    async fn wait_agent_ready(&self, name: &str) -> Result<(), AdapterError> {
+        let handle = self
+            .get_handle(name)
+            .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
+        let mut last_err = AdapterError::internal("readiness probe did not run".to_string());
+        for _ in 0..self.ready_attempts {
+            match handle.ping().await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_err = e;
+                    tokio::time::sleep(self.ready_interval).await;
+                }
+            }
+        }
+        Err(AdapterError::timeout(format!(
+            "guest agent of '{}' not ready after {} attempts: {}",
+            name, self.ready_attempts, last_err
+        )))
     }
 
     /// Pool status snapshot.
@@ -184,10 +247,22 @@ impl VmManager {
     /// Claim an idle pool VM and hot-plug the given layers.
     /// Returns the claimed VM name.
     pub async fn pool_claim(&mut self, layers: Vec<String>) -> Result<String, AdapterError> {
+        self.pool_claim_matching(layers, None).await
+    }
+
+    /// Claim an idle pool VM, optionally requiring a networking match
+    /// (`Some(true)` needs a net-enabled slot, `Some(false)` a plain one).
+    /// The upper is always ephemeral — no data may leak between sequential
+    /// claims of one slot.
+    pub async fn pool_claim_matching(
+        &mut self,
+        layers: Vec<String>,
+        net: Option<bool>,
+    ) -> Result<String, AdapterError> {
         let idx = self
             .pool
             .iter()
-            .position(|s| !s.claimed)
+            .position(|s| !s.claimed && net.is_none_or(|n| s.net == n))
             .ok_or_else(|| AdapterError::internal("warm pool exhausted".to_string()))?;
         let name = self.pool[idx].name.clone();
         let fs = adapter_traits::FsSpec {
@@ -271,7 +346,8 @@ impl VmManager {
     }
 
     /// Destroy a VM: stop it and remove it from the registry.
-    /// Never touches persistent data.
+    /// Never touches persistent data. Sandbox records pointing at this VM
+    /// are dropped too — no dangling records after a direct destroy.
     pub async fn destroy(&mut self, name: &str) -> Result<(), AdapterError> {
         let handle = self
             .vms
@@ -279,6 +355,7 @@ impl VmManager {
             .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
         self.pool.retain(|s| s.name != name);
         self.net_vms.remove(name);
+        self.sandboxes.retain(|_, r| r.vm_name != name);
         handle.shutdown().await
     }
 

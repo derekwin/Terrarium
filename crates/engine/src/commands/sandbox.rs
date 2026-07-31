@@ -29,24 +29,103 @@ fn record_json(r: &SandboxRecord) -> serde_json::Value {
         "workdir": r.workdir,
         "created_at": r.created_at,
         "policy": r.policy,
+        "pool_backed": r.pool_backed,
     })
 }
 
-/// {"command":"sandbox_create","tenant":"research", kernel/layers/...}
+/// Resolve the tenant's VM, creating it if needed:
+/// - a sandbox record for this tenant already exists → reuse its VM
+///   (pooled VMs are named pool-N, so indexing is by tenant, not name);
+/// - else, if pooling is allowed and a matching idle slot exists → claim
+///   it with the sandbox's layer set (ephemeral upper) and resize it when
+///   the spec asks for cpus/memory;
+/// - else cold-boot `tenant-<tenant>` via the same path as `create`.
 ///
-/// Idempotently ensures the tenant VM exists (VM-spec fields mirror
-/// `create`), then allocates a sandbox and creates its workdir in the
-/// guest. Response data: {id, vm, workdir}.
+/// Returns (vm_name, pool_backed).
+async fn ensure_tenant_vm(
+    mgr: &mut VmManager,
+    cmd: &Command,
+    tenant: &str,
+) -> Result<(String, bool), Response> {
+    if let Some(rec) = mgr.sandbox_list(Some(tenant)).into_iter().next() {
+        return Ok((rec.vm_name, rec.pool_backed));
+    }
+
+    // Pool path. A pooled VM needs a layered fs attached, so an empty
+    // layer list means "just the system base". A claim failure (no pool,
+    // no idle slot, net mismatch) falls through to the cold boot below.
+    if cmd.pool.unwrap_or(true) {
+        let mut pool_layers = cmd.layers.clone();
+        if pool_layers.is_empty() {
+            pool_layers.push(cmd.system.clone().unwrap_or_else(|| "base".into()));
+        }
+        if let Ok(name) = mgr.pool_claim_matching(pool_layers, Some(cmd.net)).await {
+            // Spec asks for cpus/memory differing from the pool boot
+            // config (1 vCPU / 256 MB) → resize post-claim.  Dimensions
+            // already at the requested size are skipped — CH rejects a
+            // no-op resize ("new size ... identical").
+            if cmd.cpus.is_some() || cmd.memory_mb.is_some() {
+                let handle = match mgr.get_handle(&name) {
+                    Some(h) => h,
+                    None => return Err(Response::err(format!("VM '{}' not found", name))),
+                };
+                let current = match handle.info().await {
+                    Ok(i) => i,
+                    Err(e) => {
+                        let _ = mgr.pool_release(&name).await;
+                        return Err(Response::err(format!("pool VM info failed: {}", e)));
+                    }
+                };
+                let want_cpus = cmd.cpus.map(|c| c as u32);
+                let want_mem_bytes = cmd.memory_mb.map(|mb| mb * 1024 * 1024);
+                let cpus = want_cpus.filter(|c| current.cpus != Some(*c as u8));
+                let mem = want_mem_bytes.filter(|m| current.memory_mb != Some(*m / 1024 / 1024));
+                if cpus.is_some() || mem.is_some() {
+                    if let Err(e) = handle.resize(cpus, mem).await {
+                        let _ = mgr.pool_release(&name).await;
+                        return Err(Response::err(format!("pool VM resize failed: {}", e)));
+                    }
+                }
+            }
+            return Ok((name, true));
+        }
+    }
+
+    let vm_name = format!("tenant-{}", tenant);
+    if mgr.get(&vm_name).is_none() {
+        let mut cmd = cmd.clone();
+        apply_system_base(&mut cmd);
+        cmd.name = Some(vm_name.clone());
+        let spec = match build_spec(&cmd) {
+            Ok(s) => s,
+            Err(e) => return Err(Response::err(e)),
+        };
+        if let Err(e) = spec.validate() {
+            return Err(Response::err(e));
+        }
+        if let Err(e) = mgr.spawn(spec).await {
+            return Err(Response::err(e.to_string()));
+        }
+    }
+    Ok((vm_name, false))
+}
+
+/// {"command":"sandbox_create","tenant":"research", kernel/layers/...,
+///  "pool":bool}
+///
+/// Idempotently ensures the tenant VM exists (from the warm pool when
+/// possible, else cold-booted; VM-spec fields mirror `create`), then
+/// allocates a sandbox and creates its workdir in the guest.
+/// Response data: {id, vm, workdir, pool}.
 pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Response {
     let tenant = match cmd.tenant.clone() {
         Some(t) => t,
         None => return Response::err("Missing 'tenant' field"),
     };
-    // Same whitelist as VmName — the tenant is embedded in the VM name.
+    // Same whitelist as VmName — the tenant may be embedded in a VM name.
     if let Err(e) = VmName::new(tenant.clone()) {
         return Response::err(format!("invalid tenant: {}", e));
     }
-    let vm_name = format!("tenant-{}", tenant);
     // Captured before `cmd` is consumed by the VM-create branch below.
     let policy = cmd.policy.clone();
     // Fail fast: an invalid stored policy would fail on every later exec.
@@ -56,23 +135,10 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
         }
     }
 
-    // Reuse an already-registered tenant VM (ignore the spec), else create
-    // it via the same path as `create`.
-    if mgr.get(&vm_name).is_none() {
-        let mut cmd = cmd;
-        apply_system_base(&mut cmd);
-        cmd.name = Some(vm_name.clone());
-        let spec = match build_spec(&cmd) {
-            Ok(s) => s,
-            Err(e) => return Response::err(e),
-        };
-        if let Err(e) = spec.validate() {
-            return Response::err(e);
-        }
-        if let Err(e) = mgr.spawn(spec).await {
-            return Response::err(e.to_string());
-        }
-    }
+    let (vm_name, pool_backed) = match ensure_tenant_vm(mgr, &cmd, &tenant).await {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
+    };
 
     let id = new_sandbox_id();
     let workdir = format!("/workdir/{}", id);
@@ -101,12 +167,14 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
         workdir: workdir.clone(),
         created_at: now_secs(),
         policy,
+        pool_backed,
     };
     mgr.sandbox_insert(record);
     Response::ok(serde_json::json!({
         "id": id,
         "vm": vm_name,
         "workdir": workdir,
+        "pool": pool_backed,
     }))
 }
 
@@ -277,8 +345,10 @@ pub(crate) async fn cmd_sandbox_kill(mgr: &mut VmManager, cmd: Command) -> Respo
 
 /// {"command":"tenant_destroy","tenant":"research"}
 ///
-/// Destroys the tenant VM (same semantics as `destroy`) and drops all of
-/// the tenant's sandbox records.
+/// Tears the tenant down: kills live sessions of its sandboxes, then —
+/// for a pool-backed tenant VM — releases the VM back to the pool (fs
+/// detached, slot idle again), else destroys the VM (same semantics as
+/// `destroy`). All of the tenant's sandbox records are dropped either way.
 pub(crate) async fn cmd_tenant_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
     let tenant = match cmd.tenant {
         Some(t) => t,
@@ -287,17 +357,54 @@ pub(crate) async fn cmd_tenant_destroy(mgr: &mut VmManager, cmd: Command) -> Res
     if let Err(e) = VmName::new(tenant.clone()) {
         return Response::err(format!("invalid tenant: {}", e));
     }
-    let vm_name = format!("tenant-{}", tenant);
-    match mgr.destroy(&vm_name).await {
-        Ok(()) => {
-            let removed = mgr.sandbox_remove_tenant(&tenant);
-            Response::ok(serde_json::json!({
-                "tenant": tenant,
-                "vm": vm_name,
-                "sandboxes_removed": removed,
-                "status": "destroyed",
-            }))
-        }
-        Err(e) => Response::err(e.to_string()),
+
+    // Resolve the tenant VM from the registry (pooled VMs are pool-N);
+    // fall back to the cold-boot name convention when no records exist.
+    let records = mgr.sandbox_list(Some(&tenant));
+    let (vm_name, pool_backed) = match records.first() {
+        Some(r) => (r.vm_name.clone(), r.pool_backed),
+        None => (format!("tenant-{}", tenant), false),
+    };
+    if mgr.get(&vm_name).is_none() {
+        return Response::err(format!("VM '{}' not found", vm_name));
     }
+
+    // Kill live sessions of this tenant's sandboxes (best effort: the VM
+    // teardown below is the real cleanup, so log and continue).
+    let sb_ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
+    let live: Vec<_> = mgr
+        .session_list()
+        .into_iter()
+        .filter(|s| {
+            s.status == "running" && s.sandbox.as_deref().is_some_and(|id| sb_ids.contains(&id))
+        })
+        .collect();
+    for s in &live {
+        if let Err(e) = mgr.session_kill(&s.session_id).await {
+            tracing::warn!(session = %s.session_id, error = %e, "session kill failed during tenant_destroy");
+        }
+    }
+
+    // Captured up front: a cold `destroy` already cascades the records
+    // (vm_name match), so counting afterwards would read 0.
+    let removed = records.len();
+    let released_to_pool = if pool_backed {
+        match mgr.pool_release(&vm_name).await {
+            Ok(()) => true,
+            Err(e) => return Response::err(e.to_string()),
+        }
+    } else {
+        match mgr.destroy(&vm_name).await {
+            Ok(()) => false,
+            Err(e) => return Response::err(e.to_string()),
+        }
+    };
+    mgr.sandbox_remove_tenant(&tenant);
+    Response::ok(serde_json::json!({
+        "tenant": tenant,
+        "vm": vm_name,
+        "sandboxes_removed": removed,
+        "released_to_pool": released_to_pool,
+        "status": if released_to_pool { "released" } else { "destroyed" },
+    }))
 }
