@@ -75,3 +75,11 @@ def test_pool_claim_layers_always_sent(client):
         client.pool_claim(["base"])
     cmd = _captured(m)
     assert cmd["layers"] == ["base"]
+
+
+def test_terra_error_is_unified_class():
+    """client.TerraError must BE exceptions.TerraError — single source of truth."""
+    from terra.client import TerraError as ClientTerraError
+    from terra.exceptions import TerraError
+
+    assert ClientTerraError is TerraError

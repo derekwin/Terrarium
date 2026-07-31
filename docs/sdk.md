@@ -230,13 +230,10 @@ Template.remove("py312")
 
 ```python
 from terra.exceptions import (
-    TerraError,           # 基类：sandbox_id, engine_error
-    EngineError,          # daemon 层（启动、协议、传输）
-    BuildError,           # layer / image 构建失败
+    TerraError,           # 统一基类（client/exceptions 共用）：sandbox_id, engine_error
     SandboxError,         # 沙箱相关错误基类
     SandboxTimeoutError,  # 操作超时
     SandboxStateError,    # 沙箱状态无效（已停止、已归还等）
-    ResourceError,        # 资源耗尽（OOM、磁盘满）
     ExecError,            # exec 非零退出码（含 exec_result 属性）
 )
 
