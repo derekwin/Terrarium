@@ -45,3 +45,7 @@ jobs:
           cd crates/engine && maturin develop
       - run: pip install -e sdk/python/
       - run: python -c "import terra; print('SDK OK')"
+      - name: Run non-e2e Python tests
+        run: |
+          pip install pytest
+          python -m pytest sdk/python/tests -m "not e2e" -v
