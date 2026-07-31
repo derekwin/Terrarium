@@ -20,25 +20,8 @@ pub fn pack_cpio_rootfs(layer_dir: &str, name: &str, output_dir: &str) -> Result
         return Err(format!("layer directory not found: {}", layer_dir));
     }
     let out = Path::new(output_dir).join(format!("{}.cpio.gz", name));
-    let tmp = out.with_extension("tmp");
 
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "cd {} && find . | cpio -o -H newc --quiet | gzip > {}",
-            shell_escape(layer_dir),
-            shell_escape(&tmp.to_string_lossy()),
-        ))
-        .output()
-        .map_err(|e| format!("pack cpio: {}", e))?;
-
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("cpio pack failed: {}", stderr.trim()));
-    }
-
-    std::fs::rename(&tmp, &out).map_err(|e| format!("rename {:?} -> {:?}: {}", tmp, out, e))?;
+    pack_dir(src, &out)?;
 
     tracing::info!(%name, output = %out.display(), "cpio rootfs packed");
     Ok(out.to_string_lossy().to_string())
@@ -97,60 +80,18 @@ pub fn build_initramfs_agent(
         return Err(format!("init_template not found: {}", init_template));
     }
 
-    let work_dir = make_temp_dir("terrarium-agent-irfs")?;
-
-    // Create subdirectories
-    for subdir in &["bin", "lib", "proc", "sys", "dev", "tmp"] {
-        std::fs::create_dir_all(work_dir.join(subdir))
-            .map_err(|e| format!("mkdir {}/{}: {}", work_dir.display(), subdir, e))?;
-    }
-
-    // Copy busybox
-    std::fs::copy(src.join("bin/busybox"), work_dir.join("bin/busybox"))
-        .map_err(|e| format!("copy busybox: {}", e))?;
-
-    // Create busybox symlinks
-    for cmd in &[
-        "sh", "mount", "umount", "mkdir", "echo", "cat", "ls", "ip", "udhcpc",
-    ] {
-        let dest = work_dir.join("bin").join(cmd);
-        if dest.exists() {
-            std::fs::remove_file(&dest).map_err(|e| format!("remove {}: {}", dest.display(), e))?;
-        }
-        std::os::unix::fs::symlink("busybox", &dest)
-            .map_err(|e| format!("symlink {cmd} -> busybox: {e}"))?;
-    }
-
-    // Copy musl libs (ld-musl-*.so.1, libc.musl-*.so.1)
-    copy_musl_libs(src.join("lib"), work_dir.join("lib"))?;
-
-    // Copy guest-proxy
-    std::fs::copy(gp, work_dir.join("bin/guest-proxy"))
-        .map_err(|e| format!("copy guest-proxy: {e}"))?;
-
-    // Copy init template
-    let init_dest = work_dir.join("init");
-    std::fs::copy(init, &init_dest).map_err(|e| format!("copy init template: {e}"))?;
-
-    // chmod +x init and guest-proxy
-    for file in &[init_dest.clone(), work_dir.join("bin/guest-proxy")] {
-        let mut perms = std::fs::metadata(file)
-            .map_err(|e| format!("stat {}: {e}", file.display()))?
-            .permissions();
-        perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(file, perms)
-            .map_err(|e| format!("chmod +x {}: {e}", file.display()))?;
-    }
-
-    // Pack into cpio.gz
-    let out = Path::new(output);
-    pack_work_dir(&work_dir, out)?;
-
-    // Clean up temp dir
-    let _ = std::fs::remove_dir_all(&work_dir);
-
-    tracing::info!(output = %out.display(), "agent initramfs built");
-    Ok(out.to_string_lossy().to_string())
+    build_initramfs(
+        "terrarium-agent-irfs",
+        &["bin", "lib", "proc", "sys", "dev", "tmp"],
+        &[
+            "sh", "mount", "umount", "mkdir", "echo", "cat", "ls", "ip", "udhcpc",
+        ],
+        src,
+        Some(gp),
+        init,
+        Path::new(output),
+        "agent",
+    )
 }
 
 /// Build a virtiofs bootstrap initramfs (FS-M1): busybox + init.
@@ -173,10 +114,35 @@ pub fn build_initramfs_virtiofs(
         return Err(format!("init_template not found: {}", init_template));
     }
 
-    let work_dir = make_temp_dir("terrarium-virtiofs-irfs")?;
+    build_initramfs(
+        "terrarium-virtiofs-irfs",
+        &["bin", "lib", "proc", "sys", "dev", "tmp", "newroot"],
+        &["sh", "mount", "switch_root", "mkdir", "echo", "cat"],
+        src,
+        None,
+        init,
+        Path::new(output),
+        "virtiofs",
+    )
+}
 
-    // Create subdirectories (including newroot/)
-    for subdir in &["bin", "lib", "proc", "sys", "dev", "tmp", "newroot"] {
+/// Shared initramfs build core: busybox + musl libs (+ optional guest-proxy)
+/// + init script, packed to cpio.gz; `kind` only affects the tracing message.
+#[allow(clippy::too_many_arguments)]
+fn build_initramfs(
+    temp_prefix: &str,
+    subdirs: &[&str],
+    symlinks: &[&str],
+    src: &Path,
+    guest_proxy: Option<&Path>,
+    init: &Path,
+    out: &Path,
+    kind: &str,
+) -> Result<String, String> {
+    let work_dir = make_temp_dir(temp_prefix)?;
+
+    // Create subdirectories
+    for subdir in subdirs {
         std::fs::create_dir_all(work_dir.join(subdir))
             .map_err(|e| format!("mkdir {}/{}: {}", work_dir.display(), subdir, e))?;
     }
@@ -186,7 +152,7 @@ pub fn build_initramfs_virtiofs(
         .map_err(|e| format!("copy busybox: {e}"))?;
 
     // Create busybox symlinks
-    for cmd in &["sh", "mount", "switch_root", "mkdir", "echo", "cat"] {
+    for cmd in symlinks {
         let dest = work_dir.join("bin").join(cmd);
         if dest.exists() {
             std::fs::remove_file(&dest).map_err(|e| format!("remove {}: {}", dest.display(), e))?;
@@ -195,29 +161,40 @@ pub fn build_initramfs_virtiofs(
             .map_err(|e| format!("symlink {cmd} -> busybox: {e}"))?;
     }
 
-    // Copy musl libs
+    // Copy musl libs (ld-musl-*.so.1, libc.musl-*.so.1)
     copy_musl_libs(src.join("lib"), work_dir.join("lib"))?;
+
+    // Copy guest-proxy (agent initramfs only)
+    if let Some(gp) = guest_proxy {
+        std::fs::copy(gp, work_dir.join("bin/guest-proxy"))
+            .map_err(|e| format!("copy guest-proxy: {e}"))?;
+    }
 
     // Copy init template
     let init_dest = work_dir.join("init");
     std::fs::copy(init, &init_dest).map_err(|e| format!("copy init template: {e}"))?;
 
-    // chmod +x init
-    let mut perms = std::fs::metadata(&init_dest)
-        .map_err(|e| format!("stat {}: {e}", init_dest.display()))?
-        .permissions();
-    perms.set_mode(perms.mode() | 0o111);
-    std::fs::set_permissions(&init_dest, perms)
-        .map_err(|e| format!("chmod +x {}: {e}", init_dest.display()))?;
+    // chmod +x init (and guest-proxy)
+    let mut executables = vec![init_dest.clone()];
+    if guest_proxy.is_some() {
+        executables.push(work_dir.join("bin/guest-proxy"));
+    }
+    for file in &executables {
+        let mut perms = std::fs::metadata(file)
+            .map_err(|e| format!("stat {}: {e}", file.display()))?
+            .permissions();
+        perms.set_mode(perms.mode() | 0o111);
+        std::fs::set_permissions(file, perms)
+            .map_err(|e| format!("chmod +x {}: {e}", file.display()))?;
+    }
 
     // Pack into cpio.gz
-    let out = Path::new(output);
     pack_work_dir(&work_dir, out)?;
 
     // Clean up temp dir
     let _ = std::fs::remove_dir_all(&work_dir);
 
-    tracing::info!(output = %out.display(), "virtiofs initramfs built");
+    tracing::info!(output = %out.display(), "{kind} initramfs built");
     Ok(out.to_string_lossy().to_string())
 }
 
@@ -255,13 +232,19 @@ fn pack_work_dir(work_dir: &Path, output: &Path) -> Result<(), String> {
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let tmp = output.with_extension("tmp");
+    pack_dir(work_dir, output)
+}
+
+/// Shared pack core: `(cd <src> && find . | cpio -o -H newc --quiet | gzip)`
+/// into a temp file next to `out`, renamed into place on success.
+fn pack_dir(src: &Path, out: &Path) -> Result<(), String> {
+    let tmp = out.with_extension("tmp");
 
     let status = Command::new("sh")
         .arg("-c")
         .arg(format!(
             "cd {} && find . | cpio -o -H newc --quiet | gzip > {}",
-            shell_escape(&work_dir.to_string_lossy()),
+            shell_escape(&src.to_string_lossy()),
             shell_escape(&tmp.to_string_lossy()),
         ))
         .output()
@@ -273,7 +256,7 @@ fn pack_work_dir(work_dir: &Path, output: &Path) -> Result<(), String> {
         return Err(format!("cpio pack failed: {}", stderr.trim()));
     }
 
-    std::fs::rename(&tmp, output).map_err(|e| format!("rename {tmp:?} -> {output:?}: {e}"))?;
+    std::fs::rename(&tmp, out).map_err(|e| format!("rename {tmp:?} -> {out:?}: {e}"))?;
     Ok(())
 }
 

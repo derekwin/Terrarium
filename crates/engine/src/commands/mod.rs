@@ -41,6 +41,8 @@ pub(crate) const DEFAULT_SYSTEM: &str = "base";
 
 /// System base layers: if the caller's layer list doesn't end with one,
 /// the configured `system` (default "base") is auto-appended.
+// NOTE: cross-referenced with fs's SYSTEM_LAYER_NAMES (crates/fs/src/layer.rs);
+// intentionally not unified — engine cannot depend on fs (layering).
 pub(crate) const SYSTEM_BASES: [&str; 2] = ["base", "ubuntu"];
 
 /// Validate a user-supplied exec policy before it reaches the guest.

@@ -27,6 +27,8 @@ pub struct LayerConfig {
 }
 
 /// Names that are system bases, not add-on layers — hidden from list.
+// NOTE: cross-referenced with engine's SYSTEM_BASES (crates/engine/src/commands/mod.rs);
+// intentionally not unified — engine cannot depend on fs (layering).
 const SYSTEM_LAYER_NAMES: &[&str] = &["base", "ubuntu", ".system"];
 
 // ---------------------------------------------------------------------------
