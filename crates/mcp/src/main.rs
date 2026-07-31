@@ -8,7 +8,7 @@ mod tools;
 
 use std::io::{BufRead, BufReader, Write};
 
-use crate::tools::{call_tool, tools_list};
+use crate::tools::{call_tool, tools_list, SessionRegistry};
 
 const SERVER_NAME: &str = "terrarium-mcp";
 const SERVER_VERSION: &str = "0.1.0";
@@ -20,6 +20,8 @@ fn main() {
     let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let mut line = String::new();
+    // session name → engine sandbox id; persists for the process lifetime.
+    let mut sessions: SessionRegistry = SessionRegistry::new();
 
     loop {
         line.clear();
@@ -42,7 +44,7 @@ fn main() {
         };
         // JSON-RPC notifications have no "id" field — process but never respond.
         let is_notification = request.get("id").is_none();
-        let response = handle_request(&request);
+        let response = handle_request(&request, &mut sessions);
         if is_notification {
             continue;
         }
@@ -51,7 +53,7 @@ fn main() {
     }
 }
 
-fn handle_request(req: &serde_json::Value) -> serde_json::Value {
+fn handle_request(req: &serde_json::Value, sessions: &mut SessionRegistry) -> serde_json::Value {
     let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
     let method = req["method"].as_str().unwrap_or("");
 
@@ -68,7 +70,7 @@ fn handle_request(req: &serde_json::Value) -> serde_json::Value {
         "tools/call" => {
             let tool_name = req["params"]["name"].as_str().unwrap_or("");
             let args = &req["params"]["arguments"];
-            let result = call_tool(tool_name, args);
+            let result = call_tool(tool_name, args, sessions);
             jsonrpc_ok(
                 id,
                 &serde_json::json!({"content": [{"type": "text", "text": result}]}),

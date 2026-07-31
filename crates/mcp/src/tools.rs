@@ -1,5 +1,20 @@
+use std::collections::HashMap;
+
+use base64::Engine as _;
 use crate::client::send_to_engine;
 use terrarium_protocol::Command;
+
+/// All MCP sandbox sessions share one tenant VM ("mcp") — the VM is
+/// the isolation boundary, each session is an engine sandbox inside it
+/// with its own workdir, confined by sandlock on every exec. The tenant
+/// is a platform concern: administrators clean it up with
+/// `terra sandbox destroy-tenant mcp`.
+const MCP_TENANT: &str = "mcp";
+
+/// Session name → engine sandbox id (sb-<hex>). Lives for the MCP
+/// process lifetime; sessions are created on first use and reused
+/// afterwards, so agents never manage sandbox lifecycle explicitly.
+pub type SessionRegistry = HashMap<String, String>;
 
 pub fn tools_list() -> Vec<serde_json::Value> {
     vec![
@@ -55,18 +70,62 @@ pub fn tools_list() -> Vec<serde_json::Value> {
         ),
         tool(
             "terra_exec",
-            "Execute a command inside a VM via the guest agent.",
+            "Execute a command inside a sandbox session, confined by sandlock by default. Sessions are created on first use (per session name) and reused afterwards.",
             vec![
-                ("name", "string", "VM name"),
                 (
                     "args",
                     "array",
                     "Command argv (e.g. [\"python3\",\"-c\",\"print(1)\"])",
                 ),
                 (
+                    "session",
+                    "string",
+                    "Session name; omitted → the shared \"default\" session. Different names = isolated workdirs (optional)",
+                ),
+                (
+                    "sandboxed",
+                    "boolean",
+                    "Run under sandlock permission isolation (default true)",
+                ),
+                (
+                    "cwd",
+                    "string",
+                    "Working directory inside the session; default is the session workdir (optional)",
+                ),
+                (
+                    "layers",
+                    "array",
+                    "Layer names for the session environment — only used when the session is first created (optional)",
+                ),
+                (
                     "timeout_secs",
                     "number",
                     "Timeout seconds (default 60, max 3600)",
+                ),
+            ],
+        ),
+        tool(
+            "terra_session_read",
+            "Read a file from a sandbox session.",
+            vec![
+                ("path", "string", "Absolute path inside the session"),
+                (
+                    "session",
+                    "string",
+                    "Session name; omitted → the shared \"default\" session (optional)",
+                ),
+            ],
+        ),
+        tool(
+            "terra_session_write",
+            "Write a file into a sandbox session.",
+            vec![
+                ("path", "string", "Absolute path inside the session"),
+                ("content", "string", "File content"),
+                (
+                    "session",
+                    "string",
+                    "Session name; omitted → the shared \"default\" session (optional)",
                 ),
             ],
         ),
@@ -118,7 +177,7 @@ fn tool(name: &str, desc: &str, params: Vec<(&str, &str, &str)>) -> serde_json::
     })
 }
 
-pub fn call_tool(name: &str, args: &serde_json::Value) -> String {
+pub fn call_tool(name: &str, args: &serde_json::Value, sessions: &mut SessionRegistry) -> String {
     let cmd = match name {
         "terra_vm_create" => {
             let mut c = Command::create(
@@ -173,32 +232,9 @@ pub fn call_tool(name: &str, args: &serde_json::Value) -> String {
             let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
             send_to_engine(&Command::new("destroy").with_name(name))
         }
-        "terra_exec" => {
-            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
-            let argv: Vec<String> = args
-                .get("args")
-                .and_then(|a| a.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let mut c = Command::new("exec").with_name(name).with_args(argv);
-            if let Some(t) = args.get("timeout_secs").and_then(|a| a.as_u64()) {
-                c = c.with_timeout_secs(t);
-            }
-            // Retry while the guest agent is still booting.
-            let mut resp = String::new();
-            for _ in 0..8 {
-                resp = send_to_engine(&c);
-                if !resp.contains("handshake") && !resp.contains("connect guest vsock") {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-            resp
-        }
+        "terra_exec" => terra_exec(args, sessions),
+        "terra_session_read" => terra_session_read(args, sessions),
+        "terra_session_write" => terra_session_write(args, sessions),
         "terra_pool_claim" => {
             let layers: Vec<String> = args
                 .get("layers")
@@ -240,4 +276,183 @@ pub fn call_tool(name: &str, args: &serde_json::Value) -> String {
         _ => r#"{"status":"error","error":"unknown tool"}"#.to_string(),
     };
     cmd
+}
+
+// ── session-scoped tools ──────────────────────────────────────────
+
+/// Send a command, retrying transient guest-agent boot races (a VM is
+/// "Running" before its vsock agent answers).
+fn send_retry(cmd: &Command) -> String {
+    let mut resp = String::new();
+    for _ in 0..8 {
+        resp = send_to_engine(cmd);
+        if !resp.contains("handshake") && !resp.contains("vsock") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    resp
+}
+
+/// Resolve the sandbox id for a session name, creating the session on
+/// first use via `sandbox_create` (idempotent engine-side: an existing
+/// tenant VM is reused, so all MCP sessions share one VM with isolated
+/// workdirs).
+fn ensure_session(
+    sessions: &mut SessionRegistry,
+    name: &str,
+    layers: &[String],
+) -> Result<String, String> {
+    if let Some(id) = sessions.get(name) {
+        return Ok(id.clone());
+    }
+    let mut c = Command::new("sandbox_create").with_tenant(MCP_TENANT);
+    // A cold-booted VM needs a layered rootfs to even start its guest
+    // agent — default to the system base when no layers were given.
+    if layers.is_empty() {
+        c = c.with_layers(vec!["base".into()]);
+    } else {
+        c = c.with_layers(layers.to_vec());
+    }
+    if let Ok(k) = std::env::var("TERRA_KERNEL") {
+        if !k.is_empty() {
+            c = c.with_kernel(&k);
+        }
+    }
+    if let Ok(i) = std::env::var("TERRA_INITRAMFS") {
+        if !i.is_empty() {
+            c = c.with_initramfs(&i);
+        }
+    }
+    let resp = send_retry(&c);
+    let data = resp_data(&resp)
+        .ok_or_else(|| format!("session '{}' create failed: {}", name, resp))?;
+    let id = data["id"]
+        .as_str()
+        .ok_or_else(|| format!("session '{}' create: no id in response: {}", name, resp))?
+        .to_string();
+    sessions.insert(name.to_string(), id.clone());
+    Ok(id)
+}
+
+/// Extract the `data` object of an ok response.
+fn resp_data(resp: &str) -> Option<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(resp).ok()?;
+    if v["status"].as_str() == Some("ok") {
+        v.get("data").cloned()
+    } else {
+        None
+    }
+}
+
+/// Single-quote a string for safe shell embedding.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Join argv into a single shell command line.
+fn sh_join(args: &[String]) -> String {
+    args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ")
+}
+
+fn session_arg(args: &serde_json::Value) -> String {
+    args.get("session")
+        .and_then(|a| a.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("default")
+        .to_string()
+}
+
+fn terra_exec(args: &serde_json::Value, sessions: &mut SessionRegistry) -> String {
+    let session = session_arg(args);
+    let argv: Vec<String> = args
+        .get("args")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let layers: Vec<String> = args
+        .get("layers")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let sandboxed = args
+        .get("sandboxed")
+        .and_then(|a| a.as_bool())
+        .unwrap_or(true);
+    let cwd = args.get("cwd").and_then(|a| a.as_str());
+
+    let id = match ensure_session(sessions, &session, &layers) {
+        Ok(id) => id,
+        Err(e) => return error_json(&e),
+    };
+    let mut final_args = argv;
+    if let Some(cwd) = cwd {
+        final_args = vec![
+            "sh".into(),
+            "-c".into(),
+            format!("cd {} && {}", sh_quote(cwd), sh_join(&final_args)),
+        ];
+    }
+    let mut c = Command::new("sandbox_exec")
+        .with_id(&id)
+        .with_args(final_args)
+        .with_sandbox(sandboxed);
+    if let Some(t) = args.get("timeout_secs").and_then(|a| a.as_u64()) {
+        c = c.with_timeout_secs(t);
+    }
+    send_retry(&c)
+}
+
+fn terra_session_read(args: &serde_json::Value, sessions: &mut SessionRegistry) -> String {
+    let session = session_arg(args);
+    let path = args.get("path").and_then(|a| a.as_str()).unwrap_or("");
+    if path.is_empty() {
+        return error_json("missing 'path'");
+    }
+    let id = match ensure_session(sessions, &session, &[]) {
+        Ok(id) => id,
+        Err(e) => return error_json(&e),
+    };
+    send_retry(
+        &Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["cat".into(), path.into()])
+            .with_sandbox(true),
+    )
+}
+
+fn terra_session_write(args: &serde_json::Value, sessions: &mut SessionRegistry) -> String {
+    let session = session_arg(args);
+    let path = args.get("path").and_then(|a| a.as_str()).unwrap_or("");
+    let content = args.get("content").and_then(|a| a.as_str()).unwrap_or("");
+    if path.is_empty() {
+        return error_json("missing 'path'");
+    }
+    let id = match ensure_session(sessions, &session, &[]) {
+        Ok(id) => id,
+        Err(e) => return error_json(&e),
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
+    send_retry(
+        &Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec![
+                "sh".into(),
+                "-c".into(),
+                format!("echo {} | base64 -d > {}", b64, sh_quote(path)),
+            ])
+            .with_sandbox(true),
+    )
+}
+
+fn error_json(msg: &str) -> String {
+    serde_json::json!({"status": "error", "error": msg}).to_string()
 }
