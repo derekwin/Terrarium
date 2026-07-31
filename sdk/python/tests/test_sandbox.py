@@ -340,11 +340,11 @@ class TestSandboxProperties:
     """Property accessors."""
 
     def test_id_is_string(self):
-        """The id property is the engine-allocated ``sb-<8hex>`` identifier."""
+        """The id property is the engine-allocated ``sb-<12hex>`` identifier."""
         with Sandbox(layers=["base"], cpu=1, memory_mb=256) as sb:
             assert isinstance(sb.id, str)
             assert sb.id.startswith("sb-"), f"expected 'sb-<hex>' id, got: {sb.id!r}"
-            assert len(sb.id) == len("sb-") + 8
+            assert len(sb.id) == len("sb-") + 12
             int(sb.id[len("sb-"):], 16)  # hex suffix
             assert sb.vm == f"tenant-{sb.tenant}"
 

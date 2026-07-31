@@ -9,9 +9,9 @@ use crate::manager::{SandboxRecord, VmManager};
 use adapter_traits::VmName;
 use terrarium_protocol::{Command, Response};
 
-/// Fresh sandbox id: `sb-<8 hex>` (uuid v4, no new dependency).
+/// Fresh sandbox id: `sb-<12 hex>` (48 bits, uuid v4, no new dependency).
 fn new_sandbox_id() -> String {
-    format!("sb-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
+    format!("sb-{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
 }
 
 fn now_secs() -> u64 {
@@ -140,7 +140,12 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
         Err(resp) => return resp,
     };
 
-    let id = new_sandbox_id();
+    // 48-bit suffix: a collision with a live record would silently drop
+    // its workdir mapping (bare HashMap::insert), so re-roll until free.
+    let mut id = new_sandbox_id();
+    while mgr.sandbox_get(&id).is_some() {
+        id = new_sandbox_id();
+    }
     let workdir = format!("/workdir/{}", id);
 
     // Ensure the workdir exists in the guest (unsandboxed). On failure

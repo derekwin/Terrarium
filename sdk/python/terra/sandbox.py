@@ -304,7 +304,7 @@ class Sandbox:
 
     @property
     def id(self) -> str:
-        """Engine-allocated sandbox identifier (``sb-<8hex>``).
+        """Engine-allocated sandbox identifier (``sb-<12hex>``).
 
         Pool-claimed sessions (not engine sandboxes) fall back to the
         ``{vm}/{session}`` composite.

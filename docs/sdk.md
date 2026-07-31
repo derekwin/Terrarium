@@ -72,7 +72,7 @@ sb = Sandbox(tenant="my-org", layers=["python312", "base"],
              kernel="k612", cpu=2, memory_mb=512)
 
 # 属性
-print(sb.id)        # 引擎分配的 id："sb-a3f2b1c4"（sb-<8hex>）
+print(sb.id)        # 引擎分配的 id："sb-a3f2b1c4"（sb-<12hex>）
 print(sb.tenant)    # 租户标识："my-org"
 print(sb.vm)        # VM 名称：冷启动 "tenant-my-org"；池认领则 "pool-N"
 print(sb.pool_backed)  # True → 租户 VM 来自预热池（毫秒级热启动）
@@ -377,7 +377,7 @@ terra daemon stop                                           # 优雅停止
 
 ### 命令参考
 
-**sandbox** — 高层沙箱（引擎级实体：id 形如 `sb-<8hex>`）
+**sandbox** — 高层沙箱（引擎级实体：id 形如 `sb-<12hex>`）
 
 ```
 terra sandbox create [--template <name>] [--layers L1,L2] [--kernel <var>]

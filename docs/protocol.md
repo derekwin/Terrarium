@@ -62,7 +62,7 @@ Sandbox 是租户共享 VM（`tenant-<tenant>`）内的一个会话（独立工�
 
 | command | 字段 | 说明 |
 |---|---|---|
-| `sandbox_create` | `tenant`, `kernel?`, `initramfs?`, `layers?`, `system?`, `cpus?`, `memory_mb?`, `net?`, `policy?` | 幂等确保租户 VM 存在（已存在则复用，忽略 VM 规格字段；租户名按 VmName 白名单校验），分配 sandbox 并在 guest 建工作目录，返回 `{id: "sb-<8hex>", vm: "tenant-<tenant>", workdir: "/workdir/sb-<hex>"}`。`policy` 存入 sandbox 记录 |
+| `sandbox_create` | `tenant`, `kernel?`, `initramfs?`, `layers?`, `system?`, `cpus?`, `memory_mb?`, `net?`, `policy?` | 幂等确保租户 VM 存在（已存在则复用，忽略 VM 规格字段；租户名按 VmName 白名单校验），分配 sandbox 并在 guest 建工作目录，返回 `{id: "sb-<12hex>", vm: "tenant-<tenant>", workdir: "/workdir/sb-<hex>"}`。`policy` 存入 sandbox 记录 |
 | `sandbox_exec` | `id`, `args`, `timeout_secs?`, `exec_mode?`, `sandbox?`, `policy?` | 在租户 VM 内执行，cwd 由引擎设为该 sandbox 的工作目录。`sandbox` 缺省为 **true**（sandlock 约束）。blocking 返回 `{stdout, stderr, exit_code}`；`exec_mode: "background"` 返回 `{session_id, sandbox, status: "started"}`。`policy` 为单次覆盖 |
 | `sandbox_list` | `tenant?` | 列出 sandbox 记录（可按租户过滤），返回 `{sandboxes: [{id, tenant, vm, workdir, created_at, policy}], count}` |
 | `sandbox_info` | `id` | 单个 sandbox 记录，字段同上（含存入的 `policy`） |
