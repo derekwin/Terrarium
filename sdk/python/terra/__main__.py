@@ -63,6 +63,17 @@ def _output(data, args) -> int:
     return EXIT_OK
 
 
+def _output_exec(resp, args) -> int:
+    """Print an exec response and propagate the guest exit code."""
+    rc = _output(resp, args)
+    if rc != EXIT_OK:
+        return rc
+    code = resp.get("exit_code") if isinstance(resp, dict) else None
+    if not isinstance(code, int):
+        return EXIT_OK
+    return code if 0 <= code <= 255 else 1
+
+
 def _print_human(data) -> None:
     """Print *data* in a human-readable format (key-value / list)."""
     if isinstance(data, dict):
@@ -247,7 +258,7 @@ def cmd_sandbox_exec(args) -> int:
         resp = c.sandbox_exec(args.id, cmd_args, args.timeout,
                               sandbox=not args.no_sandbox,
                               policy=_build_policy_from_args(args))
-        return _output(resp, args)
+        return _output_exec(resp, args)
     except TerraError as e:
         msg = str(e)
         if "not found" in msg.lower():
@@ -831,7 +842,7 @@ def cmd_vm_create(args) -> int:
 def cmd_vm_exec(args) -> int:
     """Execute a command inside a VM."""
     try:
-        return _output(_client(args).vm_exec(args.name, args.args, timeout_secs=args.timeout), args)
+        return _output_exec(_client(args).vm_exec(args.name, args.args, timeout_secs=args.timeout), args)
     except TerraError as e:
         msg = str(e)
         if "not found" in msg.lower():
