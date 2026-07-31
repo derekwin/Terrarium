@@ -164,16 +164,6 @@ impl ChClient {
         Ok(())
     }
 
-    pub async fn vm_pause(&self) -> Result<()> {
-        self.request("PUT", "/api/v1/vm.pause", None).await?;
-        Ok(())
-    }
-
-    pub async fn vm_resume(&self) -> Result<()> {
-        self.request("PUT", "/api/v1/vm.resume", None).await?;
-        Ok(())
-    }
-
     pub async fn vm_info(&self) -> Result<VmDetails> {
         let (_status, resp) = self.request("GET", "/api/v1/vm.info", None).await?;
         Ok(serde_json::from_str(&resp)?)

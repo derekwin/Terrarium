@@ -21,7 +21,6 @@ mod tests {
             initramfs: None,
             net: false,
             fs: None,
-            backend_config: None,
         }
     }
 
@@ -77,16 +76,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pause_resume_not_supported() {
-        let adapter = MockVmAdapter::new();
-        let spec = test_spec();
-        let handle = adapter.create(&spec).await.unwrap();
-
-        assert!(handle.pause().await.is_err());
-        assert!(handle.resume().await.is_err());
-    }
-
-    #[tokio::test]
     async fn test_restore_not_supported() {
         let adapter = MockVmAdapter::new();
         let snapshot = Snapshot {
@@ -112,19 +101,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_capabilities() {
-        let adapter = MockVmAdapter::new()
-            .with_capability("cpu_resize", true)
-            .with_capability("memory_resize", true);
-        let caps = adapter.capabilities();
-        assert!(caps.cpu_resize);
-        assert!(caps.memory_resize);
-        // Defaults should be false
-        assert!(!caps.snapshot);
-        assert!(!caps.pause_resume);
-    }
-
-    #[tokio::test]
     async fn test_resize_noop() {
         let adapter = MockVmAdapter::new();
         let spec = test_spec();
@@ -141,8 +117,7 @@ mod tests {
             .with_pid(42)
             .with_exec("hello\n", "", 0)
             .with_alive(true)
-            .with_fs_attached(true)
-            .with_capability("cpu_resize", true);
+            .with_fs_attached(true);
 
         let spec = test_spec();
         let mut handle = adapter.create(&spec).await.unwrap();

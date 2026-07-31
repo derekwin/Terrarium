@@ -31,7 +31,6 @@ fn test_spec(name: &str) -> VmSpec {
         initramfs: None,
         net: false,
         fs: None,
-        backend_config: None,
     }
 }
 

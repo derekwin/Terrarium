@@ -133,6 +133,5 @@ pub(crate) fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
                 },
             })
         },
-        backend_config: None,
     })
 }

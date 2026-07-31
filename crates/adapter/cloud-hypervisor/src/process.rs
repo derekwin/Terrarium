@@ -185,7 +185,6 @@ mod tests {
             initramfs: Some("/i".into()),
             net: false,
             fs: None,
-            backend_config: None,
         }
     }
 

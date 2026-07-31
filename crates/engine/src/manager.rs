@@ -193,7 +193,6 @@ impl VmManager {
                 initramfs: Some(agent_initramfs.to_string()),
                 net,
                 fs: None,
-                backend_config: None,
             };
             self.spawn(spec).await?;
             match self.wait_agent_ready(&name).await {

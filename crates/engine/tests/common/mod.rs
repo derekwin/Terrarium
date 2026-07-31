@@ -28,8 +28,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use adapter_traits::{
-    AdapterError, ExecOpts, ExecPolicy, ExecResult, FsSpec, Snapshot, VmAdapter, VmCapabilities,
-    VmHandle, VmInfo, VmSpec,
+    AdapterError, ExecOpts, ExecPolicy, ExecResult, FsSpec, Snapshot, VmAdapter, VmHandle, VmInfo,
+    VmSpec,
 };
 
 /// One recorded exec invocation (for assertions on engine→guest plumbing).
@@ -243,26 +243,6 @@ impl VmHandle for MockVmHandle {
         Box::pin(async move { Err(AdapterError::not_supported("snapshot")) })
     }
 
-    fn pause<'life0, 'async_trait>(
-        &'life0 self,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move { Err(AdapterError::not_supported("pause")) })
-    }
-
-    fn resume<'life0, 'async_trait>(
-        &'life0 self,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move { Err(AdapterError::not_supported("resume")) })
-    }
-
     fn shutdown<'life0, 'async_trait>(
         &'life0 self,
     ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
@@ -305,7 +285,6 @@ impl VmHandle for MockVmHandle {
 ///     .with_exec("hello\n", "", 0);
 /// ```
 pub struct MockVmAdapter {
-    capabilities: VmCapabilities,
     pid: u32,
     alive: bool,
     state: String,
@@ -327,7 +306,6 @@ impl MockVmAdapter {
     /// fs_attached=false.
     pub fn new() -> Self {
         Self {
-            capabilities: VmCapabilities::default(),
             pid: 0,
             alive: true,
             state: "Created".into(),
@@ -414,26 +392,6 @@ impl MockVmAdapter {
         self
     }
 
-    /// Enable or disable a specific capability by name.
-    ///
-    /// Recognised names: `cpu_resize`, `memory_resize`, `disk_resize`,
-    /// `disk_add`, `snapshot`, `pause_resume`, `network_qos`, `virtio_fs`.
-    #[allow(dead_code)]
-    pub fn with_capability(mut self, name: &str, value: bool) -> Self {
-        match name {
-            "cpu_resize" => self.capabilities.cpu_resize = value,
-            "memory_resize" => self.capabilities.memory_resize = value,
-            "disk_resize" => self.capabilities.disk_resize = value,
-            "disk_add" => self.capabilities.disk_add = value,
-            "snapshot" => self.capabilities.snapshot = value,
-            "pause_resume" => self.capabilities.pause_resume = value,
-            "network_qos" => self.capabilities.network_qos = value,
-            "virtio_fs" => self.capabilities.virtio_fs = value,
-            _ => {}
-        }
-        self
-    }
-
     /// Build a new handle from the current builder state (for advanced
     /// test scenarios that need a handle without going through `create`).
     pub fn build_handle(&self) -> MockVmHandle {
@@ -463,10 +421,6 @@ impl Default for MockVmAdapter {
 // --- VmAdapter impl (exact expanded #[async_trait] signatures) ---
 
 impl VmAdapter for MockVmAdapter {
-    fn capabilities(&self) -> VmCapabilities {
-        self.capabilities.clone()
-    }
-
     fn create<'life0, 'life1, 'async_trait>(
         &'life0 self,
         _spec: &'life1 VmSpec,

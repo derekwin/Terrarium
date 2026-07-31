@@ -44,11 +44,6 @@ impl AdapterError {
     pub fn timeout(msg: impl Into<String>) -> Self {
         Self::Timeout(msg.into())
     }
-
-    /// True if this error is likely transient and the operation can be retried.
-    pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::Timeout(_))
-    }
 }
 
 // Convenience: convert from &str / String for ergonomic use.
@@ -152,26 +147,6 @@ pub struct VmSpec {
     /// its rootfs (initramfs is then only the thin virtiofs bootstrap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs: Option<FsSpec>,
-    /// Backend-specific configuration (JSON blob, adapter-defined).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend_config: Option<serde_json::Value>,
-}
-
-/// What this VM backend can and cannot do.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct VmCapabilities {
-    pub cpu_resize: bool,
-    pub memory_resize: bool,
-    pub disk_resize: bool,
-    pub disk_add: bool,
-    pub snapshot: bool,
-    pub pause_resume: bool,
-    #[serde(default)]
-    pub network_qos: bool,
-    /// Whether this VMM can share a host directory tree with the guest
-    /// (virtiofs or equivalent). False for block-only backends.
-    #[serde(default)]
-    pub virtio_fs: bool,
 }
 
 /// Writable-layer policy for a layered (virtiofs) root filesystem.
@@ -307,12 +282,6 @@ impl ExecOpts {
         self.exec_id = Some(exec_id.into());
         self
     }
-
-    /// Builder: attach a sandlock policy to this exec.
-    pub fn with_policy(mut self, policy: ExecPolicy) -> Self {
-        self.policy = Some(policy);
-        self
-    }
 }
 
 /// Command to execute inside a sandbox.
@@ -383,9 +352,6 @@ impl VmSpec {
 
 #[async_trait]
 pub trait VmAdapter: Send + Sync {
-    /// What this backend can and cannot do.
-    fn capabilities(&self) -> VmCapabilities;
-
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, AdapterError>;
     async fn restore(
         &self,
@@ -399,7 +365,7 @@ pub trait VmHandle: Send + Sync {
     async fn info(&self) -> Result<VmInfo, AdapterError>;
 
     /// Resize vCPUs and/or memory. Backends that don't support this
-    /// return an error; the engine checks capabilities() first.
+    /// return an error.
     async fn resize(&self, cpu: Option<u32>, memory: Option<u64>) -> Result<(), AdapterError>;
 
     /// Execute a command inside the VM (via the guest agent, e.g.
@@ -452,11 +418,19 @@ pub trait VmHandle: Send + Sync {
     /// Take a VM snapshot. Not supported by all backends.
     async fn snapshot(&self) -> Result<Snapshot, AdapterError>;
 
-    /// Pause the VM. Not supported by all backends.
-    async fn pause(&self) -> Result<(), AdapterError>;
+    /// Pause the VM. Default: not supported.
+    async fn pause(&self) -> Result<(), AdapterError> {
+        Err(AdapterError::not_supported(
+            "pause not supported by this backend",
+        ))
+    }
 
-    /// Resume a paused VM.
-    async fn resume(&self) -> Result<(), AdapterError>;
+    /// Resume a paused VM. Default: not supported.
+    async fn resume(&self) -> Result<(), AdapterError> {
+        Err(AdapterError::not_supported(
+            "resume not supported by this backend",
+        ))
+    }
 
     async fn shutdown(&self) -> Result<(), AdapterError>;
     fn pid(&self) -> u32;

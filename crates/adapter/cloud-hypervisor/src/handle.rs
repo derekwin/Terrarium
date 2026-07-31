@@ -263,20 +263,6 @@ impl VmHandle for ChVmHandle {
         Ok(())
     }
 
-    async fn pause(&self) -> Result<(), AdapterError> {
-        self.client
-            .vm_pause()
-            .await
-            .map_err(|e| AdapterError::internal(format!("vm.pause: {}", e)))
-    }
-
-    async fn resume(&self) -> Result<(), AdapterError> {
-        self.client
-            .vm_resume()
-            .await
-            .map_err(|e| AdapterError::internal(format!("vm.resume: {}", e)))
-    }
-
     async fn snapshot(&self) -> Result<Snapshot, AdapterError> {
         let path = format!("/tmp/terra-snap-{}.bin", self.name);
         self.client
