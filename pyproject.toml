@@ -46,3 +46,8 @@ target = "terrarium_fs"
 path = "crates/fs/Cargo.toml"
 binding = "PyO3"
 features = ["pyo3"]
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: requires /dev/kvm and guest assets (skipped in CI)",
+]

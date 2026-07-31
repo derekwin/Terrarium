@@ -43,6 +43,7 @@ def teardown_module():
                 pass
 
 
+@pytest.mark.e2e
 class TestSandboxCreateAndExec:
     """Basic create → exec → kill lifecycle."""
 
@@ -75,6 +76,7 @@ class TestSandboxCreateAndExec:
             sb.kill()
 
 
+@pytest.mark.e2e
 class TestSandboxContextManager:
     """Context-manager based lifecycle."""
 
@@ -98,6 +100,7 @@ class TestSandboxContextManager:
         assert sb.status == "stopped"
 
 
+@pytest.mark.e2e
 class TestSandboxFiles:
     """File operations inside a sandbox."""
 
@@ -138,6 +141,7 @@ class TestSandboxFiles:
             assert not sb.files.exists("/tmp/to_delete.txt")
 
 
+@pytest.mark.e2e
 class TestSandboxIsolation:
     """Sandlock permission isolation — Sandbox.exec is sandboxed by default."""
 
@@ -166,6 +170,7 @@ class TestSandboxIsolation:
             assert "done" in r.stdout
 
 
+@pytest.mark.e2e
 class TestEngineSandboxes:
     """S-M2 acceptance: sandbox as a first-class engine entity."""
 
@@ -234,6 +239,7 @@ class TestEngineSandboxes:
         assert sb1.status == "stopped" and sb2.status == "stopped"
 
 
+@pytest.mark.e2e
 class TestSandboxPolicy:
     """Per-sandbox exec policy (stored + per-call override)."""
 
@@ -329,6 +335,7 @@ class TestSandboxPolicy:
             Sandbox.destroy_tenant(tenant)
 
 
+@pytest.mark.e2e
 class TestSandboxProperties:
     """Property accessors."""
 
@@ -352,6 +359,7 @@ class TestSandboxProperties:
             assert isinstance(sb.metadata, dict)
 
 
+@pytest.mark.e2e
 class TestPoolBackedSandbox:
     """Engine sandboxes backed by warm-pool VMs (S-M3).
 

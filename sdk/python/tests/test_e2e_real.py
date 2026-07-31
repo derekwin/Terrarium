@@ -26,6 +26,7 @@ graceful-shutdown path and that no CH processes leak).
 from __future__ import annotations
 
 import os
+import pytest
 import shutil
 import subprocess
 import sys
@@ -314,6 +315,7 @@ def _track(name: str) -> None:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+@pytest.mark.e2e
 def test_create_and_info() -> None:
     vm = create(
         "sdk-t1", str(KERNEL),
@@ -333,6 +335,7 @@ def test_create_and_info() -> None:
 
 
 
+@pytest.mark.e2e
 def test_resize_cpus() -> None:
     client = _state["client"]
     client.vm_resize("sdk-t1", cpus=4)
@@ -349,6 +352,7 @@ def test_resize_cpus() -> None:
     )
 
 
+@pytest.mark.e2e
 def test_resize_memory() -> None:
     client = _state["client"]
     client.vm_resize("sdk-t1", memory_bytes=1024 * 1024 * 1024)
@@ -364,6 +368,7 @@ def test_resize_memory() -> None:
         )
 
 
+@pytest.mark.e2e
 def test_concurrent_create() -> None:
     def mk(i: int) -> str:
         name = f"sdk-c{i}"
@@ -383,6 +388,7 @@ def test_concurrent_create() -> None:
 
 
 
+@pytest.mark.e2e
 def test_list_vms() -> None:
     # self-contained: create our own VM so the test is order-independent
     create("sdk-l1", str(KERNEL), initramfs=str(INITRAMFS),
@@ -394,6 +400,7 @@ def test_list_vms() -> None:
     _state["created"].remove("sdk-l1")
 
 
+@pytest.mark.e2e
 def test_error_paths() -> None:
     client = _state["client"]
     # invalid name (path traversal)
@@ -423,6 +430,7 @@ def test_error_paths() -> None:
 
 
 
+@pytest.mark.e2e
 def test_destroy_cleans_up() -> None:
     client = _state["client"]
     create("sdk-t2", str(KERNEL), initramfs=str(INITRAMFS),
@@ -439,6 +447,7 @@ def test_destroy_cleans_up() -> None:
 
 
 
+@pytest.mark.e2e
 def test_shutdown_and_kill() -> None:
     client = _state["client"]
     # shutdown contract: stop + deregister
@@ -470,6 +479,7 @@ def test_shutdown_and_kill() -> None:
     _state["created"].remove("sdk-k1")
 
 
+@pytest.mark.e2e
 def test_layered_boot() -> None:
     """virtiofs layered rootfs: compose layers -> boot -> copy-up -> teardown."""
     client = _state["client"]
@@ -507,6 +517,7 @@ def test_layered_boot() -> None:
     assert not (fs_root / "sdk-fs1").exists(), "fs work dir leaked"
 
 
+@pytest.mark.e2e
 def test_warm_attach_detach() -> None:
     """FS-M4 warm path: idle VM -> hot-plug layers -> guest mounts -> detach."""
     client = _state["client"]
@@ -541,6 +552,7 @@ def test_warm_attach_detach() -> None:
     _state["created"].remove("sdk-w1")
 
 
+@pytest.mark.e2e
 def test_warm_pool() -> None:
     """Warm pool: create idle VMs -> claim -> guest exec -> release -> reclaim."""
     client = _state["client"]
@@ -595,6 +607,7 @@ def test_warm_pool() -> None:
     assert client.pool_list()["count"] == 0
 
 
+@pytest.mark.e2e
 def test_layered_boot_erofs() -> None:
     """EROFS image layers: built on the fly, mounted by the adapter."""
     client = _state["client"]
