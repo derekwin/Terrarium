@@ -14,10 +14,6 @@ pyo3 = ["dep:pyo3"]
 
 [dependencies]
 adapter-traits = { path = "../adapter/traits", version = "0.1.0" }
-libc = "0.2"
-regex = "1"
 pyo3 = { version = "0.29", optional = true }
-serde = { workspace = true }
-tokio = { version = "1", features = ["time"] }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"
