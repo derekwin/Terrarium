@@ -22,6 +22,20 @@ use terrarium_protocol::Response;
 /// Maximum size of a single JSON command line (64 KB).
 const MAX_COMMAND_LINE: usize = 64 * 1024;
 
+/// Commands that can create or remove VMs, or otherwise change VM
+/// liveness. Only these trigger the O(n) `reap_dead` liveness scan —
+/// read-only commands (`list`, `info`, `exec`, `session_*`, ...) skip it.
+const REAP_COMMANDS: &[&str] = &[
+    "create",
+    "kill",
+    "shutdown",
+    "destroy",
+    "pool_create",
+    "pool_release",
+    "sandbox_create",
+    "tenant_destroy",
+];
+
 /// Run the controller in daemon mode.
 ///
 /// - `socket_path`: unix socket for local clients (chmod 0600)
@@ -153,7 +167,11 @@ async fn dispatch(
         return (Response::ok_msg("daemon shutting down"), true);
     }
     let mut mgr = manager.lock().await;
-    mgr.reap_dead();
+    // Best-effort liveness scan, only before commands that can change VM
+    // state — read-only commands skip the O(n) `Arc::get_mut` scan.
+    if REAP_COMMANDS.contains(&cmd.command.as_str()) {
+        mgr.reap_dead();
+    }
 
     // Blocking exec is the one command that can run for up to its full
     // timeout (3600s). Resolve everything under the lock — handle Arc +
