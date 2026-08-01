@@ -21,11 +21,20 @@ pub use sessions::SessionInfo;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use adapter_traits::{AdapterError, ExecOpts, SandboxPolicy, VmAdapter, VmHandle, VmName, VmSpec};
+use adapter_traits::{
+    AdapterError, ExecOpts, SandboxAdapter, SandboxPolicy, VmAdapter, VmHandle, VmName, VmSpec,
+};
+
+use crate::sandbox_adapter::GuestSandlockAdapter;
 
 /// Central VM registry for the controller.
 pub struct VmManager {
     adapter: Arc<dyn VmAdapter>,
+    /// L2 session boundary backend (C-phase contract). Sandbox lifecycle
+    /// (create/exec/kill) routes through this adapter's handles; the
+    /// default is the in-engine guest-sandlock proxy, so the existing
+    /// guest-side isolation is preserved exactly (zero behavior change).
+    sandbox_adapter: Box<dyn SandboxAdapter>,
     vms: HashMap<VmName, Arc<dyn VmHandle>>,
     /// VMs created with networking enabled.
     net_vms: HashSet<String>,
@@ -49,6 +58,7 @@ impl VmManager {
     pub fn new(adapter: Arc<dyn VmAdapter>, snapshot_dir: String) -> Self {
         Self {
             adapter,
+            sandbox_adapter: Box::new(GuestSandlockAdapter::new()),
             vms: HashMap::new(),
             net_vms: HashSet::new(),
             pool: Vec::new(),
@@ -59,6 +69,17 @@ impl VmManager {
             ready_attempts: 50,
             ready_interval: std::time::Duration::from_millis(200),
         }
+    }
+
+    /// Override the L2 sandbox backend (tests inject a mock adapter).
+    pub fn with_sandbox_adapter(mut self, sandbox_adapter: Box<dyn SandboxAdapter>) -> Self {
+        self.sandbox_adapter = sandbox_adapter;
+        self
+    }
+
+    /// The configured L2 sandbox backend (`create` on this binds a session).
+    pub fn sandbox_adapter(&self) -> &dyn SandboxAdapter {
+        self.sandbox_adapter.as_ref()
     }
 
     /// Override the guest-agent readiness probe used by `pool_create`

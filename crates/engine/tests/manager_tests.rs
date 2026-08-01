@@ -215,6 +215,7 @@ async fn test_destroy_cleans_sandboxes_and_sessions() {
         created_at: 0,
         policy: None,
         pool_backed: false,
+        handle: None,
     });
     let sid = "session-1".to_string();
     mgr.exec_background(
@@ -262,6 +263,7 @@ async fn test_reap_dead_cleans_sandbox_records() {
         created_at: 0,
         policy: None,
         pool_backed: false,
+        handle: None,
     });
 
     let reaped = mgr.reap_dead();

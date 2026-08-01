@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use crate::manager::VmManager;
 use crate::policy::{default_sandbox_policy, merge_policies};
-use adapter_traits::{AdapterError, ExecOpts, ExecResult, SandboxPolicy, VmHandle, VmName, VmSpec};
+use adapter_traits::{
+    AdapterError, ExecCommand, ExecOpts, ExecResult, SandboxHandle, SandboxPolicy, VmHandle,
+    VmName, VmSpec,
+};
 pub(crate) use terrarium_protocol::{Command, Response};
 
 /// Extract the required `name` field from a command.
@@ -53,7 +56,8 @@ pub(crate) const SYSTEM_BASES: [&str; 2] = ["base", "ubuntu"];
 /// policy, then routes to the manager. `sandbox_flag` is the caller's
 /// explicit value (None → `sandbox_default`); `sandbox_id`, when present,
 /// links a background session to an engine sandbox and adds the `sandbox`
-/// field to the response.
+/// field to the response. `policy` is the per-call policy only (C3: the
+/// stored policy lives in the create-bound session handle).
 ///
 /// Policy validation uses `SandboxPolicy::validate()`. Default injection
 /// (D2) happens here: whenever the exec is sandboxed and neither the
@@ -61,6 +65,13 @@ pub(crate) const SYSTEM_BASES: [&str; 2] = ["base", "ubuntu"];
 /// `default_sandbox_policy()` is injected — so every sandboxed exec
 /// carries a complete policy, regardless of command name. An unsandboxed
 /// exec keeps `policy` optional.
+///
+/// C3 routing: a *sandboxed blocking* `sandbox_exec` resolves the record's
+/// bound `SandboxHandle` and calls `handle.exec` — the backend unions the
+/// per-call override onto the policy bound at create. Background sessions
+/// keep the direct `vm.exec` path (they register an exec_id for
+/// `session_kill`, which `SandboxHandle::exec` has no concept of), and the
+/// unsandboxed escape hatch (`sandbox:false`) also stays direct.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_exec(
     mgr: &mut VmManager,
@@ -79,6 +90,15 @@ pub(crate) async fn run_exec(
     }
     let timeout = timeout_secs.unwrap_or(60).min(3600);
     let sandbox = sandbox_flag.unwrap_or(sandbox_default);
+    // Per-call override only (the handle path); the stored policy stays
+    // bound in the session handle created at sandbox_create.
+    let per_call = policy.clone();
+    // Stored policy for sandbox_exec — only the direct/background paths
+    // need it (they keep the pre-C3 `base ∪ user` construction).
+    let stored = sandbox_id
+        .as_deref()
+        .and_then(|id| mgr.sandbox_get(id))
+        .and_then(|r| r.policy);
     // Capability model: the engine default policy is the BASE layer
     // (read-only system dirs, RW /tmp) that every sandboxed exec starts
     // from; a user policy APPENDS its capabilities on top (union), so a
@@ -86,12 +106,12 @@ pub(crate) async fn run_exec(
     // carries sandlock's execute grant). An unsandboxed exec stays
     // policy-free; when sandboxed, the effective policy is base ∪ user.
     let policy = if sandbox {
-        Some(match policy {
+        Some(match per_call.clone().or(stored) {
             Some(user) => merge_policies(default_sandbox_policy(), user),
             None => default_sandbox_policy(),
         })
     } else {
-        policy
+        per_call.clone().or(stored)
     };
     if !sandbox && policy.is_some() {
         return Response::err("'policy' requires sandboxed exec (set 'sandbox': true)");
@@ -132,10 +152,23 @@ pub(crate) async fn run_exec(
                 Err(e) => Response::err(e.to_string()),
             }
         }
-        "blocking" => blocking_exec_response(
-            mgr.exec(vm_name, args, timeout, sandbox, work_dir, policy)
-                .await,
-        ),
+        "blocking" => {
+            // C3: a sandboxed blocking sandbox_exec routes through the
+            // session's bound handle. Missing handle (pre-C3 record) falls
+            // back to the direct path with the full effective policy.
+            if let Some(sb_id) = sandbox_id.as_deref() {
+                if sandbox {
+                    if let Some(handle) = mgr.sandbox_handle(sb_id) {
+                        let cmd = sandbox_exec_command(args, work_dir, per_call, timeout);
+                        return blocking_exec_response(handle.exec(&cmd).await);
+                    }
+                }
+            }
+            blocking_exec_response(
+                mgr.exec(vm_name, args, timeout, sandbox, work_dir, policy)
+                    .await,
+            )
+        }
         other => Response::err(format!(
             "invalid exec_mode {:?}: expected \"blocking\" or \"background\"",
             other
@@ -143,19 +176,47 @@ pub(crate) async fn run_exec(
     }
 }
 
+/// C3: build the `ExecCommand` for a sandboxed blocking `sandbox_exec`.
+/// The engine passes only the per-call override; the backend unions it
+/// onto the policy bound at create (never a replace).
+fn sandbox_exec_command(
+    args: &[String],
+    work_dir: Option<&str>,
+    policy_override: Option<SandboxPolicy>,
+    timeout_secs: u64,
+) -> ExecCommand {
+    ExecCommand {
+        args: args.to_vec(),
+        work_dir: work_dir.map(String::from),
+        env: None,
+        policy_override,
+        timeout_secs: Some(timeout_secs),
+    }
+}
+
 /// A blocking exec resolved while the manager lock is held. The `Arc`
-/// handle keeps the VM alive and the fully-built `ExecOpts` needs no
+/// handles keep the VM/session alive and the fully-built options need no
 /// further registry access, so the exec itself can run lock-free — a
 /// long-running exec (up to its timeout) must not serialize every other
 /// command behind `Mutex<VmManager>`.
-pub(crate) struct PreparedExec {
-    pub handle: Arc<dyn VmHandle>,
-    pub opts: ExecOpts,
+pub(crate) enum PreparedExec {
+    /// Direct `VmHandle::exec` (VM-scoped `exec`, unsandboxed
+    /// `sandbox_exec`, and pre-C3 records without a bound handle).
+    Direct {
+        handle: Arc<dyn VmHandle>,
+        opts: ExecOpts,
+    },
+    /// C3: a sandboxed blocking `sandbox_exec` resolved to the session's
+    /// bound handle; executed via `SandboxHandle::exec`.
+    Sandbox {
+        handle: Arc<dyn SandboxHandle>,
+        cmd: ExecCommand,
+    },
 }
 
 /// Resolve a blocking `exec` / `sandbox_exec` command to its handle and
 /// options. Runs under the manager lock (cheap registry lookups); the
-/// caller drops the lock before awaiting `handle.exec`.
+/// caller drops the lock before awaiting the exec.
 ///
 /// Replicates the exact validation order of `run_exec` — and, for
 /// sandbox_exec, the record lookup of `cmd_sandbox_exec` — so error
@@ -167,19 +228,31 @@ pub(crate) fn prepare_blocking_exec(
     mgr: &VmManager,
     cmd: &Command,
 ) -> Result<PreparedExec, Response> {
-    let (name, sandbox_default, work_dir, stored_policy) = match cmd.command.as_str() {
-        "exec" => (require_name(cmd)?, false, None, None),
-        "sandbox_exec" => {
-            let id = cmd
-                .id
-                .clone()
-                .ok_or_else(|| Response::err("Missing 'id' field"))?;
-            let record = mgr
-                .sandbox_get(&id)
-                .ok_or_else(|| Response::err(format!("Sandbox '{}' not found", id)))?;
-            (record.vm_name, true, Some(record.workdir), record.policy)
-        }
+    match cmd.command.as_str() {
+        "exec" | "sandbox_exec" => {}
         other => return Err(Response::err(format!("Unknown command: {}", other))),
+    }
+    let sandbox_record = if cmd.command.as_str() == "sandbox_exec" {
+        let id = cmd
+            .id
+            .clone()
+            .ok_or_else(|| Response::err("Missing 'id' field"))?;
+        let record = mgr
+            .sandbox_get(&id)
+            .ok_or_else(|| Response::err(format!("Sandbox '{}' not found", id)))?;
+        Some(record)
+    } else {
+        None
+    };
+
+    let (name, sandbox_default, work_dir, stored_policy) = match &sandbox_record {
+        Some(record) => (
+            record.vm_name.clone(),
+            true,
+            Some(record.workdir.clone()),
+            record.policy.clone(),
+        ),
+        None => (require_name(cmd)?, false, None, None),
     };
 
     if cmd.args.is_empty() {
@@ -187,14 +260,17 @@ pub(crate) fn prepare_blocking_exec(
     }
     let timeout = cmd.timeout_secs.unwrap_or(60).min(3600);
     let sandbox = cmd.sandbox.unwrap_or(sandbox_default);
+    let per_call = cmd.policy.clone();
     // Capability model: base ∪ user for sandboxed exec (mirrors run_exec).
+    // The bound handle path uses the per-call override + create-bound
+    // policy instead; this effective policy serves the direct paths.
     let policy = if sandbox {
-        Some(match cmd.policy.clone().or(stored_policy) {
+        Some(match per_call.clone().or(stored_policy) {
             Some(user) => merge_policies(default_sandbox_policy(), user),
             None => default_sandbox_policy(),
         })
     } else {
-        cmd.policy.clone().or(stored_policy)
+        per_call.clone().or(stored_policy)
     };
     if !sandbox && policy.is_some() {
         return Err(Response::err(
@@ -207,6 +283,21 @@ pub(crate) fn prepare_blocking_exec(
         }
     }
 
+    // C3: a sandboxed blocking sandbox_exec resolves to the session's
+    // bound handle — the Arc is cloned under the lock and awaited outside
+    // (the point of `prepare`). Records without a handle (pre-C3) and the
+    // unsandboxed escape hatch keep the direct vm.exec path.
+    if sandbox {
+        if let Some(record) = &sandbox_record {
+            if let Some(handle) = &record.handle {
+                return Ok(PreparedExec::Sandbox {
+                    handle: handle.clone(),
+                    cmd: sandbox_exec_command(&cmd.args, work_dir.as_deref(), per_call, timeout),
+                });
+            }
+        }
+    }
+
     let handle = mgr.get_handle(&name).ok_or_else(|| {
         Response::err(AdapterError::not_found(format!("VM '{}' not found", name)).to_string())
     })?;
@@ -216,7 +307,7 @@ pub(crate) fn prepare_blocking_exec(
         opts = opts.with_work_dir(work_dir);
     }
     opts.policy = policy;
-    Ok(PreparedExec { handle, opts })
+    Ok(PreparedExec::Direct { handle, opts })
 }
 
 /// Build the blocking-exec response — `{stdout, stderr, exit_code}` on

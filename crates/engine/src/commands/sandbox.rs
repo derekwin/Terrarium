@@ -4,9 +4,12 @@
 //! isolation inside the VM is enforced guest-side by sandlock. The engine
 //! owns the registry: tenant → VM, sandbox id → {tenant, workdir}.
 
+use std::sync::Arc;
+
 use super::{apply_system_base, build_spec, run_exec, DEFAULT_SYSTEM};
 use crate::manager::{SandboxRecord, VmManager};
-use adapter_traits::VmName;
+use crate::policy::{default_sandbox_policy, merge_policies};
+use adapter_traits::{ResourceLimits, SandboxSpec, VmName};
 use terrarium_protocol::{Command, Response};
 
 /// Fresh sandbox id: `sb-<12 hex>` (48 bits, uuid v4, no new dependency).
@@ -152,12 +155,42 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
     }
     let workdir = format!("/workdir/{}", id);
 
+    // C3: bind the L2 session through the SandboxAdapter before registering
+    // the record. The effective policy (engine default ∪ user) is fixed at
+    // create and carried by the returned handle; later per-call overrides
+    // union onto it (never a replace).
+    let spec_name = match VmName::new(id.clone()) {
+        Ok(n) => n,
+        Err(e) => return Response::err(format!("invalid sandbox name: {}", e)),
+    };
+    let effective = match policy.clone() {
+        Some(user) => merge_policies(default_sandbox_policy(), user),
+        None => default_sandbox_policy(),
+    };
+    let spec = SandboxSpec {
+        name: spec_name,
+        tools: Vec::new(),
+        limits: ResourceLimits::default(),
+        env: Default::default(),
+        policy: Some(effective),
+    };
+    let vm_arc = match mgr.get_handle(&vm_name) {
+        Some(h) => h,
+        None => return Response::err(format!("VM '{}' not found", vm_name)),
+    };
+    let handle = match mgr.sandbox_adapter().create(vm_arc, &spec).await {
+        Ok(h) => h,
+        Err(e) => return Response::err(e.to_string()),
+    };
+
     // Ensure the workdir exists in the guest (unsandboxed). On failure
-    // return an honest error and don't register a half-created sandbox.
+    // return an honest error, best-effort tear down the bound session, and
+    // don't register a half-created sandbox.
     let mkdir = vec!["mkdir".to_string(), "-p".to_string(), workdir.clone()];
     match mgr.exec(&vm_name, &mkdir, 30, false, None, None).await {
         Ok(r) if r.exit_code == 0 => {}
         Ok(r) => {
+            let _ = handle.destroy().await;
             return Response::err(format!(
                 "failed to create workdir {}: {}",
                 workdir,
@@ -165,6 +198,7 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
             ));
         }
         Err(e) => {
+            let _ = handle.destroy().await;
             return Response::err(format!("failed to create workdir {}: {}", workdir, e));
         }
     }
@@ -177,6 +211,7 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
         created_at: now_secs(),
         policy,
         pool_backed,
+        handle: Some(Arc::from(handle)),
     };
     mgr.sandbox_insert(record);
     Response::ok(serde_json::json!({
@@ -203,12 +238,11 @@ pub(crate) async fn cmd_sandbox_exec(mgr: &mut VmManager, cmd: Command) -> Respo
         Some(r) => r,
         None => return Response::err(format!("Sandbox '{}' not found", id)),
     };
-    // D2: sandboxed exec always carries a complete policy. `run_exec`
-    // injects the engine default when the exec is sandboxed and neither
-    // the per-call nor the stored policy resolves — here we only resolve
-    // the user-provided policy (per-call overrides the stored one). An
-    // explicit `sandbox:false` escape hatch stays policy-free.
-    let policy = cmd.policy.clone().or(record.policy.clone());
+    // D2: sandboxed exec always carries a complete policy — the session
+    // handle bound at create already holds the effective (default ∪ stored)
+    // policy. `run_exec` passes only the per-call override; it injects the
+    // engine default for direct paths when no policy resolves. An explicit
+    // `sandbox:false` escape hatch stays policy-free.
     run_exec(
         mgr,
         &record.vm_name,
@@ -216,7 +250,7 @@ pub(crate) async fn cmd_sandbox_exec(mgr: &mut VmManager, cmd: Command) -> Respo
         cmd.timeout_secs,
         true, // sandboxed by default.
         cmd.sandbox,
-        policy,
+        cmd.policy.clone(),
         Some(&record.workdir),
         cmd.exec_mode.clone(),
         Some(id.clone()),
@@ -297,6 +331,14 @@ pub(crate) async fn cmd_sandbox_kill(mgr: &mut VmManager, cmd: Command) -> Respo
         }
     }
 
+    // C3: best-effort teardown through the bound session handle (the VM
+    // teardown is the real cleanup; GuestSandlockHandle::destroy is a no-op).
+    if let Some(handle) = &record.handle {
+        if let Err(e) = handle.destroy().await {
+            tracing::warn!(sandbox = %id, error = %e, "handle.destroy failed during sandbox_kill");
+        }
+    }
+
     mgr.sandbox_remove(&id);
     Response::ok(serde_json::json!({
         "id": id,
@@ -344,6 +386,16 @@ pub(crate) async fn cmd_tenant_destroy(mgr: &mut VmManager, cmd: Command) -> Res
     for s in &live {
         if let Err(e) = mgr.session_kill(&s.session_id).await {
             tracing::warn!(session = %s.session_id, error = %e, "session kill failed during tenant_destroy");
+        }
+    }
+
+    // C3: best-effort teardown through each bound session handle (the VM
+    // teardown/release below is the real cleanup).
+    for rec in &records {
+        if let Some(handle) = &rec.handle {
+            if let Err(e) = handle.destroy().await {
+                tracing::warn!(sandbox = %rec.id, error = %e, "handle.destroy failed during tenant_destroy");
+            }
         }
     }
 

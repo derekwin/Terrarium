@@ -28,8 +28,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use adapter_traits::{
-    AdapterError, ExecOpts, ExecResult, FsSpec, SandboxPolicy, Snapshot, VmAdapter, VmHandle,
-    VmInfo, VmSpec,
+    AdapterError, ExecCommand, ExecOpts, ExecResult, FsSpec, SandboxAdapter, SandboxHandle,
+    SandboxPolicy, SandboxSpec, Snapshot, VmAdapter, VmHandle, VmInfo, VmSpec,
 };
 
 /// One recorded exec invocation (for assertions on engine→guest plumbing).
@@ -478,5 +478,205 @@ impl VmAdapter for MockVmAdapter {
         Self: 'async_trait,
     {
         Box::pin(async move { Err(AdapterError::not_supported("restore")) })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockSandboxAdapter / MockSandboxHandle — C3 wiring tests
+// ---------------------------------------------------------------------------
+
+/// One recorded `SandboxAdapter::create` call (the spec is what the engine
+/// binds at sandbox_create — asserting on its effective policy).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SandboxCreateCall {
+    pub spec: SandboxSpec,
+}
+
+/// One recorded `SandboxHandle::exec` call (the engine-side observable of
+/// a sandboxed blocking exec routed through the session handle).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SandboxHandleCall {
+    pub args: Vec<String>,
+    pub work_dir: Option<String>,
+    pub env: Option<std::collections::HashMap<String, String>>,
+    pub policy_override: Option<SandboxPolicy>,
+    pub timeout_secs: Option<u64>,
+}
+
+struct MockSandboxState {
+    exec_stdout: String,
+    exec_stderr: String,
+    exec_exit_code: i32,
+}
+
+/// Controllable sandbox handle for unit tests: records every exec command
+/// and returns the configured result without touching any VM.
+pub struct MockSandboxHandle {
+    inner: Mutex<MockSandboxState>,
+    exec_log: Arc<Mutex<Vec<SandboxHandleCall>>>,
+    destroy_count: Arc<Mutex<u32>>,
+}
+
+impl MockSandboxHandle {
+    fn new(
+        exec_stdout: String,
+        exec_stderr: String,
+        exec_exit_code: i32,
+        exec_log: Arc<Mutex<Vec<SandboxHandleCall>>>,
+        destroy_count: Arc<Mutex<u32>>,
+    ) -> Self {
+        Self {
+            inner: Mutex::new(MockSandboxState {
+                exec_stdout,
+                exec_stderr,
+                exec_exit_code,
+            }),
+            exec_log,
+            destroy_count,
+        }
+    }
+}
+
+impl SandboxHandle for MockSandboxHandle {
+    fn exec<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        cmd: &'life1 ExecCommand,
+    ) -> Pin<Box<dyn Future<Output = Result<ExecResult, AdapterError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            self.exec_log.lock().unwrap().push(SandboxHandleCall {
+                args: cmd.args.clone(),
+                work_dir: cmd.work_dir.clone(),
+                env: cmd.env.clone(),
+                policy_override: cmd.policy_override.clone(),
+                timeout_secs: cmd.timeout_secs,
+            });
+            let s = self.inner.lock().unwrap();
+            Ok(ExecResult {
+                stdout: s.exec_stdout.clone(),
+                stderr: s.exec_stderr.clone(),
+                exit_code: s.exec_exit_code,
+            })
+        })
+    }
+
+    fn setup<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        _tools: &'life1 [String],
+    ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn destroy<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            *self.destroy_count.lock().unwrap() += 1;
+            Ok(())
+        })
+    }
+}
+
+/// Builder-pattern mock sandbox adapter: every `create` returns a fresh
+/// [`MockSandboxHandle`] sharing the adapter's exec log and destroy count.
+pub struct MockSandboxAdapter {
+    exec_stdout: String,
+    exec_stderr: String,
+    exec_exit_code: i32,
+    create_log: Arc<Mutex<Vec<SandboxCreateCall>>>,
+    exec_log: Arc<Mutex<Vec<SandboxHandleCall>>>,
+    destroy_count: Arc<Mutex<u32>>,
+}
+
+impl MockSandboxAdapter {
+    /// Defaults: empty exec result, exit code 0.
+    pub fn new() -> Self {
+        Self {
+            exec_stdout: String::new(),
+            exec_stderr: String::new(),
+            exec_exit_code: 0,
+            create_log: Arc::new(Mutex::new(Vec::new())),
+            exec_log: Arc::new(Mutex::new(Vec::new())),
+            destroy_count: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    /// Configure the exec result returned by created handles.
+    #[allow(dead_code)]
+    pub fn with_exec(mut self, stdout: &str, stderr: &str, exit_code: i32) -> Self {
+        self.exec_stdout = stdout.to_string();
+        self.exec_stderr = stderr.to_string();
+        self.exec_exit_code = exit_code;
+        self
+    }
+
+    /// Shared log of every `create` call (the bound `SandboxSpec`).
+    #[allow(dead_code)]
+    pub fn create_log(&self) -> Arc<Mutex<Vec<SandboxCreateCall>>> {
+        self.create_log.clone()
+    }
+
+    /// Shared log of every `handle.exec` call made on created handles.
+    #[allow(dead_code)]
+    pub fn exec_log(&self) -> Arc<Mutex<Vec<SandboxHandleCall>>> {
+        self.exec_log.clone()
+    }
+
+    /// Shared count of `handle.destroy` calls made on created handles.
+    #[allow(dead_code)]
+    pub fn destroy_count(&self) -> Arc<Mutex<u32>> {
+        self.destroy_count.clone()
+    }
+}
+
+impl Default for MockSandboxAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SandboxAdapter for MockSandboxAdapter {
+    fn create<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        _vm: Arc<dyn VmHandle>,
+        spec: &'life1 SandboxSpec,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Box<dyn SandboxHandle>, AdapterError>> + Send + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            self.create_log
+                .lock()
+                .unwrap()
+                .push(SandboxCreateCall { spec: spec.clone() });
+            Ok(Box::new(MockSandboxHandle::new(
+                self.exec_stdout.clone(),
+                self.exec_stderr.clone(),
+                self.exec_exit_code,
+                self.exec_log.clone(),
+                self.destroy_count.clone(),
+            )) as Box<dyn SandboxHandle>)
+        })
     }
 }

@@ -75,7 +75,10 @@ impl SandboxHandle for GuestSandlockHandle {
             None => self.policy.clone(),
         };
 
-        let mut opts = ExecOpts::new(cmd.args.clone(), 60).with_sandbox(true);
+        // Per-command timeout: `None` uses the 60s default (matching the
+        // engine's exec default).
+        let mut opts =
+            ExecOpts::new(cmd.args.clone(), cmd.timeout_secs.unwrap_or(60)).with_sandbox(true);
         if let Some(work_dir) = &cmd.work_dir {
             opts = opts.with_work_dir(work_dir.clone());
         }

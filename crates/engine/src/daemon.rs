@@ -15,7 +15,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
-use crate::commands::{blocking_exec_response, execute, prepare_blocking_exec, Command};
+use crate::commands::{
+    blocking_exec_response, execute, prepare_blocking_exec, Command, PreparedExec,
+};
 use crate::manager::VmManager;
 use terrarium_protocol::Response;
 
@@ -187,7 +189,10 @@ async fn dispatch(
         match prepare_blocking_exec(&mgr, &cmd) {
             Ok(prepared) => {
                 drop(mgr); // the exec itself runs without the manager lock
-                let result = prepared.handle.exec(&prepared.opts).await;
+                let result = match prepared {
+                    PreparedExec::Direct { handle, opts } => handle.exec(&opts).await,
+                    PreparedExec::Sandbox { handle, cmd } => handle.exec(&cmd).await,
+                };
                 return (blocking_exec_response(result), false);
             }
             Err(resp) => return (resp, false),
