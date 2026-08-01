@@ -112,6 +112,8 @@ def validate_policy(policy: dict) -> dict:
     normalized = copy.deepcopy(policy)
 
     # capabilities: list of single-key {"File"|"Network"|"Device": spec}
+    # Always present in the normalized output (empty list = default-deny
+    # base; the engine unions it with the default capability set).
     caps = normalized.get("capabilities", [])
     if caps is None:
         caps = []
@@ -119,6 +121,7 @@ def validate_policy(policy: dict) -> dict:
         raise ValueError(
             f"policy capabilities must be a list, got {type(caps).__name__}"
         )
+    normalized["capabilities"] = caps
     for i, cap in enumerate(caps):
         if not isinstance(cap, dict) or len(cap) != 1:
             raise ValueError(

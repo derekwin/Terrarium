@@ -512,7 +512,7 @@ pub struct AuditSpec {
 }
 
 /// Sandbox-level policy: logical capability set + resource limits.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxPolicy {
     /// Explicit grants; an empty set (or an omitted key on the wire) is

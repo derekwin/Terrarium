@@ -15,7 +15,7 @@ mod vm;
 use std::sync::Arc;
 
 use crate::manager::VmManager;
-use crate::policy::default_sandbox_policy;
+use crate::policy::{default_sandbox_policy, merge_policies};
 use adapter_traits::{AdapterError, ExecOpts, ExecResult, SandboxPolicy, VmHandle, VmName, VmSpec};
 pub(crate) use terrarium_protocol::{Command, Response};
 
@@ -79,12 +79,17 @@ pub(crate) async fn run_exec(
     }
     let timeout = timeout_secs.unwrap_or(60).min(3600);
     let sandbox = sandbox_flag.unwrap_or(sandbox_default);
-    // D2: a sandboxed exec always carries a complete policy. When neither
-    // the per-call nor the stored policy is present, inject the engine
-    // default — gated on the sandbox flag, so VM-level `exec` with
-    // `sandbox:true` is covered too. An unsandboxed exec stays policy-free.
+    // Capability model: the engine default policy is the BASE layer
+    // (read-only system dirs, RW /tmp) that every sandboxed exec starts
+    // from; a user policy APPENDS its capabilities on top (union), so a
+    // user granting only /opt still runs /bin/sh (the default's -r /bin
+    // carries sandlock's execute grant). An unsandboxed exec stays
+    // policy-free; when sandboxed, the effective policy is base ∪ user.
     let policy = if sandbox {
-        policy.or_else(|| Some(default_sandbox_policy()))
+        Some(match policy {
+            Some(user) => merge_policies(default_sandbox_policy(), user),
+            None => default_sandbox_policy(),
+        })
     } else {
         policy
     };
@@ -182,15 +187,12 @@ pub(crate) fn prepare_blocking_exec(
     }
     let timeout = cmd.timeout_secs.unwrap_or(60).min(3600);
     let sandbox = cmd.sandbox.unwrap_or(sandbox_default);
-    // D2: a sandboxed exec always carries a complete policy. When neither
-    // the per-call nor the stored policy is present, inject the engine
-    // default — gated on the sandbox flag, so VM-level `exec` with
-    // `sandbox:true` gets it too (mirrors `run_exec`).
+    // Capability model: base ∪ user for sandboxed exec (mirrors run_exec).
     let policy = if sandbox {
-        cmd.policy
-            .clone()
-            .or(stored_policy)
-            .or_else(|| Some(default_sandbox_policy()))
+        Some(match cmd.policy.clone().or(stored_policy) {
+            Some(user) => merge_policies(default_sandbox_policy(), user),
+            None => default_sandbox_policy(),
+        })
     } else {
         cmd.policy.clone().or(stored_policy)
     };

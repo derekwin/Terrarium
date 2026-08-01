@@ -150,4 +150,5 @@ def test_validate_policy_limits_only_shape():
     from terra.client import validate_policy
 
     p = validate_policy({"limits": {"memory_mb": 256}})
-    assert p == {"limits": {"memory_mb": 256}}
+    assert p["limits"] == {"memory_mb": 256}
+    assert p["capabilities"] == []  # normalized: always present (default-deny base)
