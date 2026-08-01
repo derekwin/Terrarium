@@ -87,7 +87,7 @@ terra_exec(session="task-b", args=["python3","eval.py"])
 
 # 长任务：后台启动，轮询进度，按需终止
 terra_exec_background(args=["make","build"])          # → {session_id:"sess-…", sandbox:"sb-…", status:"started"}
-terra_session_status(session_id="sess-…")             # → {session_id, sandbox, status:"running"|"exited", exit_code, stdout, stderr}
+terra_session_status(session_id="sess-…")             # → {session_id, sandbox, status:"running"|"completed"|"failed"|"killed", exit_code, stdout, stderr}
 terra_session_kill(session_id="sess-…")               # 终止并清理工作目录
 ```
 
