@@ -166,8 +166,11 @@ class Sandbox:
         deny-by-default, ``memory_mb``/``procs`` set resource limits.
         Stored on the sandbox engine-side; echoed by ``sandbox_info``.
     env:
-        Default environment variables for :meth:`exec` (stored as metadata;
-        not yet wired to guest agent).
+        Default environment variables for :meth:`exec`, applied client-side
+        at exec time: merged with any per-call *env* and passed as shell
+        assignments wrapping the command (``K=V ... cmd`` via ``sh -c``).
+        Not stored as engine metadata and not sent to the guest agent as
+        env vars.
     timeout:
         Default per-command timeout in seconds (used when :meth:`exec` does
         not specify its own *timeout*).

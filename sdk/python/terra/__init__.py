@@ -22,7 +22,7 @@ from . import daemon
 from .daemon import session
 from .config import HostConfig
 from . import direct
-from .direct import create, list_vms, connect
+from .direct import configure, create, list_vms, connect
 from . import sandbox
 from .sandbox import Sandbox
 from . import async_sandbox
@@ -50,4 +50,5 @@ __all__ = [
     "create",
     "connect",
     "list_vms",
+    "configure",
 ]

@@ -87,7 +87,7 @@ sb3 = Sandbox(tenant="research-team")
 
 # exec — blocking 执行，返回 ExecResult；默认经 sandlock（Landlock/seccomp）沙箱化
 result = sb.exec(["python3", "-c", "print(1+1)"])
-print(result.stdout, result.stderr, result.exit_code, result.duration_ms)
+print(result.stdout, result.stderr, result.exit_code)
 
 # sandboxed=False — 逃生舱：不经权限隔离执行（如调试、安装系统软件包）
 result = sb.exec(["apk", "add", "curl"], sandboxed=False)
@@ -295,8 +295,8 @@ SDK 用户通常无需手动管理 daemon——`Sandbox` / `Pool` 在首次使�
 
 ### `terra.assets` / `terra.images` / `terra.paths`
 
-- `assets.ensure_ch() / ensure_virtiofsd() / ensure_erofs_tools() /
-  ensure_engine() / publish_engine()`：二进制自动获取（GitHub/apt 解包/cargo/托管 bin）
+- `assets.ensure_ch() / ensure_virtiofsd() / ensure_erofs_tools()`：
+  二进制自动获取（GitHub/apt 解包/cargo/托管 bin）
 - `images.ensure(name) / ensure_all() / build_layer(src, name)`：guest
   镜像（repo 构建或 `TERRA_ARTIFACT_BASE` 制品）与 EROFS 层打包
 - `paths`：托管目录布局（`~/.local/share/terra/{bin,images,layers,templates,state,run}`）
