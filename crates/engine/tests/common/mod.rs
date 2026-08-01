@@ -57,6 +57,7 @@ struct MockState {
     exec_stderr: String,
     exec_exit_code: i32,
     fs_attached: bool,
+    cpus: u8,
 }
 
 /// Controllable VM handle for unit tests.
@@ -95,6 +96,7 @@ impl MockVmHandle {
         blocking_exec_gate: Option<Arc<tokio::sync::Notify>>,
         ping_count: Arc<Mutex<u32>>,
         ping_ready_after: u32,
+        cpus: u8,
     ) -> Self {
         Self {
             inner: Mutex::new(MockState {
@@ -105,6 +107,7 @@ impl MockVmHandle {
                 exec_stderr,
                 exec_exit_code,
                 fs_attached,
+                cpus,
             }),
             exec_log,
             kill_log,
@@ -130,7 +133,7 @@ impl VmHandle for MockVmHandle {
             let s = self.inner.lock().unwrap();
             Ok(VmInfo {
                 state: s.state.clone(),
-                cpus: Some(1),
+                cpus: Some(s.cpus),
                 memory_mb: Some(256),
             })
         })
@@ -307,6 +310,7 @@ pub struct MockVmAdapter {
     blocking_exec_gate: Option<Arc<tokio::sync::Notify>>,
     ping_count: Arc<Mutex<u32>>,
     ping_ready_after: u32,
+    cpus: u8,
 }
 
 impl MockVmAdapter {
@@ -329,6 +333,7 @@ impl MockVmAdapter {
             blocking_exec_gate: None,
             ping_count: Arc::new(Mutex::new(0)),
             ping_ready_after: 0,
+            cpus: 1,
         }
     }
 
@@ -411,6 +416,13 @@ impl MockVmAdapter {
         self
     }
 
+    /// Set the CPU count reported by created handles' info().
+    #[allow(dead_code)]
+    pub fn with_cpus(mut self, cpus: u8) -> Self {
+        self.cpus = cpus;
+        self
+    }
+
     /// Build a new handle from the current builder state (for advanced
     /// test scenarios that need a handle without going through `create`).
     pub fn build_handle(&self) -> MockVmHandle {
@@ -428,6 +440,7 @@ impl MockVmAdapter {
             self.blocking_exec_gate.clone(),
             self.ping_count.clone(),
             self.ping_ready_after,
+            self.cpus,
         )
     }
 }

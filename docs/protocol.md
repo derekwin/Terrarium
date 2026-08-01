@@ -27,7 +27,7 @@ TCP + token 时，客户端先发送一行 token，再发送命令行。
 | `create` | `name`, `kernel`, `initramfs?`, `cmdline?`, `cpus?`, `max_cpus?`, `memory_mb?`, `max_memory_mb?`, `layers?`, `system?`, `upper?`, `net?` | 创建 VM。`layers` 为**附加层**（工具层，高优先级在前）；系统底座自动补 `system`（默认 `base`），已带系统层结尾则不补。`upper` 为 Persistent upperdir 名 |
 | `list` | — | 所有运行中 VM |
 | `info` | `name` | state / cpus / memory_mb / pid |
-| `resize` | `name`, `cpus?`, `memory_bytes?` | 在线扩缩（至少一项，否则报错） |
+| `resize` | `name`, `cpus?`, `memory_bytes?` | 在线扩缩（至少一项，否则报错）。**CPU 缩容不支持**（guest 侧无 offlining，显式报错）；内存缩容支持（virtio-mem，guest 驱动处理 unplug） |
 | `shutdown` / `kill` | `name` | 停止并注销（数据保留） |
 | `destroy` | `name` | 停止并注销（同义，永不删数据） |
 | `snapshot` | `name` | 内存快照（restore 未实现；自定义 `snapshot_path` 暂不支持，传入会报错） |

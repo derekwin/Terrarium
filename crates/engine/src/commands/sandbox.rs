@@ -78,6 +78,10 @@ async fn ensure_tenant_vm(
                 };
                 let want_cpus = cmd.cpus.map(|c| c as u32);
                 let want_mem_bytes = cmd.memory_mb.map(|mb| mb * 1024 * 1024);
+                // No CPU-shrink guard needed here: the requested cpus is
+                // the boot spec (>= 1) and pool VMs boot at 1 vCPU, so a
+                // claim only ever resizes up; identical dimensions are
+                // filtered below as no-ops.
                 let cpus = want_cpus.filter(|c| current.cpus != Some(*c as u8));
                 let mem = want_mem_bytes.filter(|m| current.memory_mb != Some(*m / 1024 / 1024));
                 if cpus.is_some() || mem.is_some() {

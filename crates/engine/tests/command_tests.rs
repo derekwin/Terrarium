@@ -397,6 +397,52 @@ async fn test_resize() {
     assert!(resp.is_ok(), "resize should succeed: {:?}", resp);
 }
 
+/// resize with fewer cpus than the VM currently has → explicit unsupported
+/// error (CH vCPU removal requires guest-side offlining; guest-proxy only
+/// ever ONLINES hot-added vCPUs). Never forwarded to CH.
+#[tokio::test]
+async fn test_resize_cpu_shrink_rejected() {
+    let adapter = MockVmAdapter::new().with_state("Running").with_cpus(4);
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+    execute(&mut mgr, Command::create("shrink-me", "/fake/vmlinux")).await;
+    let cmd = Command::new("resize").with_name("shrink-me").with_cpus(2);
+    let resp = execute(&mut mgr, cmd).await;
+    assert!(!resp.is_ok(), "cpu shrink must fail: {:?}", resp);
+    assert!(
+        resp.error.unwrap().contains("CPU shrink"),
+        "error should name CPU shrink as unsupported"
+    );
+}
+
+/// resize with more cpus than the VM currently has → proceeds (mock resize
+/// succeeds), hot-add is supported.
+#[tokio::test]
+async fn test_resize_cpu_grow_proceeds() {
+    let adapter = MockVmAdapter::new().with_state("Running").with_cpus(4);
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+    execute(&mut mgr, Command::create("grow-me", "/fake/vmlinux")).await;
+    let cmd = Command::new("resize").with_name("grow-me").with_cpus(6);
+    let resp = execute(&mut mgr, cmd).await;
+    assert!(resp.is_ok(), "cpu grow should succeed: {:?}", resp);
+}
+
+/// resize with only memory_bytes (no cpus) → proceeds unchanged; memory
+/// shrink via virtio-mem is supported (guest driver handles unplug).
+#[tokio::test]
+async fn test_resize_memory_only_proceeds() {
+    let mut mgr = make_mgr();
+    execute(&mut mgr, Command::create("mem-me", "/fake/vmlinux")).await;
+    let cmd = Command::new("resize")
+        .with_name("mem-me")
+        .with_memory_bytes(512 * 1024 * 1024);
+    let resp = execute(&mut mgr, cmd).await;
+    assert!(
+        resp.is_ok(),
+        "memory-only resize should succeed: {:?}",
+        resp
+    );
+}
+
 /// info without a name → error.
 #[tokio::test]
 async fn test_info_missing_name() {

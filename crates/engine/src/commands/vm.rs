@@ -69,6 +69,25 @@ pub(crate) async fn cmd_resize(mgr: &VmManager, cmd: Command) -> Response {
             "At least one of 'cpus' or 'memory_bytes' must be specified for resize",
         );
     }
+    // CPU shrink is not supported: CH vCPU removal requires guest-side
+    // offlining, and guest-proxy only ever ONLINES hot-added vCPUs
+    // (start_cpu_onliner). Reject explicitly instead of forwarding a
+    // failing resize to CH. Memory shrink IS supported (virtio-mem; the
+    // guest driver handles unplug) and is unaffected by this guard.
+    if let Some(want) = cpus {
+        // info() can fail while the VM is still booting; in that case we
+        // fall through to the existing resize path so a memory resize is
+        // never blocked by an unverifiable cpus comparison (CH decides,
+        // as before). When cpus was requested, the same unverifiable
+        // state lets CH error as it would today.
+        if let Ok(info) = vm.info().await {
+            if info.cpus.is_some_and(|cur| cur as u32 > want) {
+                return Response::err(
+                    "CPU shrink is not supported (hot-unplug requires guest offlining)",
+                );
+            }
+        }
+    }
     if let Err(e) = vm.resize(cpus, cmd.memory_bytes).await {
         return Response::err(e.to_string());
     }
