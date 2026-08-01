@@ -1,282 +1,368 @@
-//! Sandlock adapter — wraps Sandlock as a SandboxAdapter.
+//! Default L2 backend: guest-side sandlock confinement, exposed through
+//! the [`SandboxAdapter`] contract.
 //!
-//! Invokes `sandlock run` to confine processes with Landlock,
-//! seccomp-bpf, seccomp notification, resource limits, HTTP ACL,
-//! and COW filesystem — all without root.
-//!
-//! Requirements:
-//! - `sandlock` CLI binary in PATH. NOTE: the CLI ships in the GitHub
-//!   release tarball (`sandlock-x86_64-unknown-linux-gnu.tar.gz`), NOT
-//!   in the `pip install sandlock` package (that one is SDK-only).
-//! - Host Landlock ABI >= v5 (≈ kernel 6.10+; Ubuntu 24.04 GA kernel 6.8
-//!   only has v4). Preferred deployment is in-guest where our own kernel
-//!   (mainline 6.12+) satisfies this. The adapter capability-checks the
-//!   host and returns NotSupported instead of failing obscurely.
+//! `create` binds a VM plus its effective policy into a session; `exec`
+//! runs the command via [`VmHandle::exec`] with `sandbox: true` and the
+//! bound policy (a per-call `policy_override` is unioned on top via
+//! [`SandboxPolicy::merged_with`]). The guest-proxy sandlock path is the
+//! transport — this crate is a pure wrapper around it.
+
+use std::sync::Arc;
 
 use adapter_traits::{
-    AdapterError, ExecCommand, ExecResult, SandboxAdapter, SandboxHandle, SandboxSpec, VmHandle,
-    VmName,
+    AdapterError, ExecCommand, ExecOpts, ExecResult, SandboxAdapter, SandboxHandle, SandboxPolicy,
+    SandboxSpec, VmHandle,
 };
 use async_trait::async_trait;
-use std::io::Read;
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 
-/// Minimum Landlock ABI version sandlock requires (FsIoctlDev).
-const MIN_LANDLOCK_ABI: i32 = 5;
-
-/// Probe the host Landlock ABI version via landlock_create_ruleset(2).
-/// Returns the ABI version (>= 1), 0 if Landlock is unavailable.
-fn landlock_abi() -> i32 {
-    // LANDLOCK_CREATE_RULESET_VERSION = 1 << 0; passing a NULL ruleset
-    // attr with size 0 queries the highest supported ABI version.
-    const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
-    // SAFETY: landlock_create_ruleset with a null attr pointer and size 0
-    // is a valid ABI-version query per landlock(7); no memory is accessed
-    // and the call has no side effects.
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            std::ptr::null::<u8>(),
-            0usize,
-            LANDLOCK_CREATE_RULESET_VERSION,
-        )
-    };
-    if ret < 0 {
-        0
-    } else {
-        ret as i32
-    }
-}
-
+/// Default sandbox backend: wraps the engine's guest-sandlock exec path.
+/// Stateless — each `create` produces a bound [`SandboxHandle`].
 #[derive(Default)]
-pub struct SandlockAdapter;
+pub struct GuestSandlockAdapter;
 
-impl SandlockAdapter {
+impl GuestSandlockAdapter {
     pub fn new() -> Self {
         Self
     }
+}
 
-    /// Whether this host can run sandlock. The engine should skip this
-    /// backend entirely when false (capability-gated, not an error).
-    pub fn is_supported() -> bool {
-        landlock_abi() >= MIN_LANDLOCK_ABI
-    }
+/// Bound session: the VM handle plus the effective policy fixed at
+/// `create`. Exec runs within this context; a per-call override is merged
+/// onto `policy` (base first, override capabilities appended).
+struct GuestSandlockHandle {
+    vm: Arc<dyn VmHandle>,
+    policy: SandboxPolicy,
 }
 
 #[async_trait]
-impl SandboxAdapter for SandlockAdapter {
+impl SandboxAdapter for GuestSandlockAdapter {
     async fn create(
         &self,
-        _vm: Arc<dyn VmHandle>,
+        vm: Arc<dyn VmHandle>,
         spec: &SandboxSpec,
     ) -> Result<Box<dyn SandboxHandle>, AdapterError> {
-        if !Self::is_supported() {
-            return Err(AdapterError::not_supported(format!(
-                "sandlock requires Landlock ABI >= v{} (kernel ~6.10+), host has v{}",
-                MIN_LANDLOCK_ABI,
-                landlock_abi()
+        // A confinement backend cannot enforce without a complete policy.
+        // The engine injects its default before create; `None` here is a
+        // caller bug, surfaced honestly instead of silently running an
+        // unconfined sandboxed exec.
+        let policy = spec.policy.clone().ok_or_else(|| {
+            AdapterError::invalid_argument(
+                "GuestSandlockAdapter::create requires spec.policy (effective policy)",
+            )
+        })?;
+        // The engine validates before create; re-validate defensively so a
+        // session is never bound to an invalid policy.
+        if let Err(err) = policy.validate() {
+            return Err(AdapterError::invalid_argument(format!(
+                "invalid sandbox policy: {}",
+                err
             )));
         }
-        Ok(Box::new(SandlockHandle {
-            name: spec.name.clone(),
-            tools: spec.tools.clone(),
-            limits: spec.limits.clone(),
-            env: spec.env.clone(),
-        }))
+        Ok(Box::new(GuestSandlockHandle { vm, policy }))
     }
 }
 
-struct SandlockHandle {
-    name: VmName,
-    tools: Vec<String>,
-    limits: adapter_traits::ResourceLimits,
-    env: std::collections::HashMap<String, String>,
-}
-
 #[async_trait]
-impl SandboxHandle for SandlockHandle {
+impl SandboxHandle for GuestSandlockHandle {
     async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, AdapterError> {
-        sandlock_run(cmd, &self)
+        // Effective policy = bound policy ∪ per-call override (base-union-
+        // user merge: bound capabilities preserved, override capabilities
+        // appended, override limits win).
+        let policy = match &cmd.policy_override {
+            Some(override_policy) => self.policy.merged_with(override_policy),
+            None => self.policy.clone(),
+        };
+
+        // Per-command timeout: `None` uses the 60s default (matching the
+        // engine's exec default).
+        let mut opts =
+            ExecOpts::new(cmd.args.clone(), cmd.timeout_secs.unwrap_or(60)).with_sandbox(true);
+        if let Some(work_dir) = &cmd.work_dir {
+            opts = opts.with_work_dir(work_dir.clone());
+        }
+        opts.policy = Some(policy);
+        self.vm.exec(&opts).await
     }
 
     async fn setup(&self, _tools: &[String]) -> Result<(), AdapterError> {
-        // Sandlock has no persistent setup — it applies rules per-run
+        // Guest sandlock confines per-exec; it needs no persistent setup.
         Ok(())
     }
 
     async fn destroy(&self) -> Result<(), AdapterError> {
+        // Nothing to release: the guest-proxy applies rules per-run.
         Ok(())
     }
-}
-
-/// Build and invoke `sandlock run ...` with mapped flags.
-fn sandlock_run(cmd: &ExecCommand, handle: &SandlockHandle) -> Result<ExecResult, AdapterError> {
-    let mut args: Vec<String> = vec!["run".into()];
-
-    // Filesystem: readable paths
-    for tool in &handle.tools {
-        match tool.as_str() {
-            "python" | "python3" => {
-                args.extend_from_slice(&[
-                    "-r".into(),
-                    "/usr".into(),
-                    "-r".into(),
-                    "/usr/local".into(),
-                    "-r".into(),
-                    "/lib".into(),
-                    "-r".into(),
-                    "/lib64".into(),
-                    "-r".into(),
-                    "/etc".into(),
-                ]);
-            }
-            "node" | "nodejs" => {
-                args.extend_from_slice(&[
-                    "-r".into(),
-                    "/usr".into(),
-                    "-r".into(),
-                    "/usr/local".into(),
-                    "-r".into(),
-                    "/lib".into(),
-                    "-r".into(),
-                    "/lib64".into(),
-                ]);
-            }
-            _ => {}
-        }
-    }
-
-    // Writable paths
-    args.extend_from_slice(&["-w".into(), "/tmp".into()]);
-    args.extend_from_slice(&["-w".into(), "/home/agent".into()]);
-
-    // Resource limits
-    if let Some(mb) = handle.limits.memory_mb {
-        args.push("-m".into());
-        args.push(format!("{}M", mb));
-    }
-    if let Some(_shares) = handle.limits.cpu_shares {
-        // Map CPU shares (1024 = default) to process count limit.
-        // Higher shares → more processes allowed.
-        let max_procs = ((_shares as f64 / 1024.0) * 100.0).max(10.0) as u32;
-        args.push("-P".into());
-        args.push(max_procs.to_string());
-    }
-
-    // Environment: pass via process environment instead of --env argv
-    // flags — argv is world-readable via /proc/<pid>/cmdline.
-    // env_clear + whitelist replaces sandlock's --clean-env: the child
-    // inherits exactly the requested variables and nothing else — the
-    // clear is UNCONDITIONAL (an empty env map must not mean "inherit
-    // the daemon's whole environment", which would leak TERRA_TOKEN).
-    // NOTE: assumes sandlock passes its own environment through to the
-    // confined process; verify against the real sandlock binary.
-    let mut process = Command::new("sandlock");
-    process.env_clear();
-    // sandlock itself still needs PATH to resolve the target binary.
-    if let Ok(path) = std::env::var("PATH") {
-        process.env("PATH", path);
-    }
-    for (k, v) in &handle.env {
-        process.env(k, v);
-    }
-
-    // Command and its args
-    args.push("--".into());
-    for a in &cmd.args {
-        args.push(a.clone());
-    }
-
-    tracing::info!(
-        name = %handle.name,
-        env_keys = ?handle.env.keys().collect::<Vec<_>>(),
-        "sandlock run"
-    );
-
-    // Spawn with timeout (60s).
-    let mut child = process
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| AdapterError::internal(format!("sandlock spawn: {}", e)))?;
-
-    // Drain pipes concurrently BEFORE waiting — a child writing more than
-    // the 64KB pipe buffer would otherwise block on write and never exit.
-    let stdout_rx = spawn_pipe_reader(child.stdout.take().unwrap());
-    let stderr_rx = spawn_pipe_reader(child.stderr.take().unwrap());
-
-    // Poll try_wait so we keep the Child handle for a race-free kill
-    // (no kill-by-pid, no detached wait thread, no zombie on timeout).
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let exit_status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(50));
-            }
-            Ok(None) => {
-                // SAFETY: pid is from Command::spawn(). Negative pid kills
-                // the entire process group, preventing orphaned grandchildren.
-                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-                let _ = child.wait();
-                return Err(AdapterError::timeout(
-                    "sandlock command timed out after 60s",
-                ));
-            }
-            Err(e) => return Err(AdapterError::internal(format!("wait failed: {}", e))),
-        }
-    };
-
-    let stdout_buf = stdout_rx.recv().unwrap_or_default();
-    let stderr_buf = stderr_rx.recv().unwrap_or_default();
-
-    Ok(ExecResult {
-        stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
-        exit_code: exit_status.code().unwrap_or(-1),
-    })
-}
-
-/// Max output captured per pipe for sandbox commands.
-const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
-
-/// Spawn a thread that drains a pipe into a capped buffer.
-fn spawn_pipe_reader(pipe: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let mut buf = Vec::new();
-        pipe.take(MAX_OUTPUT_BYTES as u64)
-            .read_to_end(&mut buf)
-            .ok();
-        let _ = tx.send(buf);
-    });
-    rx
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adapter_traits::{
+        Capability, DefaultAccess, FileAccess, PathPattern, ResourceLimits, Snapshot, VmInfo,
+        VmName,
+    };
+    use std::sync::Mutex;
 
-    #[test]
-    fn landlock_abi_probe_is_consistent_with_support_check() {
-        let abi = landlock_abi();
-        // On any Linux host the probe must return >= 0 (0 = unavailable),
-        // and is_supported must be exactly abi >= MIN_LANDLOCK_ABI.
-        assert!(abi >= 0);
-        assert_eq!(SandlockAdapter::is_supported(), abi >= MIN_LANDLOCK_ABI);
-        // CI/dev reference point: Ubuntu 24.04 kernel 6.8 reports v4 and
-        // must be rejected; mainline 6.10+ guests must be accepted.
-        eprintln!(
-            "host Landlock ABI: v{abi}, supported: {}",
-            abi >= MIN_LANDLOCK_ABI
-        );
+    /// One recorded exec invocation (assertions on the backend → VmHandle
+    /// plumbing).
+    #[derive(Debug, Clone)]
+    struct ExecCall {
+        args: Vec<String>,
+        timeout_secs: u64,
+        sandbox: bool,
+        work_dir: Option<String>,
+        exec_id: Option<String>,
+        policy: Option<SandboxPolicy>,
+    }
+
+    /// Minimal mock VmHandle: records every exec and returns a canned
+    /// result. Non-exec methods use the trait defaults (not supported).
+    struct MockVmHandle {
+        exec_log: Arc<Mutex<Vec<ExecCall>>>,
+        stdout: String,
+        exit_code: i32,
+    }
+
+    impl MockVmHandle {
+        fn new() -> Self {
+            Self {
+                exec_log: Arc::new(Mutex::new(Vec::new())),
+                stdout: String::new(),
+                exit_code: 0,
+            }
+        }
+
+        fn with_exec(mut self, stdout: &str, exit_code: i32) -> Self {
+            self.stdout = stdout.to_string();
+            self.exit_code = exit_code;
+            self
+        }
+
+        fn exec_log(&self) -> Arc<Mutex<Vec<ExecCall>>> {
+            self.exec_log.clone()
+        }
+    }
+
+    #[async_trait]
+    impl VmHandle for MockVmHandle {
+        async fn info(&self) -> Result<VmInfo, AdapterError> {
+            Ok(VmInfo {
+                state: "Running".into(),
+                cpus: Some(1),
+                memory_mb: Some(256),
+            })
+        }
+
+        async fn resize(
+            &self,
+            _cpu: Option<u32>,
+            _memory: Option<u64>,
+        ) -> Result<(), AdapterError> {
+            Err(AdapterError::not_supported("resize"))
+        }
+
+        async fn exec(&self, opts: &ExecOpts) -> Result<ExecResult, AdapterError> {
+            self.exec_log.lock().unwrap().push(ExecCall {
+                args: opts.args.clone(),
+                timeout_secs: opts.timeout_secs,
+                sandbox: opts.sandbox,
+                work_dir: opts.work_dir.clone(),
+                exec_id: opts.exec_id.clone(),
+                policy: opts.policy.clone(),
+            });
+            Ok(ExecResult {
+                stdout: self.stdout.clone(),
+                stderr: String::new(),
+                exit_code: self.exit_code,
+            })
+        }
+
+        async fn snapshot(&self) -> Result<Snapshot, AdapterError> {
+            Err(AdapterError::not_supported("snapshot"))
+        }
+
+        async fn shutdown(&self) -> Result<(), AdapterError> {
+            Ok(())
+        }
+
+        fn pid(&self) -> u32 {
+            0
+        }
+
+        fn is_alive(&self) -> bool {
+            true
+        }
+    }
+
+    /// Deny-by-default, version 1; reads /usr, read-writes /tmp.
+    fn bound_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            capabilities: vec![
+                Capability::File {
+                    path: PathPattern::Prefix("/usr".into()),
+                    access: FileAccess::Read,
+                },
+                Capability::File {
+                    path: PathPattern::Prefix("/tmp".into()),
+                    access: FileAccess::ReadWrite,
+                },
+            ],
+            limits: ResourceLimits {
+                memory_mb: Some(256),
+                ..Default::default()
+            },
+            default: DefaultAccess::Deny,
+            audit: Default::default(),
+            version: 1,
+        }
+    }
+
+    /// Adds an /opt read-write grant and a higher memory limit.
+    fn override_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            capabilities: vec![Capability::File {
+                path: PathPattern::Prefix("/opt".into()),
+                access: FileAccess::ReadWrite,
+            }],
+            limits: ResourceLimits {
+                memory_mb: Some(512),
+                ..Default::default()
+            },
+            default: DefaultAccess::Deny,
+            audit: Default::default(),
+            version: 2,
+        }
+    }
+
+    /// A bound session backed by a mock VM that records every exec.
+    async fn bind_session() -> (Box<dyn SandboxHandle>, Arc<Mutex<Vec<ExecCall>>>) {
+        let mock = MockVmHandle::new().with_exec("out\n", 0);
+        let exec_log = mock.exec_log();
+        let vm: Arc<dyn VmHandle> = Arc::new(mock);
+        let spec = SandboxSpec {
+            name: VmName::new("session-vm").unwrap(),
+            tools: vec![],
+            limits: ResourceLimits::default(),
+            env: Default::default(),
+            policy: Some(bound_policy()),
+        };
+        let handle = GuestSandlockAdapter::new()
+            .create(vm, &spec)
+            .await
+            .expect("create should succeed");
+        (handle, exec_log)
+    }
+
+    #[tokio::test]
+    async fn create_binds_policy_and_runs_guestsandlock_exec() {
+        let (handle, exec_log) = bind_session().await;
+
+        let cmd = ExecCommand {
+            args: vec!["echo".into(), "hi".into()],
+            ..Default::default()
+        };
+        let result = handle.exec(&cmd).await.unwrap();
+        assert_eq!(result.stdout, "out\n");
+
+        let log = exec_log.lock().unwrap();
+        let call = log.last().expect("one exec recorded");
+        assert_eq!(call.args, vec!["echo", "hi"]);
+        assert!(call.sandbox, "exec must run under sandlock confinement");
+        assert_eq!(call.timeout_secs, 60);
+        assert_eq!(call.exec_id, None, "blocking exec carries no exec_id");
+        // No override → exactly the bound policy is passed through.
+        let policy = call.policy.as_ref().expect("policy always present");
+        assert!(policy.grants_path(std::path::Path::new("/usr/bin/ls"), FileAccess::Read));
+        assert!(policy.grants_path(std::path::Path::new("/tmp/x"), FileAccess::ReadWrite));
+        assert_eq!(policy.limits.memory_mb, Some(256));
+    }
+
+    #[tokio::test]
+    async fn exec_unions_policy_override_with_bound_policy() {
+        let (handle, exec_log) = bind_session().await;
+
+        let cmd = ExecCommand {
+            args: vec!["echo".into()],
+            policy_override: Some(override_policy()),
+            ..Default::default()
+        };
+        handle.exec(&cmd).await.unwrap();
+
+        let log = exec_log.lock().unwrap();
+        let call = log.last().unwrap();
+        let policy = call.policy.as_ref().expect("policy present");
+        // Bound capabilities are preserved (base layer).
+        assert!(policy.grants_path(std::path::Path::new("/usr/bin/ls"), FileAccess::Read));
+        // Override capabilities are appended (union, not replace).
+        assert!(policy.grants_path(std::path::Path::new("/opt/x"), FileAccess::ReadWrite));
+        // Override limits win.
+        assert_eq!(policy.limits.memory_mb, Some(512));
+    }
+
+    #[tokio::test]
+    async fn exec_passes_work_dir_through() {
+        let (handle, exec_log) = bind_session().await;
+
+        let cmd = ExecCommand {
+            args: vec!["pwd".into()],
+            work_dir: Some("/workdir/sb-abcd".into()),
+            ..Default::default()
+        };
+        handle.exec(&cmd).await.unwrap();
+
+        let log = exec_log.lock().unwrap();
+        let call = log.last().unwrap();
+        assert_eq!(call.work_dir.as_deref(), Some("/workdir/sb-abcd"));
+        assert!(call.sandbox);
+    }
+
+    #[tokio::test]
+    async fn create_requires_an_effective_policy() {
+        let vm: Arc<dyn VmHandle> = Arc::new(MockVmHandle::new());
+        let spec = SandboxSpec {
+            name: VmName::new("session-vm").unwrap(),
+            tools: vec![],
+            limits: ResourceLimits::default(),
+            env: Default::default(),
+            // The engine injects its default before create; a bare spec here
+            // must be rejected — the backend cannot confine without a policy.
+            policy: None,
+        };
+        let err = match GuestSandlockAdapter::new().create(vm, &spec).await {
+            Ok(_) => panic!("create without a policy must fail"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, AdapterError::InvalidArgument(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_invalid_policy() {
+        let vm: Arc<dyn VmHandle> = Arc::new(MockVmHandle::new());
+        // A relative file path fails SandboxPolicy::validate.
+        let mut policy = bound_policy();
+        policy.capabilities.push(Capability::File {
+            path: PathPattern::Prefix("relative/path".into()),
+            access: FileAccess::Read,
+        });
+        let spec = SandboxSpec {
+            name: VmName::new("session-vm").unwrap(),
+            tools: vec![],
+            limits: ResourceLimits::default(),
+            env: Default::default(),
+            policy: Some(policy),
+        };
+        let err = match GuestSandlockAdapter::new().create(vm, &spec).await {
+            Ok(_) => panic!("create with an invalid policy must fail"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, AdapterError::InvalidArgument(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn setup_and_destroy_are_noops() {
+        let (handle, _) = bind_session().await;
+        handle.setup(&["python".into()]).await.unwrap();
+        handle.destroy().await.unwrap();
     }
 }

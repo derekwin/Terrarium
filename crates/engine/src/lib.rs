@@ -7,7 +7,6 @@ pub mod commands;
 pub mod daemon;
 pub mod manager;
 pub mod policy;
-pub mod sandbox_adapter;
 
 use std::sync::Arc;
 
