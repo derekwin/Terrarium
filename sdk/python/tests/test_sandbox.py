@@ -241,35 +241,49 @@ class TestEngineSandboxes:
 
 @pytest.mark.e2e
 class TestSandboxPolicy:
-    """Per-sandbox exec policy (stored + per-call override)."""
+    """Per-sandbox SandboxPolicy (new JSON shape: capabilities + limits)."""
 
     def test_stored_policy_echo(self):
         """Policy given at create is stored and echoed by sandbox_info."""
         tenant = f"polecho{uuid4().hex[:6]}"
+        policy = {
+            "capabilities": [
+                {"File": {"path": {"Prefix": "/opt"}, "access": "Read"}}
+            ],
+            "limits": {"memory_mb": 256, "procs": 20},
+        }
         sb = Sandbox(tenant=tenant, layers=["base"], cpu=1, memory_mb=256,
-                     policy={"memory_mb": 256, "procs": 20})
+                     policy=policy)
         try:
-            assert sb.policy == {"memory_mb": 256, "procs": 20}, sb.policy
+            # The engine echo normalizes (adds default/audit/version and
+            # null-filled limits) — the granted content must roundtrip.
+            echo = sb.policy
+            assert echo["capabilities"] == policy["capabilities"], echo
+            assert echo["limits"]["memory_mb"] == 256, echo
+            assert echo["limits"]["procs"] == 20, echo
             r = sb.exec("echo hi")
             assert r.exit_code == 0
         finally:
             sb.kill()
             Sandbox.destroy_tenant(tenant)
 
-    def test_append_write_grant(self):
-        """write_paths appends to the default RO-system policy."""
+    def test_write_grant(self):
+        """A ReadWrite File capability on /opt makes it writable (per-call)."""
         tenant = f"polw{uuid4().hex[:6]}"
         sb = Sandbox(tenant=tenant, layers=["base"], cpu=1, memory_mb=256)
         try:
             # /opt is read-only under the default policy.
             r = sb.exec(["sh", "-c", "touch /opt/x"])
             assert r.exit_code != 0
-            # The append grant makes it writable — for this call only.
-            r = sb.exec(["sh", "-c", "touch /opt/x && echo wrote"],
-                        policy={"write_paths": ["/opt"]})
+            # The ReadWrite grant makes it writable — for this call only.
+            grant = {
+                "capabilities": [
+                    {"File": {"path": {"Prefix": "/opt"}, "access": "ReadWrite"}}
+                ]
+            }
+            r = sb.exec(["sh", "-c", "touch /opt/x && echo wrote"], policy=grant)
             assert r.exit_code == 0
-            r = sb.exec(["sh", "-c", "rm -f /opt/x && echo cleaned"],
-                        policy={"write_paths": ["/opt"]})
+            r = sb.exec(["sh", "-c", "rm -f /opt/x && echo cleaned"], policy=grant)
             assert r.exit_code == 0
             # Stored policy unaffected by the per-call override.
             assert sb.policy == {}, sb.policy
@@ -277,11 +291,14 @@ class TestSandboxPolicy:
             sb.kill()
             Sandbox.destroy_tenant(tenant)
 
-    def test_empty_net_allow_rejected(self):
-        """net_allow must be a non-empty list — client-side early error."""
-        with pytest.raises(ValueError, match="non-empty"):
+    def test_empty_network_host_rejected(self):
+        """A Network capability with an empty host fails client-side validation."""
+        with pytest.raises(ValueError, match="host"):
             Sandbox(tenant=f"polna{uuid4().hex[:6]}", layers=["base"],
-                    policy={"net_allow": []})
+                    policy={"capabilities": [
+                        {"Network": {"endpoint": {"host": ""},
+                                     "direction": "Outbound"}},
+                    ]})
 
     def test_policy_requires_sandboxed_exec(self):
         """policy + sandboxed=False is an engine error."""
@@ -291,7 +308,8 @@ class TestSandboxPolicy:
         sb = Sandbox(tenant=tenant, layers=["base"], cpu=1, memory_mb=256)
         try:
             with pytest.raises(TerraError, match="requires sandboxed exec"):
-                sb.exec("echo hi", sandboxed=False, policy={"memory_mb": 128})
+                sb.exec("echo hi", sandboxed=False,
+                        policy={"limits": {"memory_mb": 128}})
         finally:
             sb.kill()
             Sandbox.destroy_tenant(tenant)
@@ -300,17 +318,20 @@ class TestSandboxPolicy:
         """Per-call policy wins once; the stored policy is unaffected."""
         tenant = f"polov{uuid4().hex[:6]}"
         sb = Sandbox(tenant=tenant, layers=["base"], cpu=1, memory_mb=256,
-                     policy={"memory_mb": 256})
+                     policy={"limits": {"memory_mb": 256}})
         try:
-            r = sb.exec("echo override-ok", policy={"memory_mb": 512, "procs": 5})
+            r = sb.exec("echo override-ok",
+                        policy={"limits": {"memory_mb": 512, "procs": 5}})
             assert r.exit_code == 0
-            assert sb.policy == {"memory_mb": 256}, sb.policy
+            stored = sb.policy
+            assert stored["limits"]["memory_mb"] == 256, stored
+            assert stored["limits"].get("procs") is None, stored
         finally:
             sb.kill()
             Sandbox.destroy_tenant(tenant)
 
     def test_net_allow_live_egress(self):
-        """net_allow deny-by-default egress (requires NAT → root daemon).
+        """Network Outbound capability: deny-by-default egress (requires NAT → root daemon).
 
         Skips unless a root daemon is running (NAT needs CAP_NET_ADMIN on
         the terra0 bridge). Run it manually with a root daemon::
@@ -328,16 +349,24 @@ class TestSandboxPolicy:
                 f"daemon or on a self-hosted runner; skip reason: {e}",
             )
         try:
+            allow = {
+                "capabilities": [
+                    {"Network": {
+                        "endpoint": {"host": "mirrors.aliyun.com", "port": 443},
+                        "direction": "Outbound",
+                    }},
+                ]
+            }
             r = sb.exec(
                 ["wget", "-q", "-T", "10", "-O", "/dev/null",
                  "https://mirrors.aliyun.com/alpine/"],
-                policy={"net_allow": ["mirrors.aliyun.com:443"]},
+                policy=allow,
             )
             assert r.exit_code == 0, f"allowed host failed: {r.stderr!r}"
             r = sb.exec(
                 ["wget", "-q", "-T", "10", "-O", "/dev/null",
                  "https://example.com/"],
-                policy={"net_allow": ["mirrors.aliyun.com:443"]},
+                policy=allow,
             )
             assert r.exit_code != 0, "unlisted host should be denied"
         finally:

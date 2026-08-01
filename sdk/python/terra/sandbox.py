@@ -170,12 +170,17 @@ class Sandbox:
     network:
         Truthy → attach virtio-net (NAT + DHCP).
     policy:
-        Optional exec-policy dict (plain dict, validated client-side):
-        ``read_paths``/``write_paths`` append path grants to the default
-        policy (RO system dirs, RW session workdir + ``/tmp``, network
-        unrestricted), ``net_allow`` (non-empty list) switches egress to
-        deny-by-default, ``memory_mb``/``procs`` set resource limits.
-        Stored on the sandbox engine-side; echoed by ``sandbox_info``.
+        Optional SandboxPolicy dict (validated client-side by
+        ``validate_policy``): ``capabilities`` is a list of capability
+        objects — File grants use ``{"path": {"Prefix"|"Exact":
+        "/abs/path"}, "access": "Read"|"ReadWrite"|"Execute"}``,
+        Network egress allowlist entries use ``{"endpoint": {"host":
+        HOST, "port": N}, "direction": "Outbound"}``, Device grants an
+        absolute path; ``limits`` maps ``memory_mb``/``procs`` (and
+        ``fds``/``bandwidth_kbps``/``cpu_shares``) to positive ints;
+        ``default`` (deny-only via the SDK), ``version`` and ``audit``
+        are optional. Stored on the sandbox engine-side; echoed by
+        ``sandbox_info``.
     env:
         Default environment variables for :meth:`exec`, applied client-side
         at exec time: merged with any per-call *env* and passed as shell
@@ -466,9 +471,11 @@ class Sandbox:
             the system read-only; only the session workdir and ``/tmp``
             are writable, and the network is unrestricted for now.
         policy:
-            Per-call exec-policy override (same dict shape as the
-            *policy* constructor arg). Wins for this call only; the
-            stored policy is unaffected.
+            Per-call policy override — a SandboxPolicy dict in the same
+            shape as the *policy* constructor arg (see the class
+            docstring): ``capabilities`` (File/Network/Device grants),
+            ``limits``, optional ``default``/``version``/``audit``.
+            Wins for this call only; the stored policy is unaffected.
         background:
             If *True*, start the command in the background and return a
             :class:`~terra.sessions.Session` handle instead of an

@@ -22,7 +22,7 @@ def sync_mock() -> Mock:
     sb.vm = "tenant-test"
     sb.tenant = "test"
     sb.pool_backed = False
-    sb.policy = Mock(return_value={"net_allow": ["*"]})
+    sb.policy = Mock(return_value={"capabilities": [], "limits": {"memory_mb": 256}})
     return sb
 
 
@@ -44,7 +44,7 @@ def test_cheap_properties_delegate(async_sb: AsyncSandbox, sync_mock: Mock):
 
 def test_policy_runs_in_executor(async_sb: AsyncSandbox, sync_mock: Mock):
     result = asyncio.run(async_sb.policy())
-    assert result == {"net_allow": ["*"]}
+    assert result == {"capabilities": [], "limits": {"memory_mb": 256}}
     sync_mock.policy.assert_called_once_with()
 
 

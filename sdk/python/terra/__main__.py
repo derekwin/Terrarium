@@ -156,21 +156,52 @@ def _parse_kv_pairs(values: list[str] | None) -> dict[str, str]:
 # ═══════════════════════════════════════════════════════════════════
 
 def _build_policy_from_args(args) -> dict | None:
-    """Assemble an exec-policy dict from --net-allow/--read-path/etc flags.
+    """Assemble a SandboxPolicy dict from --net-allow/--read-path/etc flags.
 
-    Returns None when no policy flags were given.
+    CLI flags map onto the new policy JSON shape (D5)::
+
+        --read-path /opt    → {"File": {"path": {"Prefix": "/opt"}, "access": "Read"}}
+        --write-path /out   → {"File": {"path": {"Prefix": "/out"}, "access": "ReadWrite"}}
+        --net-allow h:p     → {"Network": {"endpoint": {"host": "h", "port": p},
+                                           "direction": "Outbound"}}
+        --memory-mb N       → limits.memory_mb
+        --procs N           → limits.procs
+
+    ``--net-allow`` accepts ``host`` or ``host:port`` (port is None
+    when omitted). Returns None when no policy flags were given.
     """
-    policy: dict = {}
-    if getattr(args, "read_path", None):
-        policy["read_paths"] = list(args.read_path)
-    if getattr(args, "write_path", None):
-        policy["write_paths"] = list(args.write_path)
-    if getattr(args, "net_allow", None):
-        policy["net_allow"] = list(args.net_allow)
+    capabilities: list[dict] = []
+    for p in getattr(args, "read_path", None) or []:
+        capabilities.append({"File": {"path": {"Prefix": p}, "access": "Read"}})
+    for p in getattr(args, "write_path", None) or []:
+        capabilities.append(
+            {"File": {"path": {"Prefix": p}, "access": "ReadWrite"}}
+        )
+    for na in getattr(args, "net_allow", None) or []:
+        host, _, port = na.partition(":")
+        capabilities.append(
+            {
+                "Network": {
+                    "endpoint": {
+                        "host": host,
+                        "port": int(port) if port else None,
+                    },
+                    "direction": "Outbound",
+                }
+            }
+        )
+
+    limits: dict = {}
     if getattr(args, "memory_mb", None) is not None:
-        policy["memory_mb"] = args.memory_mb
+        limits["memory_mb"] = args.memory_mb
     if getattr(args, "procs", None) is not None:
-        policy["procs"] = args.procs
+        limits["procs"] = args.procs
+
+    policy: dict = {}
+    if capabilities:
+        policy["capabilities"] = capabilities
+    if limits:
+        policy["limits"] = limits
     return policy or None
 
 

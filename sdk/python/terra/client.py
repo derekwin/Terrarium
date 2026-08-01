@@ -11,32 +11,179 @@ import socket
 from .exceptions import TerraError
 
 
-_POLICY_KEYS = {"read_paths", "write_paths", "net_allow", "memory_mb", "procs"}
+_POLICY_KEYS = {"capabilities", "limits", "default", "audit", "version"}
+_CAPABILITY_TYPES = {"File", "Network", "Device"}
+_FILE_ACCESS = {"Read", "ReadWrite", "Execute"}
+_DIRECTIONS = {"Outbound", "Inbound"}
+_LIMIT_KEYS = {"memory_mb", "procs", "fds", "bandwidth_kbps", "cpu_shares"}
+
+
+def _validate_file_capability(spec: dict) -> None:
+    """Validate a File capability spec (path pattern + access)."""
+    path = spec.get("path")
+    if not isinstance(path, dict) or len(path) != 1:
+        raise ValueError(
+            f"File capability path must be a single-key "
+            f"{{'Prefix'|'Exact': path}} dict, got {path!r}"
+        )
+    (pattern, p), = path.items()
+    if pattern not in {"Prefix", "Exact"}:
+        raise ValueError(
+            f"File path pattern must be 'Prefix' or 'Exact', got {pattern!r}"
+        )
+    if not isinstance(p, str) or not p.startswith("/"):
+        raise ValueError(f"File {pattern} path must be absolute: {p!r}")
+    access = spec.get("access")
+    if access not in _FILE_ACCESS:
+        raise ValueError(
+            f"File access must be one of {sorted(_FILE_ACCESS)}, got {access!r}"
+        )
+
+
+def _validate_network_capability(spec: dict) -> None:
+    """Validate a Network capability spec (endpoint + direction)."""
+    endpoint = spec.get("endpoint")
+    if not isinstance(endpoint, dict):
+        raise ValueError(
+            f"Network capability endpoint must be a dict, got {endpoint!r}"
+        )
+    host = endpoint.get("host")
+    if not isinstance(host, str) or not host:
+        raise ValueError(
+            f"Network endpoint host must be a non-empty string, got {host!r}"
+        )
+    port = endpoint.get("port")
+    if port is not None and (
+        not isinstance(port, int) or isinstance(port, bool) or port <= 0
+    ):
+        raise ValueError(f"Network endpoint port must be a positive int, got {port!r}")
+    direction = spec.get("direction")
+    if direction not in _DIRECTIONS:
+        raise ValueError(
+            f"Network direction must be one of {sorted(_DIRECTIONS)}, got {direction!r}"
+        )
 
 
 def validate_policy(policy: dict) -> dict:
-    """Light client-side check of an exec-policy dict (the engine enforces too).
+    """Client-side validation of a SandboxPolicy dict (the engine enforces too).
 
-    Raises ValueError on unknown keys, non-absolute path grants, or an
-    empty ``net_allow`` list. Returns a plain copy of *policy*.
+    The policy is the new JSON shape the engine consumes::
+
+        {
+            "capabilities": [
+                {"File": {"path": {"Prefix": "/opt"}, "access": "Read"}},
+                {"Network": {"endpoint": {"host": "api.openai.com", "port": 443},
+                             "direction": "Outbound"}},
+            ],
+            "limits": {"memory_mb": 512, "procs": 20},
+            "version": 1,          # optional; default 0
+            "default": "deny",     # optional; default deny
+            "audit": {"deny": True, "exec": False, "resource": False},  # optional
+        }
+
+    Checks:
+    - unknown top-level keys are rejected
+    - ``capabilities`` is a list of single-key dicts whose key is
+      ``File`` / ``Network`` / ``Device``
+    - File: path is ``{"Prefix": p}`` or ``{"Exact": p}`` with an
+      absolute *p*; access in ``{Read, ReadWrite, Execute}``
+    - Network: endpoint ``{"host": non-empty str, "port": optional
+      positive int}``; direction in ``{Outbound, Inbound}``
+    - Device: absolute path
+    - ``limits`` (optional dict): keys in ``{memory_mb, procs, fds,
+      bandwidth_kbps, cpu_shares}``, values positive ints
+    - ``default`` in ``{"deny", "allow"}`` — ``"allow"`` raises (D6:
+      the escape hatch is not exposed through the SDK)
+    - ``version`` is an int when present
+
+    Raises ValueError on any violation. Returns a deep copy of the
+    normalized policy, passed to the wire as-is.
     """
+    import copy
+
     unknown = set(policy) - _POLICY_KEYS
     if unknown:
         raise ValueError(
             f"unknown policy keys: {sorted(unknown)} (known: {sorted(_POLICY_KEYS)})"
         )
-    for key in ("read_paths", "write_paths"):
-        for p in policy.get(key) or []:
-            if not str(p).startswith("/"):
-                raise ValueError(f"policy {key} entries must be absolute paths: {p!r}")
-    if "net_allow" in policy and policy["net_allow"] is not None:
-        na = policy["net_allow"]
-        if not isinstance(na, list) or not na:
+
+    normalized = copy.deepcopy(policy)
+
+    # capabilities: list of single-key {"File"|"Network"|"Device": spec}
+    caps = normalized.get("capabilities", [])
+    if caps is None:
+        caps = []
+    if not isinstance(caps, list):
+        raise ValueError(
+            f"policy capabilities must be a list, got {type(caps).__name__}"
+        )
+    for i, cap in enumerate(caps):
+        if not isinstance(cap, dict) or len(cap) != 1:
             raise ValueError(
-                "policy net_allow must be a non-empty list "
-                "(omit it for unrestricted network)"
+                f"capability #{i} must be a single-key dict, got {cap!r}"
             )
-    return dict(policy)
+        (kind, spec), = cap.items()
+        if kind not in _CAPABILITY_TYPES:
+            raise ValueError(
+                f"unknown capability type {kind!r} "
+                f"(known: {sorted(_CAPABILITY_TYPES)})"
+            )
+        if not isinstance(spec, dict):
+            raise ValueError(
+                f"capability {kind!r} spec must be a dict, got {spec!r}"
+            )
+        if kind == "File":
+            _validate_file_capability(spec)
+        elif kind == "Network":
+            _validate_network_capability(spec)
+        else:  # Device
+            path = spec.get("path")
+            if not isinstance(path, str) or not path.startswith("/"):
+                raise ValueError(
+                    f"Device capability path must be absolute: {path!r}"
+                )
+
+    # limits: optional dict of positive ints
+    limits = normalized.get("limits")
+    if limits is not None:
+        if not isinstance(limits, dict):
+            raise ValueError(
+                f"policy limits must be a dict, got {type(limits).__name__}"
+            )
+        unknown_limits = set(limits) - _LIMIT_KEYS
+        if unknown_limits:
+            raise ValueError(
+                f"unknown limit keys: {sorted(unknown_limits)} "
+                f"(known: {sorted(_LIMIT_KEYS)})"
+            )
+        for key, value in limits.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"limit {key} must be a positive int, got {value!r}")
+
+    # default: deny-by-default only through the SDK (D6 — the "allow"
+    # escape hatch is not exposed)
+    default = normalized.get("default")
+    if default is not None:
+        if default not in {"deny", "allow"}:
+            raise ValueError(
+                f"policy default must be 'deny' or 'allow', got {default!r}"
+            )
+        if default == "allow":
+            raise ValueError(
+                "policy default 'allow' is not permitted — the escape hatch "
+                "is unavailable through the SDK (default is deny)"
+            )
+
+    # version: optional int
+    if "version" in normalized and (
+        not isinstance(normalized["version"], int)
+        or isinstance(normalized["version"], bool)
+    ):
+        raise ValueError(
+            f"policy version must be an int, got {normalized['version']!r}"
+        )
+
+    return normalized
 
 
 class TerraClient:

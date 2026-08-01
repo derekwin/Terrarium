@@ -20,8 +20,14 @@ def _captured(mock_send):
 
 def test_sandbox_create_carries_full_spec(client):
     with patch.object(client, "_send", return_value={"status": "ok"}) as m:
+        policy = {
+            "capabilities": [
+                {"File": {"path": {"Prefix": "/opt"}, "access": "Read"}}
+            ],
+            "limits": {"memory_mb": 256, "procs": 20},
+        }
         client.sandbox_create(
-            "team", policy={"memory_mb": 256}, pool=True,
+            "team", policy=policy, pool=True,
             kernel="/k", initramfs="/i", layers=["base"], cpus=1,
             max_cpus=16, memory_mb=256, net=False,
         )
@@ -35,7 +41,7 @@ def test_sandbox_create_carries_full_spec(client):
     assert cmd["max_cpus"] == 16
     assert cmd["memory_mb"] == 256
     assert cmd["net"] is False
-    assert cmd["policy"] == {"memory_mb": 256}  # validate_policy passthrough
+    assert cmd["policy"] == policy  # validate_policy passthrough
     assert "pool" not in cmd  # default (True) → omitted
 
 
