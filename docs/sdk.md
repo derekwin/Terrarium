@@ -103,12 +103,18 @@ result = sb.exec(["ls", "-la"], cwd="/tmp", env={"LANG": "C.UTF-8"}, timeout=30)
 
 # 执行策略（policy）——创建时存放，引擎回显于 sb.policy
 sb = Sandbox(tenant="my-org", template="py312",
-             policy={"net_allow": ["api.openai.com:443"], "memory_mb": 512})
-print(sb.policy)    # {"net_allow": [...], "memory_mb": 512}
+             policy={"capabilities": [
+                 {"Network": {"endpoint": {"host": "api.openai.com", "port": 443},
+                              "direction": "Outbound"}}],
+                 "limits": {"memory_mb": 512}})
+print(sb.policy)    # {"capabilities": [...], "limits": {"memory_mb": 512}, ...}
 
-# exec(policy=...) — 单次覆盖（仅该次调用生效，已存策略不受影响）
+# exec(policy=...) — 单次覆盖（整体替换已存策略，仅该次调用生效）
 result = sb.exec(["make", "test"],
-                 policy={"write_paths": ["/output"], "procs": 20})
+                 policy={"capabilities": [
+                     {"File": {"path": {"Prefix": "/output"},
+                               "access": "ReadWrite"}}],
+                     "limits": {"procs": 20}})
 
 # background=True — 后台执行，立即返回 Session 句柄（引擎跟踪，非阻塞）
 session = sb.exec(["sh", "-c", "sleep 30 && echo done"], background=True)
@@ -153,15 +159,22 @@ with Sandbox(tenant="my-org", template="py312") as sb:
 > 时才用 `sandboxed=False`。
 >
 > **policy dict**（`Sandbox(policy=...)` 存放、`exec(policy=...)` 单次覆盖）：
-> `read_paths` / `write_paths` 追加路径授予（须绝对路径）；`net_allow`
-> 使出站变为默认拒绝、仅放行列表项（**必须非空**，省略字段才是不限制）；
-> `memory_mb` / `procs` 为资源限制。policy 不能配 `sandboxed=False`（报错）。
-> 注意：`net_allow` 的出站 ACL 尚未在带 NAT 的环境实测（需 root daemon）。
-> 具备带 NAT 的 root daemon 环境可实测 e2e 测试
-> `tests/test_sandbox.py::TestSandboxPolicy::test_net_allow_live_egress`
-> （`sdk/python/tests/test_sandbox.py`）：root daemon 启动
-> （`sudo terra daemon start`）后执行
-> `python3 -m pytest sdk/python/tests/test_sandbox.py::TestSandboxPolicy::test_net_allow_live_egress -v`；
+> 能力化、默认拒绝、显式授予（协议 `SandboxPolicy`，见 `docs/protocol.md`）。
+> `capabilities` 为能力列表（单键对象）：`File` 用
+> `{"path": {"Prefix"|"Exact": "/abs"}, "access": "Read"|"ReadWrite"|"Execute"}`
+> 授予路径访问（路径须绝对）；`Network` 用
+> `{"endpoint": {"host": HOST, "port": N}, "direction": "Outbound"}`
+> 放行出站端点（port 省略 = 任意端口）；`Device` 授予设备路径。
+> `limits` 为逻辑资源配额（`memory_mb` / `procs` 等，⊆ VM 配额）；
+> `default` 仅支持 `"deny"`（SDK 拒绝 `"allow"`）；`audit` / `version` 可选。
+> 给出的 policy 是**自包含**的——整体替换引擎默认能力集（不叠加）；完全不传
+> 时引擎注入默认策略（只读系统目录 + `/tmp` 读写），沙箱化 exec 恒携带完整
+> 策略。policy 不能配 `sandboxed=False`（报错）。后端未实现 `Execute` /
+> `Inbound` / `Device`——guest-proxy 返回硬错误。
+> 注意：`Network` 出站 ACL 尚未在带 NAT 的环境实测（需 root daemon）。
+> 具备带 NAT 的 root daemon 环境可实测 e2e——`sdk/python/tests/test_sandbox.py`
+> 的 `TestSandboxPolicy` 类：root daemon 启动（`sudo terra daemon start`）后
+> 执行 `python3 -m pytest sdk/python/tests/test_sandbox.py::TestSandboxPolicy -v`；
 > 无 root/NAT 时该测试会自动 skip。
 
 ### `terra.AsyncSandbox`
@@ -432,10 +445,13 @@ sandlock 二进制时报错（先跑 `terra setup` 将其烘焙进系统层）�
 同 SDK `Sandbox.exec(background=True)`），用 `sandbox session`
 子命令查询/终止。
 
-policy 旗标（`create` 存放、`exec --net-allow` 单次覆盖）对应协议
-`policy` 对象：路径授予须绝对路径且在默认策略上追加；`--net-allow`
-使出站默认拒绝、仅放行所列主机（至少给一条）；`--memory-mb` /
-`--procs` 为每次 exec 的资源限制。
+policy 旗标（`create` 存放、`exec` 单次覆盖）映射到协议 `policy` 对象的能力形状：
+`--read-path PATH` → `File { path: Prefix, access: Read }`；`--write-path PATH` →
+`File { path: Prefix, access: ReadWrite }`；`--net-allow HOST[:PORT]` →
+`Network { endpoint, direction: Outbound }`（出站默认拒绝、仅放行所列端点，
+至少给一条）；`--memory-mb N` / `--procs N` → `limits.memory_mb` /
+`limits.procs`。路径须绝对；给出的 policy 自包含（替换引擎默认能力集，
+不叠加）；与 `--no-sandbox` 同用会报错（策略只在沙箱化执行时有意义）。
 
 **tool** — 工具层（系统资源由 `terra setup` 准备；工具层一律用 `tool create` 构建）
 

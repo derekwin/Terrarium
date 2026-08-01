@@ -39,12 +39,14 @@ TCP + token 时，客户端先发送一行 token，再发送命令行。
 |---|---|---|
 | `exec` | `name`, `args`, `timeout_secs?`, `exec_mode?`, `sandbox?`, `policy?` | 经 guest-proxy（vsock）在 VM 内执行，返回 `{stdout, stderr, exit_code}`。`exec_mode` 可选 `"blocking"`（默认）或 `"background"`（返回 `{session_id}`）。`sandbox: true` 时在 guest 内经 sandlock（Landlock/seccomp）约束运行。默认 60s，上限 3600s |
 
-`sandbox: true` 的默认策略（hardcode 在 guest-proxy）：只读授予
-`/usr /lib /lib64 /bin /sbin /etc /tmp`（按存在性过滤）与
+`sandbox: true` 的默认策略是引擎级常量 `DEFAULT_SANDBOX_POLICY`
+（`crates/engine/src/policy.rs`；沙箱化 exec 未显式给 policy 时注入，见下）：
+只读授予 `/usr /lib /lib64 /bin /sbin /etc /tmp`（按存在性过滤）与
 `/dev/urandom`；可写仅会话工作目录、`/tmp` 与 `/dev/null`；**绝不授予
-`/`**（同 VM 其他会话的工作目录因此不可读）；网络暂不限制。guest 内按序
-探测 `/usr/bin/sandlock` 与 `/workdir/usr/bin/sandlock`（池 VM 的层热插在
-`/workdir`）；二进制缺失时返回硬错误，绝不静默回退为非沙箱执行。
+`/`**（同 VM 其他会话的工作目录因此不可读）；网络暂不限制（默认能力集不含
+Network 能力）。guest 内按序探测 `/usr/bin/sandlock` 与
+`/workdir/usr/bin/sandlock`（池 VM 的层热插在 `/workdir`）；二进制缺失时
+返回硬错误，绝不静默回退为非沙箱执行。
 
 ### 执行会话（background exec）
 
@@ -69,25 +71,48 @@ Sandbox 是租户共享 VM（`tenant-<tenant>`）内的一个会话（独立工�
 | `sandbox_kill` | `id` | 真实终止该 sandbox 的全部 running 会话（killpg）→ guest 内 `rm -rf` 工作目录 → 删除注册记录；**共享租户 VM 保持运行**。返回 `{id, sessions_killed, status: "killed"}` |
 | `tenant_destroy` | `tenant` | 销毁租户 VM（语义同 `destroy`）并级联删除该租户全部 sandbox 记录，返回 `{tenant, vm, sandboxes_removed, status: "destroyed"}` |
 
-**`policy` 对象**（`exec` / `sandbox_create` / `sandbox_exec` 通用，同一形状）：
+**`policy` 对象**（`exec` / `sandbox_create` / `sandbox_exec` 通用，同一形状；
+能力化、默认拒绝、显式授予）：
 
 ```json
-{"read_paths": ["/opt/data"], "write_paths": ["/output"],
- "net_allow": ["api.openai.com:443", "pypi.org"], "memory_mb": 512, "procs": 20}
+{
+  "capabilities": [
+    {"File": {"path": {"Prefix": "/opt"}, "access": "Read"}},
+    {"File": {"path": {"Prefix": "/output"}, "access": "ReadWrite"}},
+    {"Network": {"endpoint": {"host": "api.openai.com", "port": 443},
+                 "direction": "Outbound"}}
+  ],
+  "limits": {"memory_mb": 512, "procs": 20},
+  "default": "deny",
+  "audit": {"deny": true},
+  "version": 1
+}
 ```
 
-- `read_paths` / `write_paths`：额外只读/读写路径授予，**追加**在内置默认
-  策略之上（不替换）；必须是绝对路径。
-- `net_allow`：缺省（字段省略）→ 出站网络不限制（现状默认）；出现 →
-  sandlock `--net-allow` 逐条放行、其余默认拒绝。**必须非空**——空列表在
-  客户端/引擎/guest-proxy 三层都是硬错误（"net_allow must be a non-empty
-  list (omit the field for unrestricted network)"），因为零条旗标会静默
-  变成不限制。
-- `memory_mb` / `procs`：sandlock 资源限制（`-m <n>M` / `-P <n>`）。
+- `capabilities`：能力集——默认拒绝下的**显式授予**，每条为单键对象：
+  - `File`：路径能力。`path` 为 `{"Exact": "/path"}`（仅该路径）或
+    `{"Prefix": "/path"}`（覆盖其子树），路径必须绝对；`access` 为
+    `"Read"` / `"ReadWrite"` / `"Execute"`。
+  - `Network`：端点白名单。`endpoint` 为 `{"host": HOST, "port": N}`
+    （port 省略 = 任意端口）；`direction` 为 `"Outbound"` / `"Inbound"`。
+  - `Device`：设备路径能力（见下：后端未实现）。
+- **自包含语义**：提供的 policy **整体替换**默认能力集（引擎不自动叠加
+  默认；要保留系统只读集须自行包含）；完全不提供 policy 时，沙箱化执行由
+  引擎注入 `DEFAULT_SANDBOX_POLICY`——**沙箱化 exec 恒携带完整策略**。
+- `limits`：逻辑资源配额（受 VM 物理配额约束）——`memory_mb` / `procs`，
+  另支持 `fds` / `bandwidth_kbps` / `cpu_shares`；可为空对象。
+- `default`：缺省 `"deny"`；`"allow"` **一律拒绝**（仅调试逃逸门，生产禁用）。
+- `audit`：审计规格 `{"deny": bool, "exec": bool, "resource": bool}`。
+- `version`：策略版本（审计可追溯）。
+- 未知字段一律拒绝。
+- **后端能力缺口（诚实报错）**：`File` 的 `Execute`、`Network` 的 `Inbound`、
+  `Device` 三类能力 sandlock 后端无法表达——guest-proxy 返回硬错误，绝不
+  静默丢弃。
 - `policy` 与 `"sandbox": false` 同现 → 报错（策略只在沙箱化执行时有意义）。
 - 存放与覆盖：`sandbox_create` 的 policy 存入记录（`sandbox_info` /
   `sandbox_list` 回显），后续 `sandbox_exec` 继承；`sandbox_exec` 自带的
-  policy 仅对该次调用生效，不影响已存策略。未知字段一律拒绝。
+  policy **整体替换**已存策略（不合并、不追加），仅对该次调用生效；二者皆无
+  且沙箱化执行时注入引擎默认。
 
 ### 文件系统（分层 virtiofs）
 

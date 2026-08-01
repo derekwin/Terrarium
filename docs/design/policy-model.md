@@ -150,8 +150,9 @@ pub struct SandboxPolicy {
 
 - 会话创建时:`SandboxPolicy` 存储(sandbox_create 的 policy)。
 - 单次 exec:`override` 仅对该调用生效,不改变存储策略(现有语义)。
-- 覆盖为**替换或并集**?——**并集语义**:override 的能力追加到存储能力集
-  (现有 read_paths 追加模型),但 `limits` 覆盖为取小(不可越权放大)。
+- 覆盖为**替换**:per-call 的 `policy` 整体替换存储策略(引擎 `.or()` 链:
+  per-call → 存储 → 默认注入),不合并、不并集。`limits` 受 VM 配额约束
+  (不可越权放大)。
 
 ### 3.5 资源上限校验(VM ⊇ Sandbox)
 
@@ -161,22 +162,28 @@ pub struct SandboxPolicy {
 
 ---
 
-## 4. 现有 ExecPolicy 的映射(向后兼容层)
+## 4. 实现状态（Implemented）
 
-| ExecPolicy | SandboxPolicy 映射 |
-|---|---|
-| `read_paths` | `Capability::File { path: Prefix(p), Read }` |
-| `write_paths` | `Capability::File { path: Prefix(p), ReadWrite }` |
-| `net_allow` | `Capability::Network { endpoint, Outbound }` |
-| `memory_mb` | `limits.memory_mb` |
-| `procs` | `limits.procs` |
-| 缺省策略(sandlock 内置) | **引擎级常量 DEFAULT_SANDBOX_POLICY**(自包含,消除 guest 硬编码) |
+B 阶段已落地。**无向后兼容层**——旧 `ExecPolicy` dict（read_paths /
+write_paths / net_allow）已移除，一律拒绝：
 
-映射层保留协议兼容:引擎接收旧 dict → 转 `SandboxPolicy` → 下发边界;
-新策略对象为契约面。
+- **类型落地**：`SandboxPolicy` / `Capability` / `PathPattern` / `FileAccess` /
+  `Endpoint` / `Direction` / `ResourceLimits` / `DefaultAccess` / `AuditSpec`
+  落在 `crates/adapter/traits`（与 `VmSpec` 同层）。
+- **线型统一**：协议 `Command.policy` 即为 `SandboxPolicy`（单一线型，无映射层）；
+  引擎 `SandboxPolicy::validate()` 校验（路径绝对、端点 host 非空、port 为正、
+  `default: "allow"` 拒绝）。
+- **默认注入**：引擎级 `DEFAULT_SANDBOX_POLICY`（`crates/engine/src/policy.rs`）——
+  沙箱化 exec 未显式给 policy 时注入，exec 恒携带完整策略（默认集从 guest
+  硬编码迁至引擎级常量，跨实现语义一致）。
+- **guest 翻译**：guest-proxy 将能力集翻译为 sandlock 旗标；`Execute` /
+  `Inbound` / `Device` 三类能力后端无法表达，返回硬错误（诚实不支持）。
+- **SDK/CLI**：SDK `validate_policy` 客户端校验 + CLI
+  `--read-path/--write-path/--net-allow/--memory-mb/--procs` 直接产出新形状。
+- **继承语义**：per-call policy **替换**存储策略（`.or()` 链：per-call →
+  存储 → 引擎默认），非并集。
 
-**关键变化**:默认"只读系统集"从 guest-proxy 硬编码 → `DEFAULT_SANDBOX_POLICY`
-常量(引擎级),同一策略对象跨实现语义一致。
+原"映射层保留协议兼容"的设计已取消——契约面即唯一实现，无兼容输入。
 
 ---
 
@@ -202,7 +209,8 @@ pub struct SandboxPolicy {
    断言能力集不变(roundtrip)。
 2. **默认拒绝测试**:空能力集 + `default: Deny` → 一切访问拒绝,有 deny 审计事件。
 3. **上限校验测试**:sandbox limits > VM 配额 → 创建拒绝。
-4. **映射兼容测试**:旧 `ExecPolicy` dict → `SandboxPolicy` → 行为等价。
+4. **不支持能力测试**:`Execute` / `Inbound` / `Device` 能力 → 后端硬错误
+   (诚实不支持);`default: "allow"` → 拒绝。
 5. **隔离测试**:一 VM 两 sandbox,能力集无交叉 → 互不可达(e2e)。
 
 ---
@@ -211,9 +219,10 @@ pub struct SandboxPolicy {
 
 | 项 | 落点 | 阶段 |
 |---|---|---|
-| 类型(`VmPolicy`/`SandboxPolicy`/`Capability`…) | `crates/adapter/traits`(与 VmSpec/ExecPolicy 同层) | B1 |
-| 默认策略常量 | 引擎层(`DEFAULT_SANDBOX_POLICY`) | B1 |
-| ExecPolicy→SandboxPolicy 映射 | 协议/引擎边界 | B2 |
+| 类型(`VmPolicy`/`SandboxPolicy`/`Capability`…) | `crates/adapter/traits`(与 VmSpec 同层) | ✅ B1 已落地 |
+| 默认策略常量 | 引擎层(`DEFAULT_SANDBOX_POLICY`) | ✅ B1 已落地 |
+| ~~旧 ExecPolicy 兼容映射~~ | —(兼容层已移除,旧 dict 拒绝) | B2 移除 |
 | SandboxAdapter 携带策略 | trait 签名更新 | C(L2 统一时) |
 
-*本规范为 B 阶段设计基线。B1(类型落地)与 B2(映射)独立评审后实现。*
+*本规范为 B 阶段设计基线。B(类型落地 + 协议统一)已实现,兼容层按设计取消;
+C(L2 统一)独立评审后实现。*
