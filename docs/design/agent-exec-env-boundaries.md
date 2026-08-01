@@ -166,17 +166,23 @@ pub struct SandboxPolicy {
 | Separation of Duty | 资源治理与访问控制分离 | `limits` 与 `capabilities` 正交 |
 | Policy Inheritance | 会话策略+单命令覆盖 | 现有继承模型(存储策略+per-call override) |
 
-### 3.4 与现有 ExecPolicy 的映射(向后兼容)
+### 3.4 与旧 ExecPolicy 的关系(已实现,**无兼容层**)
+
+旧 `ExecPolicy`(`read_paths` / `write_paths` / `net_allow` / `memory_mb` /
+`procs`)已整体迁移为 `SandboxPolicy` 能力模型(T5/T6 落地):
 
 ```
 ExecPolicy.read_paths  → Capability::File { path: Prefix, Read }
 ExecPolicy.write_paths → Capability::File { path: Prefix, ReadWrite }
 ExecPolicy.net_allow   → Capability::Network { endpoint, Outbound }
-ExecPolicy.memory_mb   → limits.memory
+ExecPolicy.memory_mb   → limits.memory_mb
 ExecPolicy.procs       → limits.procs
 ```
 
-映射层保留协议兼容;新对象作为**契约面**,旧 dict 作为**兼容输入**。
+映射由各客户端直接完成(CLI 标志 `--read-path` / `--write-path` /
+`--net-allow` / `--memory-mb` / `--procs` 构造 `SandboxPolicy` JSON;
+SDK 的 `validate_policy` 校验)。引擎**不再接收旧 ExecPolicy dict**——
+没有向后兼容转换层,wire 上只有 `SandboxPolicy` 一种形状。
 
 ### 3.5 关键语义决策
 

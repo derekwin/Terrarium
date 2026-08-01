@@ -400,6 +400,36 @@ mod tests {
         assert_eq!(cmd.policy.as_ref().unwrap().default, DefaultAccess::Deny);
     }
 
+    /// B2: a limits-only policy (no `capabilities` key — the SDK emits
+    /// exactly this for `--memory-mb/--procs` alone) must deserialize;
+    /// the missing capability set defaults to empty (default-deny).
+    #[test]
+    fn limits_only_policy_defaults_capabilities_to_empty() {
+        let cmd: Command =
+            serde_json::from_str(r#"{"command":"exec","policy":{"limits":{"memory_mb":256}}}"#)
+                .unwrap();
+        let p = cmd.policy.as_ref().expect("policy present");
+        assert!(
+            p.capabilities.is_empty(),
+            "missing capabilities must default to the empty set"
+        );
+        assert_eq!(p.limits.memory_mb, Some(256));
+    }
+
+    /// B2: a partial `audit` dict (only `deny`) must deserialize; the
+    /// omitted exec/resource flags default to false.
+    #[test]
+    fn partial_audit_defaults_missing_flags() {
+        let cmd: Command = serde_json::from_str(
+            r#"{"command":"exec","policy":{"capabilities":[],"audit":{"deny":true}}}"#,
+        )
+        .unwrap();
+        let p = cmd.policy.as_ref().expect("policy present");
+        assert!(p.audit.deny);
+        assert!(!p.audit.exec);
+        assert!(!p.audit.resource);
+    }
+
     /// Unknown fields inside the policy object are rejected
     /// (deny_unknown_fields on SandboxPolicy).
     #[test]

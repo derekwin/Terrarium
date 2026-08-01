@@ -203,16 +203,12 @@ pub(crate) async fn cmd_sandbox_exec(mgr: &mut VmManager, cmd: Command) -> Respo
         Some(r) => r,
         None => return Response::err(format!("Sandbox '{}' not found", id)),
     };
-    // D2: sandboxed exec always carries a complete policy. Per-call policy
-    // overrides the one stored at sandbox_create; with neither present and
-    // the exec sandboxed, inject the engine default. An explicit
-    // `sandbox:false` escape hatch stays policy-free.
-    let sandbox = cmd.sandbox.unwrap_or(true);
-    let policy = cmd
-        .policy
-        .clone()
-        .or(record.policy.clone())
-        .or_else(|| sandbox.then(crate::policy::default_sandbox_policy));
+    // D2: sandboxed exec always carries a complete policy. `run_exec`
+    // injects the engine default when the exec is sandboxed and neither
+    // the per-call nor the stored policy resolves — here we only resolve
+    // the user-provided policy (per-call overrides the stored one). An
+    // explicit `sandbox:false` escape hatch stays policy-free.
+    let policy = cmd.policy.clone().or(record.policy.clone());
     run_exec(
         mgr,
         &record.vm_name,

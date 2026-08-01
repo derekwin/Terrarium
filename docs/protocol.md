@@ -99,8 +99,10 @@ Sandbox 是租户共享 VM（`tenant-<tenant>`）内的一个会话（独立工�
 - **自包含语义**：提供的 policy **整体替换**默认能力集（引擎不自动叠加
   默认；要保留系统只读集须自行包含）；完全不提供 policy 时，沙箱化执行由
   引擎注入 `DEFAULT_SANDBOX_POLICY`——**沙箱化 exec 恒携带完整策略**。
-- `limits`：逻辑资源配额（受 VM 物理配额约束）——`memory_mb` / `procs`，
-  另支持 `fds` / `bandwidth_kbps` / `cpu_shares`；可为空对象。
+- `limits`：逻辑资源配额（受 VM 物理配额约束）——`memory_mb` / `procs`
+  由默认 sandlock 后端实际实施；另接受 `fds` / `bandwidth_kbps` /
+  `cpu_shares`（可为空对象）。**注意**：后三者当前仅被接受与传递（校验
+  值合法），默认 sandlock 后端**尚未强制实施**——不产生实际约束。
 - `default`：缺省 `"deny"`；`"allow"` **一律拒绝**（仅调试逃逸门，生产禁用）。
 - `audit`：审计规格 `{"deny": bool, "exec": bool, "resource": bool}`。
 - `version`：策略版本（审计可追溯）。

@@ -200,6 +200,62 @@ async fn test_exec_policy_forwarded() {
     assert_eq!(log[0].policy.as_ref(), Some(&policy));
 }
 
+/// D2 parity with sandbox_exec: a sandboxed `exec` (sandbox:true) with no
+/// policy receives the engine default — the injection is gated on the
+/// sandbox flag, not on the command name. An unsandboxed `exec` stays
+/// policy-free.
+#[tokio::test]
+async fn test_exec_sandboxed_injects_default_policy() {
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("ok\n", "", 0);
+    let exec_log = adapter.exec_log();
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+    execute(&mut mgr, Command::create("exec-vm", "/fake/vmlinux")).await;
+    exec_log.lock().unwrap().clear();
+
+    // sandbox:true + no policy → engine injects the default policy.
+    let resp = execute(
+        &mut mgr,
+        Command::new("exec")
+            .with_name("exec-vm")
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_sandbox(true),
+    )
+    .await;
+    assert!(resp.is_ok(), "sandboxed exec should succeed: {:?}", resp);
+    {
+        let log = exec_log.lock().unwrap();
+        assert_eq!(log.len(), 1);
+        assert!(log[0].sandbox);
+        assert_eq!(
+            log[0].policy.as_ref(),
+            Some(&terrarium_engine::policy::default_sandbox_policy()),
+            "sandboxed exec with no policy must receive the engine default"
+        );
+    }
+
+    // sandbox:false + no policy → policy stays None (escape hatch).
+    let resp = execute(
+        &mut mgr,
+        Command::new("exec")
+            .with_name("exec-vm")
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_sandbox(false),
+    )
+    .await;
+    assert!(resp.is_ok(), "unsandboxed exec should succeed: {:?}", resp);
+    {
+        let log = exec_log.lock().unwrap();
+        assert_eq!(log.len(), 2);
+        assert!(!log[1].sandbox);
+        assert_eq!(
+            log[1].policy, None,
+            "unsandboxed exec must stay policy-free"
+        );
+    }
+}
+
 /// Exec with a policy but sandbox:false/absent → explicit error.
 #[tokio::test]
 async fn test_exec_policy_requires_sandbox() {

@@ -56,9 +56,11 @@ pub(crate) const SYSTEM_BASES: [&str; 2] = ["base", "ubuntu"];
 /// field to the response.
 ///
 /// Policy validation uses `SandboxPolicy::validate()`. Default injection
-/// (D2) is the caller's job — `cmd_sandbox_exec` fills in
-/// `default_sandbox_policy()` so sandboxed exec always carries a complete
-/// policy; a VM-level `exec` keeps `policy` optional.
+/// (D2) happens here: whenever the exec is sandboxed and neither the
+/// per-call nor the stored policy resolves, the engine default
+/// `default_sandbox_policy()` is injected — so every sandboxed exec
+/// carries a complete policy, regardless of command name. An unsandboxed
+/// exec keeps `policy` optional.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_exec(
     mgr: &mut VmManager,
@@ -77,6 +79,15 @@ pub(crate) async fn run_exec(
     }
     let timeout = timeout_secs.unwrap_or(60).min(3600);
     let sandbox = sandbox_flag.unwrap_or(sandbox_default);
+    // D2: a sandboxed exec always carries a complete policy. When neither
+    // the per-call nor the stored policy is present, inject the engine
+    // default — gated on the sandbox flag, so VM-level `exec` with
+    // `sandbox:true` is covered too. An unsandboxed exec stays policy-free.
+    let policy = if sandbox {
+        policy.or_else(|| Some(default_sandbox_policy()))
+    } else {
+        policy
+    };
     if !sandbox && policy.is_some() {
         return Response::err("'policy' requires sandboxed exec (set 'sandbox': true)");
     }
@@ -173,15 +184,15 @@ pub(crate) fn prepare_blocking_exec(
     let sandbox = cmd.sandbox.unwrap_or(sandbox_default);
     // D2: a sandboxed exec always carries a complete policy. When neither
     // the per-call nor the stored policy is present, inject the engine
-    // default — but only for `sandbox_exec` (VM-level `exec` keeps policy
-    // optional; it defaults to unsandboxed).
-    let policy = match (cmd.command.as_str(), sandbox) {
-        ("sandbox_exec", true) => cmd
-            .policy
+    // default — gated on the sandbox flag, so VM-level `exec` with
+    // `sandbox:true` gets it too (mirrors `run_exec`).
+    let policy = if sandbox {
+        cmd.policy
             .clone()
             .or(stored_policy)
-            .or_else(|| Some(default_sandbox_policy())),
-        _ => cmd.policy.clone().or(stored_policy),
+            .or_else(|| Some(default_sandbox_policy()))
+    } else {
+        cmd.policy.clone().or(stored_policy)
     };
     if !sandbox && policy.is_some() {
         return Err(Response::err(

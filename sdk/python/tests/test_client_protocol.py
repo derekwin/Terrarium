@@ -122,3 +122,32 @@ def test_terra_error_is_unified_class():
     from terra.exceptions import TerraError
 
     assert ClientTerraError is TerraError
+
+
+def test_validate_policy_rejects_out_of_range_port():
+    """A port > 65535 fails client-side (Rust Endpoint.port is u16)."""
+    from terra.client import validate_policy
+
+    with pytest.raises(ValueError, match="1..65535"):
+        validate_policy({
+            "capabilities": [
+                {"Network": {"endpoint": {"host": "api.openai.com", "port": 70000},
+                             "direction": "Outbound"}},
+            ],
+        })
+    # Boundary values are accepted.
+    for port in (1, 65535):
+        validate_policy({
+            "capabilities": [
+                {"Network": {"endpoint": {"host": "api.openai.com", "port": port},
+                             "direction": "Outbound"}},
+            ],
+        })
+
+
+def test_validate_policy_limits_only_shape():
+    """A limits-only policy (no capabilities key) passes validation."""
+    from terra.client import validate_policy
+
+    p = validate_policy({"limits": {"memory_mb": 256}})
+    assert p == {"limits": {"memory_mb": 256}}

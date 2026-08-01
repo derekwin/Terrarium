@@ -54,9 +54,11 @@ def _validate_network_capability(spec: dict) -> None:
         )
     port = endpoint.get("port")
     if port is not None and (
-        not isinstance(port, int) or isinstance(port, bool) or port <= 0
+        not isinstance(port, int) or isinstance(port, bool) or port <= 0 or port > 65535
     ):
-        raise ValueError(f"Network endpoint port must be a positive int, got {port!r}")
+        raise ValueError(
+            f"Network endpoint port must be a positive int in 1..65535, got {port!r}"
+        )
     direction = spec.get("direction")
     if direction not in _DIRECTIONS:
         raise ValueError(
@@ -87,8 +89,8 @@ def validate_policy(policy: dict) -> dict:
       ``File`` / ``Network`` / ``Device``
     - File: path is ``{"Prefix": p}`` or ``{"Exact": p}`` with an
       absolute *p*; access in ``{Read, ReadWrite, Execute}``
-    - Network: endpoint ``{"host": non-empty str, "port": optional
-      positive int}``; direction in ``{Outbound, Inbound}``
+    - Network: endpoint ``{"host": non-empty str, "port": optional int
+      in 1..65535}``; direction in ``{Outbound, Inbound}``
     - Device: absolute path
     - ``limits`` (optional dict): keys in ``{memory_mb, procs, fds,
       bandwidth_kbps, cpu_shares}``, values positive ints

@@ -503,8 +503,11 @@ pub enum DefaultAccess {
 /// Which events to audit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditSpec {
+    #[serde(default)]
     pub deny: bool,
+    #[serde(default)]
     pub exec: bool,
+    #[serde(default)]
     pub resource: bool,
 }
 
@@ -512,6 +515,9 @@ pub struct AuditSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxPolicy {
+    /// Explicit grants; an empty set (or an omitted key on the wire) is
+    /// valid default-deny.
+    #[serde(default)]
     pub capabilities: Vec<Capability>,
     #[serde(default)]
     pub limits: ResourceLimits,
