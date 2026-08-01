@@ -48,6 +48,20 @@ def test_policy_runs_in_executor(async_sb: AsyncSandbox, sync_mock: Mock):
     sync_mock.policy.assert_called_once_with()
 
 
+def test_exec_forwards_background_flag(async_sb: AsyncSandbox, sync_mock: Mock):
+    """AsyncSandbox.exec(background=True) reaches the sync exec unchanged."""
+    from terra.sessions import Session
+
+    fake_session = Session.__new__(Session)
+    sync_mock.exec = Mock(return_value=fake_session)
+    session = asyncio.run(async_sb.exec(["sleep", "1"], background=True))
+    assert session is fake_session
+    sync_mock.exec.assert_called_once_with(
+        ["sleep", "1"], cwd=None, env=None, timeout=None, check=False,
+        sandboxed=True, policy=None, background=True,
+    )
+
+
 def test_destroy_tenant_delegates(sync_mock: Mock, monkeypatch: pytest.MonkeyPatch):
     called: list[tuple] = []
 

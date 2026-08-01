@@ -318,6 +318,32 @@ class TerraClient:
         """
         return self._send({"command": "sandbox_kill", "id": id})
 
+    # ── background exec sessions (engine-tracked) ─────────────────
+
+    def session_status(self, session_id: str) -> dict:
+        """Query a background exec session's status.
+
+        Returns ``{session_id, vm_name, args, status, exit_code, stdout,
+        stderr, sandbox}`` (see ``docs/protocol.md``).
+        """
+        return self._send({"command": "session_status", "session_id": session_id})
+
+    def session_kill(self, session_id: str) -> dict:
+        """Kill a background exec session (killpg in the guest).
+
+        Returns ``{session_id, status: "killed"}``. Hard error for an
+        unknown or non-running session, or a gone VM.
+        """
+        return self._send({"command": "session_kill", "session_id": session_id})
+
+    def session_list(self) -> dict:
+        """List all background exec sessions.
+
+        Returns ``{sessions: [{session_id, vm_name, status, sandbox}],
+        count}``.
+        """
+        return self._send({"command": "session_list"})
+
     def tenant_destroy(self, tenant: str) -> dict:
         """Destroy the tenant VM and all its sandbox records.
 

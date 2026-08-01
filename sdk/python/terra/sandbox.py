@@ -44,6 +44,7 @@ from ._engine import DaemonManager
 from .client import TerraClient, TerraError as ClientError, validate_policy
 from . import images
 from .template import Template
+from .sessions import Session
 from .exceptions import (
     ExecResult,
     ExecError,
@@ -429,7 +430,8 @@ class Sandbox:
         check: bool = False,
         sandboxed: bool = True,
         policy: dict | None = None,
-    ) -> ExecResult:
+        background: bool = False,
+    ) -> ExecResult | Session:
         """Execute a command inside the sandbox.
 
         Parameters
@@ -457,11 +459,21 @@ class Sandbox:
             Per-call exec-policy override (same dict shape as the
             *policy* constructor arg). Wins for this call only; the
             stored policy is unaffected.
+        background:
+            If *True*, start the command in the background and return a
+            :class:`~terra.sessions.Session` handle instead of an
+            ExecResult. The engine tracks the session; poll it with
+            ``Session.status()`` and stop it with ``Session.kill()``.
+            Requires an engine sandbox — pool-claimed sessions from
+            ``Pool.acquire`` cannot start background execs.
 
         Returns
         -------
         ExecResult
-            Structured result with ``exit_code``, ``stdout``, ``stderr``.
+            Structured result with ``exit_code``, ``stdout``, ``stderr``
+            (blocking exec; the default).
+        Session
+            Background session handle (when *background=True*).
 
         Raises
         ------
@@ -489,8 +501,19 @@ class Sandbox:
         if env:
             full_env.update(env)
 
-        timeout_secs = timeout if timeout is not None else self._default_timeout
+        # Background execs must not inherit the 600s blocking default —
+        # the engine's session cap is 3600s, so long tasks survive there.
+        timeout_secs = timeout if timeout is not None else (
+            3600 if background else self._default_timeout
+        )
         call_policy = validate_policy(policy) if policy is not None else None
+
+        if background and self._from_pool:
+            raise TerraError(
+                "background exec requires an engine sandbox "
+                "(pool-claimed sessions are not engine-tracked)",
+                sandbox_id=self.id,
+            )
 
         if self._from_pool:
             # Pool-claimed VMs are not engine sandboxes: exec directly on
@@ -532,10 +555,16 @@ class Sandbox:
                     quoted = f"cd {shlex.quote(cwd)} && {quoted}"
                 args = ["sh", "-c", quoted]
             try:
-                resp = self._client.sandbox_exec(
-                    self._id, args, timeout_secs, sandbox=sandboxed,
-                    policy=call_policy,
-                )
+                if background:
+                    resp = self._client.sandbox_exec(
+                        self._id, args, timeout_secs, sandbox=sandboxed,
+                        exec_mode="background", policy=call_policy,
+                    )
+                else:
+                    resp = self._client.sandbox_exec(
+                        self._id, args, timeout_secs, sandbox=sandboxed,
+                        policy=call_policy,
+                    )
             except ClientError as e:
                 msg = str(e)
                 if "timeout" in msg.lower():
@@ -545,6 +574,9 @@ class Sandbox:
                 raise TerraError(
                     msg, sandbox_id=self.id, engine_error=msg
                 ) from e
+
+        if background:
+            return Session(self, resp["session_id"], resp.get("sandbox") or self._id)
 
         result = ExecResult(
             exit_code=resp.get("exit_code", -1),

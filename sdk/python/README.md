@@ -77,6 +77,7 @@ vm.shutdown()
 ## API map
 
 - `terra.sandbox.Sandbox` — tenant-first sandbox: exec, files (read/write/upload/download/list), resize, metrics, context manager. Multiple sandboxes share one tenant VM.
+- `terra.sessions.Session` — background exec session handle from `Sandbox.exec(background=True)`: `status()` / `kill()` (engine-tracked)
 - `terra.async_sandbox.AsyncSandbox` — async wrapper for asyncio applications
 - `terra.pool.Pool` — warm pool management: acquire/release/status/grow
 - `terra.template.Template` — named environment compositions: from_layers/list/load/remove/build

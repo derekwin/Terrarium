@@ -77,6 +77,39 @@ def test_pool_claim_layers_always_sent(client):
     assert cmd["layers"] == ["base"]
 
 
+def test_sandbox_exec_background_mode(client):
+    with patch.object(client, "_send", return_value={"status": "ok"}) as m:
+        client.sandbox_exec("sb-1", ["sleep", "10"], exec_mode="background")
+    cmd = _captured(m)
+    assert cmd["exec_mode"] == "background"
+
+    with patch.object(client, "_send", return_value={"status": "ok"}) as m:
+        client.sandbox_exec("sb-1", ["sleep", "10"])
+    cmd = _captured(m)
+    assert "exec_mode" not in cmd  # blocking default → omitted
+
+
+def test_session_status_command(client):
+    with patch.object(client, "_send", return_value={"status": "ok"}) as m:
+        client.session_status("ses-1")
+    cmd = _captured(m)
+    assert cmd == {"command": "session_status", "session_id": "ses-1"}
+
+
+def test_session_kill_command(client):
+    with patch.object(client, "_send", return_value={"status": "ok"}) as m:
+        client.session_kill("ses-1")
+    cmd = _captured(m)
+    assert cmd == {"command": "session_kill", "session_id": "ses-1"}
+
+
+def test_session_list_command(client):
+    with patch.object(client, "_send", return_value={"status": "ok"}) as m:
+        client.session_list()
+    cmd = _captured(m)
+    assert cmd == {"command": "session_list"}
+
+
 def test_terra_error_is_unified_class():
     """client.TerraError must BE exceptions.TerraError — single source of truth."""
     from terra.client import TerraError as ClientTerraError

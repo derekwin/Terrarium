@@ -19,16 +19,18 @@ from . import paths
 from . import assets
 from . import images
 from . import daemon
-from .daemon import session
 from .config import HostConfig
 from . import direct
 from .direct import configure, create, list_vms, connect
 from . import sandbox
 from .sandbox import Sandbox
+from . import sessions
+from .sessions import Session
 from . import async_sandbox
 from .async_sandbox import AsyncSandbox
 from . import pool
 from .pool import Pool
+from .daemon import session
 
 __all__ = [
     "TerraClient",
@@ -43,6 +45,8 @@ __all__ = [
     "direct",
     "sandbox",
     "Sandbox",
+    "sessions",
+    "Session",
     "async_sandbox",
     "AsyncSandbox",
     "pool",

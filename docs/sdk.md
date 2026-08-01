@@ -110,6 +110,14 @@ print(sb.policy)    # {"net_allow": [...], "memory_mb": 512}
 result = sb.exec(["make", "test"],
                  policy={"write_paths": ["/output"], "procs": 20})
 
+# background=True — 后台执行，立即返回 Session 句柄（引擎跟踪，非阻塞）
+session = sb.exec(["sh", "-c", "sleep 30 && echo done"], background=True)
+print(session.session_id)        # "ses-<hex>"（引擎分配）
+print(session.sandbox_id)        # 所属 sandbox id
+print(session.status())          # {session_id, vm_name, args, status, exit_code, stdout, stderr, sandbox}
+session.kill()                   # {session_id, status: "killed"}
+# 注意：后台执行要求引擎级 sandbox（Pool.acquire 认领的旧路径不支持，抛 TerraError）
+
 # 文件操作（通过 sb.files）
 sb.files.write("/workdir/hello.txt", "Hello from host!")
 content = sb.files.read("/workdir/hello.txt")
@@ -226,6 +234,14 @@ print(t.base, t.layers, t.kernel)
 Template.remove("py312")
 ```
 
+### `terra.sessions.Session` — 后台执行会话句柄
+
+`Sandbox.exec(..., background=True)` 返回的引擎跟踪句柄（非阻塞）：
+`session_id` / `sandbox_id` 属性；`status()` 查询 `{session_id, vm_name,
+args, status, exit_code, stdout, stderr, sandbox}`；`kill()` 返回
+`{session_id, status: "killed"}`。仅引擎级 sandbox 支持（`Pool.acquire`
+认领的旧路径抛 `TerraError`）。
+
 ### `terra.exceptions` — 异常体系
 
 ```python
@@ -269,8 +285,9 @@ except TerraError as e:
 vm_kill / vm_destroy / vm_exec(name, args, timeout_secs=60, sandbox=False)` /
 `vm_attach_fs / vm_detach_fs` / `pool_create / pool_list / pool_claim /
 pool_release` / `sandbox_create / sandbox_exec / sandbox_list /
-sandbox_info / sandbox_kill / tenant_destroy`（引擎级沙箱实体，见
-`docs/protocol.md`）。错误统一抛 `TerraError`。
+sandbox_info / sandbox_kill` / `session_status / session_kill /
+session_list`（后台执行会话，见 `docs/protocol.md`）/
+`tenant_destroy`（引擎级沙箱实体）。错误统一抛 `TerraError`。
 
 ### `Vm`
 

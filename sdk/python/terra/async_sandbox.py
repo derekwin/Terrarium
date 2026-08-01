@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 
 from .sandbox import Sandbox
+from .sessions import Session
 from .exceptions import ExecResult, ExecError, SandboxTimeoutError, SandboxStateError
 
 
@@ -144,7 +145,8 @@ class AsyncSandbox:
         check: bool = False,
         sandboxed: bool = True,
         policy: dict | None = None,
-    ) -> ExecResult:
+        background: bool = False,
+    ) -> ExecResult | Session:
         """Execute a command inside the sandbox asynchronously.
 
         Parameters are identical to :meth:`Sandbox.exec`.
@@ -154,7 +156,7 @@ class AsyncSandbox:
             None,
             lambda: self._sync.exec(
                 command, cwd=cwd, env=env, timeout=timeout, check=check,
-                sandboxed=sandboxed, policy=policy,
+                sandboxed=sandboxed, policy=policy, background=background,
             ),
         )
 
