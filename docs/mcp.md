@@ -30,7 +30,7 @@ Terrarium 的用户面工具。管理员操作（daemon 启停、镜像构建、
 协议细节：notification（无 `id`）不产生响应；日志只写 stderr，
 stdout 仅承载 JSON-RPC 消息。
 
-## 工具（15 个，全为用户面）
+## 工具（18 个，全为用户面）
 
 ### 会话式执行（推荐入口）
 
@@ -42,6 +42,9 @@ agent 面向**会话**而非 VM：`terra_exec` 在隔离的沙箱会话内执行
 | 工具 | 参数 | 说明 |
 |---|---|---|
 | `terra_exec` | `args` (array, 必填), `session?`, `sandboxed?` (默认 true), `cwd?`, `layers?` (仅首次创建会话), `timeout_secs?` | 在会话内执行命令。`session` 省略 → 共享 `"default"` 会话；不同会话名 = 隔离工作目录。`layers` 仅决定会话首次创建时的环境（默认 `["base"]`） |
+| `terra_exec_background` | `args` (array, 必填), `session?`, `layers?` (仅首次创建会话), `timeout_secs?` | 在会话内后台启动命令，不等待完成；立即返回 `{session_id, sandbox, status:"started"}`。轮询 `terra_session_status` 获取进度，`terra_session_kill` 终止 |
+| `terra_session_status` | `session_id` (必填) | 查询后台会话的引擎记录。`session_id` 是引擎会话 id（来自 `terra_exec_background` 响应），不是 MCP 会话名 |
+| `terra_session_kill` | `session_id` (必填) | 终止后台会话（guest 内 killpg），其工作目录一并移除 |
 | `terra_session_read` | `path`, `session?` | 读取会话内文件（相对路径解析到会话工作目录） |
 | `terra_session_write` | `path`, `content`, `session?` | 写入会话内文件（base64 桥接，相对路径解析到会话工作目录） |
 
@@ -81,6 +84,11 @@ terra_session_read(path="result.txt")
 # 并发任务隔离：不同 session 名 = 独立工作目录
 terra_exec(session="task-a", args=["python3","train.py"])
 terra_exec(session="task-b", args=["python3","eval.py"])
+
+# 长任务：后台启动，轮询进度，按需终止
+terra_exec_background(args=["make","build"])          # → {session_id:"sess-…", sandbox:"sb-…", status:"started"}
+terra_session_status(session_id="sess-…")             # → {session_id, sandbox, status:"running"|"exited", exit_code, stdout, stderr}
+terra_session_kill(session_id="sess-…")               # 终止并清理工作目录
 ```
 
 平台侧清理会话租户：`terra sandbox destroy-tenant mcp`。

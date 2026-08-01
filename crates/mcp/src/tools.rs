@@ -105,6 +105,42 @@ pub fn tools_list() -> Vec<serde_json::Value> {
             ],
         ),
         tool(
+            "terra_exec_background",
+            "Start a command in the sandbox session without waiting; returns {\"session_id\",\"sandbox\",\"status\":\"started\"} — poll terra_session_status, stop with terra_session_kill.",
+            vec![
+                (
+                    "args",
+                    "array",
+                    "Command argv (e.g. [\"python3\",\"-c\",\"print(1)\"])",
+                ),
+                (
+                    "session",
+                    "string",
+                    "Session name; omitted → the shared \"default\" session. Different names = isolated workdirs (optional)",
+                ),
+                (
+                    "layers",
+                    "array",
+                    "Layer names for the session environment — only used when the session is first created (optional)",
+                ),
+                (
+                    "timeout_secs",
+                    "number",
+                    "Timeout seconds (default 60, max 3600)",
+                ),
+            ],
+        ),
+        tool(
+            "terra_session_status",
+            "Query the engine's record for a background session started by terra_exec_background.",
+            vec![("session_id", "string", "Engine session id from the terra_exec_background response")],
+        ),
+        tool(
+            "terra_session_kill",
+            "Kill a background session (killpg in the guest); its workdir is removed.",
+            vec![("session_id", "string", "Engine session id from the terra_exec_background response")],
+        ),
+        tool(
             "terra_session_read",
             "Read a file from a sandbox session.",
             vec![
@@ -233,6 +269,9 @@ pub fn call_tool(name: &str, args: &serde_json::Value, sessions: &mut SessionReg
             send_to_engine(&Command::new("destroy").with_name(name))
         }
         "terra_exec" => terra_exec(args, sessions),
+        "terra_exec_background" => terra_exec_background(args, sessions, &send_to_engine),
+        "terra_session_status" => terra_session_status(args, &send_to_engine),
+        "terra_session_kill" => terra_session_kill(args, &send_to_engine),
         "terra_session_read" => terra_session_read(args, sessions),
         "terra_session_write" => terra_session_write(args, sessions),
         "terra_pool_claim" => {
@@ -469,6 +508,76 @@ fn terra_exec(args: &serde_json::Value, sessions: &mut SessionRegistry) -> Strin
     )
 }
 
+/// Start a command in the background of a session, mirroring `terra_exec`
+/// (same session registry / first-use creation / stale-id self-heal) but
+/// with `exec_mode="background"`: the engine returns immediately with
+/// `{session_id, sandbox, status:"started"}` and keeps running the process
+/// in the guest. The response passes through as-is; the agent polls it
+/// with `terra_session_status` and stops it with `terra_session_kill`.
+fn terra_exec_background(
+    args: &serde_json::Value,
+    sessions: &mut SessionRegistry,
+    send: &impl Fn(&Command) -> String,
+) -> String {
+    let session = session_arg(args);
+    let argv: Vec<String> = args
+        .get("args")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let layers: Vec<String> = args
+        .get("layers")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    session_exec(
+        sessions,
+        &session,
+        &layers,
+        |id| {
+            let mut c = Command::new("sandbox_exec")
+                .with_id(id)
+                .with_args(argv.clone())
+                .with_sandbox(true)
+                .with_exec_mode("background");
+            if let Some(t) = args.get("timeout_secs").and_then(|a| a.as_u64()) {
+                c = c.with_timeout_secs(t);
+            }
+            c
+        },
+        send,
+    )
+}
+
+/// Query a background session. These are engine session ids (from the
+/// terra_exec_background response), not MCP session names — no session
+/// registry involvement.
+fn terra_session_status(args: &serde_json::Value, send: &impl Fn(&Command) -> String) -> String {
+    let id = args
+        .get("session_id")
+        .and_then(|a| a.as_str())
+        .unwrap_or("");
+    send(&Command::new("session_status").with_session_id(id))
+}
+
+/// Kill a background session (killpg in the guest); its workdir is
+/// removed. Engine session id, same as terra_session_status.
+fn terra_session_kill(args: &serde_json::Value, send: &impl Fn(&Command) -> String) -> String {
+    let id = args
+        .get("session_id")
+        .and_then(|a| a.as_str())
+        .unwrap_or("");
+    send(&Command::new("session_kill").with_session_id(id))
+}
+
 fn terra_session_read(args: &serde_json::Value, sessions: &mut SessionRegistry) -> String {
     let session = session_arg(args);
     let path = args.get("path").and_then(|a| a.as_str()).unwrap_or("");
@@ -690,6 +799,106 @@ mod tests {
 
         assert!(resp.contains("create failed"), "{resp}");
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn exec_background_sends_background_command_and_passes_through_started() {
+        let mut sessions = SessionRegistry::new();
+        sessions.insert("default".into(), "sb-alive".into());
+        let engine = MockEngine::new(&[
+            r#"{"status":"ok","data":{"session_id":"sess-1","sandbox":"sb-alive","status":"started"}}"#,
+        ]);
+        let sent: std::cell::RefCell<Option<Command>> = std::cell::RefCell::new(None);
+        let send = |c: &Command| {
+            *sent.borrow_mut() = Some(c.clone());
+            engine.send(c)
+        };
+
+        let resp = terra_exec_background(
+            &serde_json::json!({"args": ["make", "build"], "timeout_secs": 300}),
+            &mut sessions,
+            &send,
+        );
+
+        assert!(
+            resp.contains("\"status\":\"started\"") && resp.contains("sess-1"),
+            "{resp}"
+        );
+        let sent = sent.borrow();
+        let cmd = sent.as_ref().expect("a command must be sent");
+        assert_eq!(cmd.command, "sandbox_exec");
+        assert_eq!(cmd.id.as_deref(), Some("sb-alive"));
+        assert_eq!(cmd.args, vec!["make".to_string(), "build".to_string()]);
+        assert_eq!(cmd.exec_mode.as_deref(), Some("background"));
+        assert_eq!(cmd.timeout_secs, Some(300));
+        assert_eq!(
+            sessions.get("default").map(String::as_str),
+            Some("sb-alive"),
+            "existing session is reused, not re-created"
+        );
+        assert_eq!(engine.calls(), vec!["sandbox_exec:sb-alive".to_string()]);
+    }
+
+    #[test]
+    fn exec_background_self_heals_stale_session_id() {
+        let mut sessions = SessionRegistry::new();
+        sessions.insert("s1".into(), "sb-deadbeef".into());
+        let engine = MockEngine::new(&[
+            r#"{"status":"error","error":"Sandbox 'sb-deadbeef' not found"}"#,
+            r#"{"status":"ok","data":{"id":"sb-cafe1234","vm":"tenant-mcp","workdir":"/workdir/sb-cafe1234","pool":false}}"#,
+            r#"{"status":"ok","data":{"session_id":"sess-2","sandbox":"sb-cafe1234","status":"started"}}"#,
+        ]);
+        let send = |c: &Command| engine.send(c);
+
+        let resp = terra_exec_background(
+            &serde_json::json!({"session": "s1", "args": ["python3", "train.py"]}),
+            &mut sessions,
+            &send,
+        );
+
+        assert!(
+            resp.contains("\"status\":\"started\"") && resp.contains("sess-2"),
+            "{resp}"
+        );
+        assert_eq!(sessions.get("s1").map(String::as_str), Some("sb-cafe1234"));
+        assert_eq!(
+            engine.calls(),
+            vec![
+                "sandbox_exec:sb-deadbeef".to_string(),
+                "sandbox_create:".to_string(),
+                "sandbox_exec:sb-cafe1234".to_string(),
+            ],
+            "background exec self-heals a stale cached id exactly like terra_exec"
+        );
+    }
+
+    #[test]
+    fn session_status_and_kill_build_exact_commands() {
+        let engine = MockEngine::new(&[
+            r#"{"status":"ok","data":{"session_id":"sess-1","sandbox":"sb-alive","status":"running","exit_code":null,"stdout":"","stderr":""}}"#,
+            r#"{"status":"ok","data":{"session_id":"sess-1","killed":true}}"#,
+        ]);
+        let sent: std::cell::RefCell<Vec<Command>> = std::cell::RefCell::new(Vec::new());
+        let send = |c: &Command| {
+            sent.borrow_mut().push(c.clone());
+            engine.send(c)
+        };
+
+        let status = terra_session_status(&serde_json::json!({"session_id": "sess-1"}), &send);
+        let kill = terra_session_kill(&serde_json::json!({"session_id": "sess-1"}), &send);
+
+        assert!(status.contains("\"status\":\"running\""), "{status}");
+        assert!(kill.contains("\"killed\":true"), "{kill}");
+        let sent = sent.borrow();
+        assert_eq!(sent[0].command, "session_status");
+        assert_eq!(sent[0].session_id.as_deref(), Some("sess-1"));
+        assert_eq!(sent[1].command, "session_kill");
+        assert_eq!(sent[1].session_id.as_deref(), Some("sess-1"));
+        assert_eq!(
+            engine.calls(),
+            vec!["session_status:".to_string(), "session_kill:".to_string(),],
+            "status/kill are sent directly with no session registry involvement"
+        );
     }
 
     #[test]

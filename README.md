@@ -64,7 +64,7 @@ terrarium/
 │   ├── protocol/             # Shared Command / Response types (single source of truth)
 │   ├── guest-proxy/          # In-guest agent: vsock relay, exec, mount, umount
 │   ├── network/              # Tap / NAT / dnsmasq DHCP, tc QoS
-│   └── mcp/                  # MCP server (stdio JSON-RPC, 15 user-facing tools)
+│   └── mcp/                  # MCP server (stdio JSON-RPC, 18 user-facing tools)
 ├── sdk/python/               # Python SDK (terra package: Sandbox, Pool, Template, client, daemon, assets, images)
 ├── images/                   # Guest kernel / rootfs / initramfs build scripts and examples
 └── docs/                     # Protocol, SDK, MCP docs and design ADRs
@@ -149,7 +149,7 @@ terra tool remove -n python312
 - **Layered filesystem** — read-only EROFS layers star-composed on the host (arbitrary combinations, shared page cache), exposed via virtiofs. Distro base layers come from a config-driven pipeline (alpine and ubuntu ship today; more are a 3-line config). Tool layers are built by configuring a real VM and packing the delta, so environments are runnable by construction.
 - **Warm pool** — pre-booted idle VMs as shared tenant containers; acquiring returns a sandbox session within a pool VM. Multiple acquires from the same pool share the same VM with isolated workdirs. Pool VMs release back to idle for reuse. Dynamic `grow()` / `scale` for live size adjustment.
 - **Named templates** — `terra.template.Template` persists kernel + base distro + tool layer compositions, written by `terra setup` or the SDK.
-- **In-guest exec** — blocking and background execution inside VMs through the guest agent, per-command timeouts, and structured `ExecResult`. Background sessions are tracked at the protocol level (`session_status`, `session_kill`, `session_list`) and exposed by the Python SDK (`Sandbox.exec(background=True)` returns an engine-tracked `Session` handle) and the CLI (`sandbox exec --detach`, `sandbox session status|kill|ls`); MCP exposure is in progress.
+- **In-guest exec** — blocking and background execution inside VMs through the guest agent, per-command timeouts, and structured `ExecResult`. Background sessions are tracked at the protocol level (`session_status`, `session_kill`, `session_list`) and exposed by all three clients: the Python SDK (`Sandbox.exec(background=True)` returns an engine-tracked `Session` handle), the CLI (`sandbox exec --detach`, `sandbox session status|kill|ls`), and the MCP server (`terra_exec_background`, `terra_session_status`, `terra_session_kill`).
 - **Networking** — one-flag NAT networking (`--net`) with DHCP; lifecycle managed via `terra net`.
 - **Dynamic resize** — CPU and memory online adjustment without reboot.
 - **Zero-config Python SDK** — managed directories, automatic binary and image resolution, daemon auto-start, programmable host configuration (`HostConfig`).
