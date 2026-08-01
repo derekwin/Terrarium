@@ -214,8 +214,10 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
 
     // Optional per-exec sandlock policy. Only valid together with
     // "sandbox": true — a policy on an unsandboxed exec would silently
-    // not apply, so reject it loudly instead.
-    let policy: Option<sandbox::SandboxPolicy> = match cmd.get("policy") {
+    // not apply, so reject it loudly instead. The engine injects the full
+    // policy (default or user) for every sandboxed exec; the wire shape is
+    // the shared adapter_traits::SandboxPolicy.
+    let policy: Option<adapter_traits::SandboxPolicy> = match cmd.get("policy") {
         Some(p) if !p.is_null() => match serde_json::from_value(p.clone()) {
             Ok(p) => Some(p),
             Err(e) => {
@@ -297,7 +299,7 @@ mod tests {
         let resp = run_exec(serde_json::json!({
             "command": "exec",
             "args": ["echo", "hi"],
-            "policy": {"read_paths": ["/opt/data"]},
+            "policy": {"capabilities": [{"File": {"path": {"Exact": "/opt/data"}, "access": "Read"}}]},
         }));
         assert_eq!(resp["status"], "error");
         assert!(

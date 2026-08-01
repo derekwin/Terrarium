@@ -7,6 +7,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use adapter_traits::{
+    Capability, DefaultAccess, Direction, FileAccess, PathPattern, SandboxPolicy,
+};
+
 pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
@@ -22,98 +26,39 @@ const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 /// ("/workdir/usr/bin/sandlock").
 pub const SANDLOCK_PATHS: &[&str] = &["/usr/bin/sandlock", "/workdir/usr/bin/sandlock"];
 
-/// Default v1 sandbox policy (per-session isolation in a shared tenant VM):
-/// read-only system paths, read-write on the session work_dir and /tmp,
-/// network unrestricted (no --net-allow flags). Deliberately does NOT
-/// grant "/" — that would leak sibling sessions' workdirs under /workdir.
-/// Paths that don't exist in the image (e.g. /lib64, /sbin on busybox)
-/// are filtered out by the caller-supplied `exists` probe, because
-/// sandlock errors on nonexistent grant paths.
-const READ_GRANTS: &[&str] = &[
-    "/usr",
-    "/lib",
-    "/lib64",
-    "/bin",
-    "/sbin",
-    "/etc",
-    "/tmp",
-    "/dev/urandom",
-];
-const WRITE_GRANTS: &[&str] = &["/tmp", "/dev/null"];
-
-/// User-supplied sandbox policy, parsed from the exec request's "policy"
-/// object. All fields optional; grants are APPEND-mode on top of the
-/// default policy above.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SandboxPolicy {
-    /// Extra read-only path grants (absolute paths only).
-    #[serde(default)]
-    pub read_paths: Vec<String>,
-    /// Extra read-write path grants (absolute paths only).
-    #[serde(default)]
-    pub write_paths: Vec<String>,
-    /// sandlock --net-allow entries. Absent → network unrestricted;
-    /// present → deny-by-default egress with these entries. Must be
-    /// non-empty when present (validated below).
-    #[serde(default)]
-    pub net_allow: Option<Vec<String>>,
-    /// sandlock -m <n>M memory limit.
-    pub memory_mb: Option<u64>,
-    /// sandlock -P <n> process-count limit.
-    pub procs: Option<u32>,
-}
-
-/// Validate a user-supplied policy (untrusted-input discipline):
-/// - grant paths must be absolute (relative paths are meaningless against
-///   Landlock's absolute-path rules and likely a client bug);
-/// - net_allow, when present, must be non-empty — an empty list emits zero
-///   --net-allow flags, which would silently leave egress unrestricted,
-///   the opposite of what a user passing [] intends.
-fn validate_policy(policy: &SandboxPolicy) -> Result<(), String> {
-    for p in policy.read_paths.iter().chain(policy.write_paths.iter()) {
-        if !p.starts_with('/') {
-            return Err(format!(
-                "policy path grant {:?} must be absolute (start with '/')",
-                p
-            ));
-        }
-    }
-    if let Some(entries) = &policy.net_allow {
-        if entries.is_empty() {
-            return Err(
-                "net_allow must be a non-empty list (omit the field for unrestricted network)"
-                    .into(),
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Build the sandlock argv wrapping `args`: the default policy plus the
-/// user-supplied `policy` (APPEND-mode), i.e.
-/// `[sandlock, run, <default flags>, <policy flags>, --, args...]`.
+/// Build the sandlock argv wrapping `args`, translating the policy's
+/// capability set into sandlock flags (D3), i.e.
+/// `[sandlock, run, <policy flags>, <limits>, -w work_dir, --, args...]`.
+///
+/// The policy type is `adapter_traits::SandboxPolicy` — the single policy
+/// type shared with the engine, which injects the full policy (default or
+/// user) on the wire for every sandboxed exec (D2). This guest applies NO
+/// implicit defaults: the granted paths are exactly the policy's
+/// capabilities plus the dynamic session workdir.
+///
+/// Capability → sandlock flag:
+/// - `File { Read }` (Prefix or Exact)     → `-r <path>`  (exists-filtered)
+/// - `File { ReadWrite }` (Prefix or Exact)→ `-w <path>`  (exists-filtered)
+/// - `Network { Outbound }`                → `--net-allow <host>[:<port>]`
+/// - `limits.memory_mb`                    → `-m <n>M`
+/// - `limits.procs`                        → `-P <n>`
+/// - `limits.cpu_shares` / `fds` / `bandwidth_kbps` are not expressible in
+///   sandlock and are intentionally ignored.
+///
+/// Honest-unsupported (D4): `File { Execute }`, `Network { Inbound }` and
+/// `Device` capabilities return Err instead of being silently dropped.
 ///
 /// `exists` probes path presence in the guest rootfs (production passes
 /// `Path::exists`); it also guards the sandlock binary itself, probing
 /// `SANDLOCK_PATHS` in order and using the first hit as argv[0]. Returns
 /// Err when sandlock is not installed at any candidate — callers must
 /// surface this as a hard error, never fall back to unsandboxed execution.
-///
-/// Policy flags: read_paths → `-r <p>`, write_paths → `-w <p>` (both
-/// exists-filtered like the default grants), net_allow present →
-/// `--net-allow <entry>` per entry (passed through verbatim; sandlock
-/// validates and its error propagates via the normal exec error path),
-/// memory_mb → `-m <n>M`, procs → `-P <n>`.
 pub fn wrap_for_sandbox(
     args: &[String],
     work_dir: &str,
     policy: Option<&SandboxPolicy>,
     exists: impl Fn(&str) -> bool,
 ) -> Result<Vec<String>, String> {
-    if let Some(p) = policy {
-        validate_policy(p)?;
-    }
     let sandlock = SANDLOCK_PATHS.iter().find(|p| exists(p)).ok_or_else(|| {
         format!(
             "sandbox requested but sandlock not present in image (probed {})",
@@ -121,50 +66,74 @@ pub fn wrap_for_sandbox(
         )
     })?;
     let mut argv = vec![sandlock.to_string(), "run".to_string()];
-    for p in READ_GRANTS {
-        if exists(p) {
-            argv.push("-r".into());
-            argv.push((*p).into());
-        }
-    }
-    if exists(work_dir) {
-        argv.push("-w".into());
-        argv.push(work_dir.to_string());
-    }
-    for p in WRITE_GRANTS {
-        if exists(p) {
-            argv.push("-w".into());
-            argv.push((*p).into());
-        }
-    }
+
     if let Some(policy) = policy {
-        for p in &policy.read_paths {
-            if exists(p) {
-                argv.push("-r".into());
-                argv.push(p.clone());
+        // Defense in depth: the engine already rejects Allow (D6), but an
+        // Allow-capable default would silently widen every grant below.
+        if policy.default == DefaultAccess::Allow {
+            return Err("DefaultAccess::Allow is not allowed".into());
+        }
+        for cap in &policy.capabilities {
+            match cap {
+                Capability::File { path, access } => {
+                    let (flag, path_str) = match (path, access) {
+                        (PathPattern::Prefix(p) | PathPattern::Exact(p), FileAccess::Read) => {
+                            ("-r", p.to_string_lossy())
+                        }
+                        (PathPattern::Prefix(p) | PathPattern::Exact(p), FileAccess::ReadWrite) => {
+                            ("-w", p.to_string_lossy())
+                        }
+                        (_, FileAccess::Execute) => {
+                            return Err("Execute capability not supported by this backend".into());
+                        }
+                    };
+                    // Grant only paths that exist — sandlock errors on
+                    // nonexistent grant paths.
+                    if exists(&path_str) {
+                        argv.push(flag.into());
+                        argv.push(path_str.into_owned());
+                    }
+                }
+                Capability::Network {
+                    endpoint,
+                    direction,
+                } => match direction {
+                    Direction::Outbound => {
+                        let entry = match endpoint.port {
+                            Some(port) => format!("{}:{}", endpoint.host, port),
+                            None => endpoint.host.clone(),
+                        };
+                        argv.push("--net-allow".into());
+                        argv.push(entry);
+                    }
+                    Direction::Inbound => {
+                        return Err(
+                            "Inbound network capability not supported by this backend".into()
+                        );
+                    }
+                },
+                Capability::Device { .. } => {
+                    return Err("Device capability not supported by this backend".into());
+                }
             }
         }
-        for p in &policy.write_paths {
-            if exists(p) {
-                argv.push("-w".into());
-                argv.push(p.clone());
-            }
-        }
-        if let Some(entries) = &policy.net_allow {
-            for e in entries {
-                argv.push("--net-allow".into());
-                argv.push(e.clone());
-            }
-        }
-        if let Some(mb) = policy.memory_mb {
+        if let Some(mb) = policy.limits.memory_mb {
             argv.push("-m".into());
             argv.push(format!("{}M", mb));
         }
-        if let Some(procs) = policy.procs {
+        if let Some(procs) = policy.limits.procs {
             argv.push("-P".into());
             argv.push(procs.to_string());
         }
     }
+
+    // The session workdir is a dynamic grant — it travels via the exec
+    // `work_dir` field, never as a static capability.
+    if exists(work_dir) {
+        argv.push("-w".into());
+        argv.push(work_dir.to_string());
+    }
+
     argv.push("--".into());
     argv.extend(args.iter().cloned());
     Ok(argv)
@@ -282,15 +251,67 @@ pub fn exec_isolated(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adapter_traits::Endpoint;
 
     fn args() -> Vec<String> {
         vec!["sh".into(), "-c".into(), "echo hi".into()]
     }
 
-    /// All candidate paths present → full default policy.
+    /// Mirror of the engine's `default_sandbox_policy()` — the engine
+    /// injects this on the wire for every sandboxed exec; these tests use
+    /// the same capability set.
+    fn default_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            capabilities: vec![
+                Capability::File {
+                    path: PathPattern::Prefix("/usr".into()),
+                    access: FileAccess::Read,
+                },
+                Capability::File {
+                    path: PathPattern::Prefix("/lib".into()),
+                    access: FileAccess::Read,
+                },
+                Capability::File {
+                    path: PathPattern::Prefix("/lib64".into()),
+                    access: FileAccess::Read,
+                },
+                Capability::File {
+                    path: PathPattern::Prefix("/bin".into()),
+                    access: FileAccess::Read,
+                },
+                Capability::File {
+                    path: PathPattern::Prefix("/sbin".into()),
+                    access: FileAccess::Read,
+                },
+                Capability::File {
+                    path: PathPattern::Prefix("/etc".into()),
+                    access: FileAccess::Read,
+                },
+                Capability::File {
+                    path: PathPattern::Prefix("/tmp".into()),
+                    access: FileAccess::ReadWrite,
+                },
+                Capability::File {
+                    path: PathPattern::Exact("/dev/null".into()),
+                    access: FileAccess::ReadWrite,
+                },
+                Capability::File {
+                    path: PathPattern::Exact("/dev/urandom".into()),
+                    access: FileAccess::Read,
+                },
+            ],
+            limits: Default::default(),
+            default: DefaultAccess::Deny,
+            audit: Default::default(),
+            version: 1,
+        }
+    }
+
+    /// All candidate paths present → full policy translated to flags.
     #[test]
     fn full_policy_when_everything_exists() {
-        let argv = wrap_for_sandbox(&args(), "/workdir", None, |_| true).unwrap();
+        let argv =
+            wrap_for_sandbox(&args(), "/workdir", Some(&default_policy()), |_| true).unwrap();
         assert_eq!(
             argv,
             vec![
@@ -308,16 +329,14 @@ mod tests {
                 "/sbin",
                 "-r",
                 "/etc",
-                "-r",
-                "/tmp",
-                "-r",
-                "/dev/urandom",
-                "-w",
-                "/workdir",
                 "-w",
                 "/tmp",
                 "-w",
                 "/dev/null",
+                "-r",
+                "/dev/urandom",
+                "-w",
+                "/workdir",
                 "--",
                 "sh",
                 "-c",
@@ -331,7 +350,7 @@ mod tests {
     #[test]
     fn nonexistent_paths_are_filtered() {
         let missing = |p: &str| !matches!(p, "/lib64" | "/sbin");
-        let argv = wrap_for_sandbox(&args(), "/workdir", None, missing).unwrap();
+        let argv = wrap_for_sandbox(&args(), "/workdir", Some(&default_policy()), missing).unwrap();
         assert!(!argv.iter().any(|a| a == "/lib64"));
         assert!(!argv.iter().any(|a| a == "/sbin"));
         assert!(argv.iter().any(|a| a == "/lib"));
@@ -344,7 +363,13 @@ mod tests {
     /// must never be granted (would leak sibling sessions under /workdir).
     #[test]
     fn workdir_writable_root_never_granted() {
-        let argv = wrap_for_sandbox(&args(), "/workdir/session-1", None, |_| true).unwrap();
+        let argv = wrap_for_sandbox(
+            &args(),
+            "/workdir/session-1",
+            Some(&default_policy()),
+            |_| true,
+        )
+        .unwrap();
         let w = argv.iter().position(|a| a == "/workdir/session-1").unwrap();
         assert_eq!(argv[w - 1], "-w");
         assert!(!argv.iter().any(|a| a == "/"));
@@ -355,7 +380,8 @@ mod tests {
     #[test]
     fn missing_sandlock_binary_is_an_error() {
         let exists = |p: &str| !SANDLOCK_PATHS.contains(&p);
-        let err = wrap_for_sandbox(&args(), "/workdir", None, exists).unwrap_err();
+        let err =
+            wrap_for_sandbox(&args(), "/workdir", Some(&default_policy()), exists).unwrap_err();
         assert!(err.contains("/usr/bin/sandlock"));
         assert!(err.contains("/workdir/usr/bin/sandlock"));
     }
@@ -369,7 +395,13 @@ mod tests {
         let exists = |p: &str| {
             p == "/workdir/usr/bin/sandlock" || p == "/tmp" || p.starts_with("/workdir/session")
         };
-        let argv = wrap_for_sandbox(&args(), "/workdir/session-1", None, exists).unwrap();
+        let argv = wrap_for_sandbox(
+            &args(),
+            "/workdir/session-1",
+            Some(&default_policy()),
+            exists,
+        )
+        .unwrap();
         assert_eq!(argv[0], "/workdir/usr/bin/sandlock");
         // Initramfs has no /usr, /lib, ... so those grants are filtered.
         assert!(!argv.iter().any(|a| a == "/usr"));
@@ -383,24 +415,33 @@ mod tests {
     /// When both candidates exist (cold boot), the first one wins.
     #[test]
     fn cold_boot_path_wins_when_both_exist() {
-        let argv = wrap_for_sandbox(&args(), "/workdir", None, |_| true).unwrap();
+        let argv =
+            wrap_for_sandbox(&args(), "/workdir", Some(&default_policy()), |_| true).unwrap();
         assert_eq!(argv[0], "/usr/bin/sandlock");
     }
 
-    /// Policy grants are APPEND-mode: default grants still present, user
-    /// read_paths/write_paths appended as -r/-w flags (exists-filtered).
+    /// Capabilities are translated in order; a capability on a nonexistent
+    /// path is filtered like the system grants.
     #[test]
-    fn policy_grants_are_appended() {
-        let policy = SandboxPolicy {
-            read_paths: vec!["/opt/data".into(), "/missing".into()],
-            write_paths: vec!["/output".into()],
-            ..SandboxPolicy::default()
-        };
+    fn user_capabilities_follow_defaults_and_are_filtered() {
+        let mut policy = default_policy();
+        policy.capabilities.push(Capability::File {
+            path: PathPattern::Exact("/opt/data".into()),
+            access: FileAccess::Read,
+        });
+        policy.capabilities.push(Capability::File {
+            path: PathPattern::Exact("/missing".into()),
+            access: FileAccess::Read,
+        });
+        policy.capabilities.push(Capability::File {
+            path: PathPattern::Exact("/output".into()),
+            access: FileAccess::ReadWrite,
+        });
         let exists = |p: &str| p != "/missing";
         let argv = wrap_for_sandbox(&args(), "/workdir", Some(&policy), exists).unwrap();
         // Defaults still there.
         assert!(argv.iter().any(|a| a == "/usr"));
-        // User grants appended with the right flags.
+        // User grants translated with the right flags.
         let r = argv.iter().position(|a| a == "/opt/data").unwrap();
         assert_eq!(argv[r - 1], "-r");
         let w = argv.iter().position(|a| a == "/output").unwrap();
@@ -410,15 +451,32 @@ mod tests {
         // User grants come after the defaults, before "--".
         let sep = argv.iter().position(|a| a == "--").unwrap();
         assert!(r < sep && w < sep);
-        assert!(r > argv.iter().position(|a| a == "/dev/null").unwrap());
+        let last_default = argv.iter().position(|a| a == "/dev/urandom").unwrap();
+        assert!(r > last_default && w > last_default);
     }
 
-    /// net_allow entries are passed through verbatim as --net-allow flags.
+    /// Outbound network capabilities emit `--net-allow <host>[:<port>]`;
+    /// a missing port emits the bare host.
     #[test]
-    fn policy_net_allow_emitted_verbatim() {
+    fn network_outbound_emits_net_allow() {
         let policy = SandboxPolicy {
-            net_allow: Some(vec!["api.openai.com:443".into(), "pypi.org".into()]),
-            ..SandboxPolicy::default()
+            capabilities: vec![
+                Capability::Network {
+                    endpoint: Endpoint {
+                        host: "api.openai.com".into(),
+                        port: Some(443),
+                    },
+                    direction: Direction::Outbound,
+                },
+                Capability::Network {
+                    endpoint: Endpoint {
+                        host: "pypi.org".into(),
+                        port: None,
+                    },
+                    direction: Direction::Outbound,
+                },
+            ],
+            ..default_policy()
         };
         let argv = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap();
         let a = argv.iter().position(|x| x == "api.openai.com:443").unwrap();
@@ -427,33 +485,20 @@ mod tests {
         assert_eq!(argv[b - 1], "--net-allow");
     }
 
-    /// net_allow absent → no --net-allow flags (network unrestricted);
-    /// present-but-empty → hard error (an empty list would emit zero flags
-    /// and silently leave egress unrestricted).
+    /// No network capabilities → no --net-allow flags.
     #[test]
-    fn net_allow_absent_vs_empty() {
-        let argv = wrap_for_sandbox(&args(), "/workdir", None, |_| true).unwrap();
+    fn no_network_caps_means_no_net_allow_flags() {
+        let argv =
+            wrap_for_sandbox(&args(), "/workdir", Some(&default_policy()), |_| true).unwrap();
         assert!(!argv.iter().any(|a| a == "--net-allow"));
-        let policy = SandboxPolicy {
-            net_allow: Some(vec![]),
-            ..SandboxPolicy::default()
-        };
-        let err = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap_err();
-        assert!(
-            err.contains("net_allow must be a non-empty list"),
-            "{}",
-            err
-        );
     }
 
-    /// memory_mb → "-m <n>M"; procs → "-P <n>".
+    /// memory_mb → "-m <n>M"; procs → "-P <n>", both before "--".
     #[test]
     fn policy_memory_and_procs_formatting() {
-        let policy = SandboxPolicy {
-            memory_mb: Some(512),
-            procs: Some(20),
-            ..SandboxPolicy::default()
-        };
+        let mut policy = default_policy();
+        policy.limits.memory_mb = Some(512);
+        policy.limits.procs = Some(20);
         let argv = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap();
         let m = argv.iter().position(|a| a == "-m").unwrap();
         assert_eq!(argv[m + 1], "512M");
@@ -463,41 +508,131 @@ mod tests {
         assert!(m < sep && p < sep, "limits must precede the -- separator");
     }
 
-    /// Relative grant paths are rejected (untrusted-input discipline).
+    /// cpu_shares / fds / bandwidth_kbps have no sandlock flag — they are
+    /// ignored and the argv is identical to a policy without them.
     #[test]
-    fn policy_rejects_relative_paths() {
-        for bad in ["opt/data", "./data", "../escape"] {
-            let policy = SandboxPolicy {
-                read_paths: vec![bad.into()],
-                ..SandboxPolicy::default()
-            };
-            let err = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap_err();
-            assert!(err.contains("must be absolute"), "{}: {}", bad, err);
-        }
-        let policy = SandboxPolicy {
-            write_paths: vec!["output".into()],
-            ..SandboxPolicy::default()
-        };
-        assert!(wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).is_err());
+    fn unsupported_limits_are_ignored() {
+        let mut policy = default_policy();
+        policy.limits.cpu_shares = Some(100);
+        policy.limits.fds = Some(64);
+        policy.limits.bandwidth_kbps = Some(1024);
+        let argv = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap();
+        let base =
+            wrap_for_sandbox(&args(), "/workdir", Some(&default_policy()), |_| true).unwrap();
+        assert_eq!(argv, base);
     }
 
-    /// The policy object rejects unknown fields (deny_unknown_fields).
+    /// `File::Execute` is a contract-bearing capability sandlock cannot
+    /// express — the translation fails honestly instead of silently
+    /// downgrading to Read.
+    #[test]
+    fn execute_capability_is_unsupported() {
+        let mut policy = default_policy();
+        policy.capabilities.push(Capability::File {
+            path: PathPattern::Exact("/usr/bin/foo".into()),
+            access: FileAccess::Execute,
+        });
+        let err = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap_err();
+        assert!(err.contains("Execute capability not supported"), "{}", err);
+    }
+
+    /// `Network::Inbound` cannot be expressed by sandlock — honest error.
+    #[test]
+    fn inbound_network_capability_is_unsupported() {
+        let policy = SandboxPolicy {
+            capabilities: vec![Capability::Network {
+                endpoint: Endpoint {
+                    host: "0.0.0.0".into(),
+                    port: Some(8080),
+                },
+                direction: Direction::Inbound,
+            }],
+            ..default_policy()
+        };
+        let err = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap_err();
+        assert!(
+            err.contains("Inbound network capability not supported"),
+            "{}",
+            err
+        );
+    }
+
+    /// `Device` capabilities cannot be expressed by sandlock — honest error.
+    #[test]
+    fn device_capability_is_unsupported() {
+        let policy = SandboxPolicy {
+            capabilities: vec![Capability::Device {
+                path: "/dev/kvm".into(),
+            }],
+            ..default_policy()
+        };
+        let err = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap_err();
+        assert!(err.contains("Device capability not supported"), "{}", err);
+    }
+
+    /// `DefaultAccess::Allow` is a debug escape hatch — defense in depth
+    /// even though the engine rejects it before sending.
+    #[test]
+    fn default_access_allow_is_rejected() {
+        let policy = SandboxPolicy {
+            default: DefaultAccess::Allow,
+            ..default_policy()
+        };
+        let err = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap_err();
+        assert!(
+            err.contains("DefaultAccess::Allow is not allowed"),
+            "{}",
+            err
+        );
+    }
+
+    /// No policy on the wire (direct protocol client): the guest grants
+    /// nothing beyond the session workdir — no implicit defaults.
+    #[test]
+    fn no_policy_grants_only_workdir() {
+        let argv = wrap_for_sandbox(&args(), "/workdir/session-1", None, |_| true).unwrap();
+        assert_eq!(
+            argv,
+            vec![
+                "/usr/bin/sandlock",
+                "run",
+                "-w",
+                "/workdir/session-1",
+                "--",
+                "sh",
+                "-c",
+                "echo hi",
+            ]
+        );
+    }
+
+    /// The policy object rejects unknown fields (deny_unknown_fields on
+    /// `adapter_traits::SandboxPolicy`) and the pinned wire shape parses.
     #[test]
     fn policy_deserialize_rejects_unknown_fields() {
-        let res: Result<SandboxPolicy, _> =
-            serde_json::from_str(r#"{"read_paths":["/x"],"bogus":1}"#);
+        let res: Result<SandboxPolicy, _> = serde_json::from_str(
+            r#"{"capabilities":[{"File":{"path":{"Exact":"/x"},"access":"Read"}}],"bogus":1}"#,
+        );
         assert!(res.is_err());
-        // ...and the pinned wire shape parses.
+        // ...and the pinned wire shape (capabilities/limits/default/version)
+        // parses into the shared type.
         let policy: SandboxPolicy = serde_json::from_str(
-            r#"{"read_paths":["/opt/data"],"write_paths":["/output"],
-                "net_allow":["api.openai.com:443","pypi.org"],
-                "memory_mb":512,"procs":20}"#,
+            r#"{
+                "capabilities": [
+                    {"File": {"path": {"Prefix": "/usr"}, "access": "Read"}},
+                    {"File": {"path": {"Exact": "/dev/null"}, "access": "ReadWrite"}},
+                    {"Network": {"endpoint": {"host": "api.openai.com", "port": 443},
+                                 "direction": "Outbound"}}
+                ],
+                "limits": {"memory_mb": 512, "procs": 20},
+                "default": "deny",
+                "version": 1
+            }"#,
         )
         .unwrap();
-        assert_eq!(policy.read_paths, vec!["/opt/data"]);
-        assert_eq!(policy.write_paths, vec!["/output"]);
-        assert_eq!(policy.net_allow.as_ref().unwrap().len(), 2);
-        assert_eq!(policy.memory_mb, Some(512));
-        assert_eq!(policy.procs, Some(20));
+        assert_eq!(policy.capabilities.len(), 3);
+        assert_eq!(policy.limits.memory_mb, Some(512));
+        assert_eq!(policy.limits.procs, Some(20));
+        assert_eq!(policy.default, DefaultAccess::Deny);
     }
 }

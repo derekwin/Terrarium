@@ -573,8 +573,7 @@ impl SandboxPolicy {
         }
         if self.default == DefaultAccess::Allow {
             return Err(
-                "DefaultAccess::Allow is a debug escape hatch and not allowed in production"
-                    .into(),
+                "DefaultAccess::Allow is a debug escape hatch and not allowed in production".into(),
             );
         }
         if let Some(m) = self.limits.memory_mb {
