@@ -25,10 +25,7 @@ version = "0.1.0"
 dependencies = [
  "adapter-traits",
  "async-trait",
- "libc",
- "serde",
- "serde_json",
- "tracing",
+ "tokio",
 ]
 
 [[package]]
@@ -87,6 +84,7 @@ name = "engine"
 version = "0.1.0"
 dependencies = [
  "adapter-cloud-hypervisor",
+ "adapter-sandlock",
  "adapter-traits",
  "async-trait",
  "pyo3",
