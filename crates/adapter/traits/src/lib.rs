@@ -277,6 +277,10 @@ pub struct ExecCommand {
     /// `None` runs with exactly the bound policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_override: Option<SandboxPolicy>,
+    /// Per-command timeout in seconds; `None` uses the backend's default
+    /// (guest sandlock: 60s, matching the engine's exec default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 /// Result of a command execution.
