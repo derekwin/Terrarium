@@ -104,6 +104,7 @@ Sandbox 是租户共享 VM（`tenant-<tenant>`）内的一个会话（独立工�
 | `pool_list` | — | 槽位与认领状态 |
 | `pool_claim` | `layers` | 认领一台空转 VM 并热插层；满员返回 exhausted |
 | `pool_release` | `name` | 卸载层并归还空转 |
+| `pool_shrink` | `pool_size` (count) | 原子销毁 count 个空闲槽（claimed 不碰；单锁内完成，关闭客户端 scale 的 TOCTOU 窗口）。返回 `{removed, count}` |
 
 ### 网络
 
