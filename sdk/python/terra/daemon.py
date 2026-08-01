@@ -178,7 +178,29 @@ class Daemon:
         self._embedded = embedded
         self._log_file = None
 
+    @staticmethod
+    def _raise_nofile(target: int = 65535) -> None:
+        """Raise the soft open-files limit before starting the daemon.
+
+        A sudo-launched daemon inherits the caller's soft limit (often
+        1024); managing several VMs plus dnsmasq inotify handles exceeds
+        that. The daemon manages VMs and must not depend on the caller's
+        shell ulimit. Best-effort: if we cannot raise it (unprivileged),
+        the caller's limit is used.
+        """
+        try:
+            import resource
+
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            if soft < target:
+                resource.setrlimit(
+                    resource.RLIMIT_NOFILE, (min(target, hard), hard)
+                )
+        except (ImportError, ValueError, OSError):
+            pass  # caller's limit stands when we cannot raise it
+
     def start(self, timeout: float = 5.0) -> "Daemon":
+        self._raise_nofile()
         env_updates = build_daemon_env(
             self.config,
             kernel=self._kernel,
