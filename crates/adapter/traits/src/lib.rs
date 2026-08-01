@@ -150,7 +150,7 @@ pub struct VmSpec {
 }
 
 /// Writable-layer policy for a layered (virtiofs) root filesystem.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UpperPolicy {
     /// Per-VM upperdir, deleted when the VM is destroyed (default).
     #[default]
@@ -201,10 +201,13 @@ pub struct SandboxSpec {
     pub env: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceLimits {
     pub memory_mb: Option<u64>,
     pub cpu_shares: Option<u64>,
+    pub procs: Option<u32>,
+    pub fds: Option<u32>,
+    pub bandwidth_kbps: Option<u64>,
 }
 
 /// Per-exec sandbox policy, applied by sandlock in the guest.
@@ -459,4 +462,260 @@ pub trait SandboxHandle: Send + Sync {
     async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, AdapterError>;
     async fn setup(&self, tools: &[String]) -> Result<(), AdapterError>;
     async fn destroy(&self) -> Result<(), AdapterError>;
+}
+
+// ---------------------------------------------------------------------------
+// Policy model (B1) — two-layer policy: VmPolicy (physical, VmAdapter) and
+// SandboxPolicy (logical capabilities, SandboxAdapter). See
+// docs/design/policy-model.md. Capability-based: default deny, explicit grant.
+// ---------------------------------------------------------------------------
+
+/// Path reference: exact or prefix match.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PathPattern {
+    Exact(std::path::PathBuf),
+    Prefix(std::path::PathBuf),
+}
+
+/// File access at the least-privilege granularity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileAccess {
+    Read,
+    ReadWrite,
+    Execute,
+}
+
+/// Network endpoint (host:port; omitted port = any).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Endpoint {
+    pub host: String,
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Direction {
+    Outbound,
+    Inbound,
+}
+
+/// A single access grant held by a subject (capability).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Capability {
+    File {
+        path: PathPattern,
+        access: FileAccess,
+    },
+    Network {
+        endpoint: Endpoint,
+        direction: Direction,
+    },
+    Device {
+        path: std::path::PathBuf,
+    },
+}
+
+/// Explicit default access — avoids implementation drift (guest-side
+/// hardcoding). Deny is the fail-safe default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DefaultAccess {
+    #[default]
+    #[serde(rename = "deny")]
+    Deny,
+    #[serde(rename = "allow")]
+    Allow,
+}
+
+/// Which events to audit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditSpec {
+    pub deny: bool,
+    pub exec: bool,
+    pub resource: bool,
+}
+
+/// Sandbox-level policy: logical capability set + resource limits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxPolicy {
+    pub capabilities: Vec<Capability>,
+    pub limits: ResourceLimits,
+    #[serde(default)]
+    pub default: DefaultAccess,
+    #[serde(default)]
+    pub audit: AuditSpec,
+    #[serde(default)]
+    pub version: u32,
+}
+
+impl SandboxPolicy {
+    /// True when the capability set grants `path` access at or above
+    /// `need` (prefix patterns cover their subtrees).
+    pub fn grants_path(&self, path: &std::path::Path, need: FileAccess) -> bool {
+        self.capabilities.iter().any(|c| match c {
+            Capability::File { path: p, access } => {
+                access_ge(*access, need) && pattern_matches(p, path)
+            }
+            _ => false,
+        })
+    }
+
+    /// Resource limits must not exceed the enclosing VM's physical quota.
+    pub fn validate_with_vm(&self, vm: &VmPolicy) -> Result<(), String> {
+        if let Some(mem) = self.limits.memory_mb {
+            if mem > vm.resources.memory_mb {
+                return Err(format!(
+                    "sandbox memory limit {} MB exceeds VM quota {} MB",
+                    mem, vm.resources.memory_mb
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn access_ge(have: FileAccess, need: FileAccess) -> bool {
+    use FileAccess::*;
+    matches!(
+        (have, need),
+        (ReadWrite, _) | (Execute, Execute) | (Read, Read)
+    )
+}
+
+fn pattern_matches(p: &PathPattern, path: &std::path::Path) -> bool {
+    match p {
+        PathPattern::Exact(e) => e == path,
+        PathPattern::Prefix(prefix) => path.starts_with(prefix),
+    }
+}
+
+/// VM-level physical resources (the sandbox limits' upper bound).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmResources {
+    pub cpus: u8,
+    pub memory_mb: u64,
+    pub max_cpus: Option<u8>,
+    pub max_memory_mb: Option<u64>,
+    pub bandwidth_kbps: Option<u64>,
+}
+
+/// VM network topology.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VmNetwork {
+    None,
+    Nat,
+    Bridge { iface: String },
+}
+
+/// VM-level policy: physical resources + topology. Owned by VmAdapter;
+/// `VmSpec` remains the create-time implementation carrier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmPolicy {
+    pub resources: VmResources,
+    pub network: VmNetwork,
+    pub storage: VmStorage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmStorage {
+    pub upper: UpperPolicy,
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    fn base_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            capabilities: vec![
+                Capability::File {
+                    path: PathPattern::Prefix("/usr".into()),
+                    access: FileAccess::Read,
+                },
+                Capability::File {
+                    path: PathPattern::Prefix("/tmp".into()),
+                    access: FileAccess::ReadWrite,
+                },
+            ],
+            limits: ResourceLimits {
+                memory_mb: Some(256),
+                ..Default::default()
+            },
+            default: DefaultAccess::Deny,
+            audit: AuditSpec {
+                deny: true,
+                ..Default::default()
+            },
+            version: 1,
+        }
+    }
+
+    fn vm_policy() -> VmPolicy {
+        VmPolicy {
+            resources: VmResources {
+                cpus: 2,
+                memory_mb: 1024,
+                max_cpus: Some(4),
+                max_memory_mb: Some(2048),
+                bandwidth_kbps: None,
+            },
+            network: VmNetwork::Nat,
+            storage: VmStorage {
+                upper: UpperPolicy::Ephemeral,
+            },
+        }
+    }
+
+    #[test]
+    fn policy_roundtrip_survives_serde() {
+        let p = base_policy();
+        let json = serde_json::to_string(&p).unwrap();
+        let back: SandboxPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn default_access_defaults_to_deny() {
+        // An omitted `default` must deserialize to Deny (fail-safe).
+        let json = r#"{"capabilities":[],"limits":{}}"#;
+        let p: SandboxPolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(p.default, DefaultAccess::Deny);
+        assert_eq!(p.version, 0);
+    }
+
+    #[test]
+    fn grants_path_honors_prefix_and_access() {
+        let p = base_policy();
+        assert!(p.grants_path(std::path::Path::new("/usr/bin/python3"), FileAccess::Read));
+        assert!(!p.grants_path(
+            std::path::Path::new("/usr/bin/python3"),
+            FileAccess::ReadWrite
+        ));
+        assert!(!p.grants_path(std::path::Path::new("/etc/passwd"), FileAccess::Read));
+        assert!(p.grants_path(std::path::Path::new("/tmp/x"), FileAccess::ReadWrite));
+    }
+
+    #[test]
+    fn empty_capability_set_grants_nothing() {
+        let p = SandboxPolicy {
+            capabilities: vec![],
+            ..base_policy()
+        };
+        assert!(!p.grants_path(std::path::Path::new("/usr"), FileAccess::Read));
+        assert!(!p.grants_path(std::path::Path::new("/tmp"), FileAccess::ReadWrite));
+    }
+
+    #[test]
+    fn sandbox_limits_cannot_exceed_vm_quota() {
+        let vm = vm_policy();
+        let ok = base_policy(); // 256 MB <= 1024 MB
+        assert!(ok.validate_with_vm(&vm).is_ok());
+        let over = SandboxPolicy {
+            limits: ResourceLimits {
+                memory_mb: Some(2048),
+                ..Default::default()
+            },
+            ..base_policy()
+        };
+        let err = over.validate_with_vm(&vm).unwrap_err();
+        assert!(err.contains("exceeds VM quota"), "{err}");
+    }
 }

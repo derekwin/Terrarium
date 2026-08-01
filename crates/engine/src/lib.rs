@@ -6,6 +6,7 @@
 pub mod commands;
 pub mod daemon;
 pub mod manager;
+pub mod policy;
 
 use std::sync::Arc;
 
