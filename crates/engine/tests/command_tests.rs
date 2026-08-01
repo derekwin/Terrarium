@@ -14,7 +14,7 @@ use adapter_traits::{
 use common::MockVmAdapter;
 use terrarium_engine::commands::execute;
 use terrarium_engine::manager::VmManager;
-use terrarium_engine::policy::{default_sandbox_policy, merge_policies};
+use terrarium_engine::policy::default_sandbox_policy;
 use terrarium_protocol::Command;
 
 // ---------------------------------------------------------------------------
@@ -167,7 +167,7 @@ async fn test_exec_sandbox_flag() {
 /// Exec with policy + sandbox:true → policy is forwarded to the adapter
 /// as base ∪ user: the engine default capability set is preserved and the
 /// user's grants are appended on top (limits: user wins). This mirrors
-/// `merge_policies(default_sandbox_policy(), user)`.
+/// `default_sandbox_policy().merged_with(&user)`.
 #[tokio::test]
 async fn test_exec_policy_forwarded() {
     let adapter = MockVmAdapter::new()
@@ -203,7 +203,7 @@ async fn test_exec_policy_forwarded() {
     assert!(log[0].sandbox);
     assert_eq!(
         log[0].policy.as_ref(),
-        Some(&merge_policies(default_sandbox_policy(), policy))
+        Some(&default_sandbox_policy().merged_with(&policy))
     );
 }
 

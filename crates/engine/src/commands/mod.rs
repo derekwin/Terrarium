@@ -15,7 +15,7 @@ mod vm;
 use std::sync::Arc;
 
 use crate::manager::VmManager;
-use crate::policy::{default_sandbox_policy, merge_policies};
+use crate::policy::default_sandbox_policy;
 use adapter_traits::{
     AdapterError, ExecCommand, ExecOpts, ExecResult, SandboxHandle, SandboxPolicy, VmHandle,
     VmName, VmSpec,
@@ -107,7 +107,7 @@ pub(crate) async fn run_exec(
     // policy-free; when sandboxed, the effective policy is base ∪ user.
     let policy = if sandbox {
         Some(match per_call.clone().or(stored) {
-            Some(user) => merge_policies(default_sandbox_policy(), user),
+            Some(user) => default_sandbox_policy().merged_with(&user),
             None => default_sandbox_policy(),
         })
     } else {
@@ -266,7 +266,7 @@ pub(crate) fn prepare_blocking_exec(
     // policy instead; this effective policy serves the direct paths.
     let policy = if sandbox {
         Some(match per_call.clone().or(stored_policy) {
-            Some(user) => merge_policies(default_sandbox_policy(), user),
+            Some(user) => default_sandbox_policy().merged_with(&user),
             None => default_sandbox_policy(),
         })
     } else {

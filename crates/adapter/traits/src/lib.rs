@@ -647,6 +647,50 @@ impl SandboxPolicy {
         }
         Ok(())
     }
+
+    /// Combine this policy (the base layer) with `other` (the user layer):
+    /// the effective capabilities are the UNION (base first, `other`
+    /// appended, deduplicated) so a user granting only their task's paths
+    /// still gets the base read-only system set. Limits: `other`'s values
+    /// win when present, else this policy's (per-field: memory_mb, procs,
+    /// fds, bandwidth_kbps, cpu_shares). `default` and `version` follow
+    /// `other` when present, else this policy's; `audit` is the OR of both
+    /// per flag.
+    ///
+    /// This is the base∪user merge: the engine injects its default policy
+    /// as the base layer under a user's sandbox policy
+    /// (`default_sandbox_policy().merged_with(&user)`), and backends union
+    /// a per-call `policy_override` onto the policy bound at `create`
+    /// (base first, override capabilities appended — never a replace).
+    pub fn merged_with(&self, other: &SandboxPolicy) -> SandboxPolicy {
+        let mut capabilities = self.capabilities.clone();
+        for cap in &other.capabilities {
+            if !capabilities.contains(cap) {
+                capabilities.push(cap.clone());
+            }
+        }
+        SandboxPolicy {
+            capabilities,
+            limits: ResourceLimits {
+                memory_mb: other.limits.memory_mb.or(self.limits.memory_mb),
+                procs: other.limits.procs.or(self.limits.procs),
+                fds: other.limits.fds.or(self.limits.fds),
+                bandwidth_kbps: other.limits.bandwidth_kbps.or(self.limits.bandwidth_kbps),
+                cpu_shares: other.limits.cpu_shares.or(self.limits.cpu_shares),
+            },
+            default: other.default,
+            audit: AuditSpec {
+                deny: other.audit.deny || self.audit.deny,
+                exec: other.audit.exec || self.audit.exec,
+                resource: other.audit.resource || self.audit.resource,
+            },
+            version: if other.version != 0 {
+                other.version
+            } else {
+                self.version
+            },
+        }
+    }
 }
 
 fn is_absolute_path(pattern: &PathPattern) -> bool {
@@ -807,5 +851,30 @@ mod policy_tests {
         };
         let err = over.validate_with_vm(&vm).unwrap_err();
         assert!(err.contains("exceeds VM quota"), "{err}");
+    }
+
+    #[test]
+    fn merged_with_unions_caps_and_user_limits_win() {
+        let base = base_policy(); // /usr read, /tmp RW, mem 256MB
+        let user = SandboxPolicy {
+            capabilities: vec![Capability::File {
+                path: PathPattern::Prefix("/opt".into()),
+                access: FileAccess::ReadWrite,
+            }],
+            limits: ResourceLimits {
+                memory_mb: Some(512),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = base.merged_with(&user);
+        // Base capabilities are preserved (default policy as base layer).
+        assert!(merged.grants_path(std::path::Path::new("/usr/bin/ls"), FileAccess::Read));
+        assert!(merged.grants_path(std::path::Path::new("/tmp/x"), FileAccess::ReadWrite));
+        // User capabilities are appended (union, not replace).
+        assert!(merged.grants_path(std::path::Path::new("/opt/x"), FileAccess::ReadWrite));
+        // User limits win.
+        assert_eq!(merged.limits.memory_mb, Some(512));
+        assert!(merged.capabilities.len() >= base.capabilities.len());
     }
 }

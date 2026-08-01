@@ -15,8 +15,6 @@ use adapter_traits::{
 };
 use async_trait::async_trait;
 
-use crate::policy::merge_policies;
-
 /// Default sandbox backend: wraps the engine's existing guest-sandlock
 /// exec path. Stateless — each `create` produces a bound [`SandboxHandle`].
 #[derive(Default)]
@@ -71,7 +69,7 @@ impl SandboxHandle for GuestSandlockHandle {
         // base-union-user merge: bound capabilities preserved, override
         // capabilities appended, override limits win).
         let policy = match &cmd.policy_override {
-            Some(override_policy) => merge_policies(self.policy.clone(), override_policy.clone()),
+            Some(override_policy) => self.policy.merged_with(override_policy),
             None => self.policy.clone(),
         };
 

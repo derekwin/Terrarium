@@ -15,7 +15,7 @@ use adapter_traits::{
 use common::{MockSandboxAdapter, MockVmAdapter};
 use terrarium_engine::commands::execute;
 use terrarium_engine::manager::VmManager;
-use terrarium_engine::policy::{default_sandbox_policy, merge_policies};
+use terrarium_engine::policy::default_sandbox_policy;
 use terrarium_protocol::Command;
 
 /// Build a capability-based policy fixture (deny default, version 1).
@@ -84,7 +84,7 @@ async fn test_sandbox_create_binds_handle_with_effective_policy() {
     assert_eq!(log.len(), 1, "one create call");
     assert_eq!(
         log[0].spec.policy.as_ref(),
-        Some(&merge_policies(default_sandbox_policy(), user)),
+        Some(&default_sandbox_policy().merged_with(&user)),
         "create must bind the effective policy"
     );
 

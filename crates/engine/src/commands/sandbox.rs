@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::{apply_system_base, build_spec, run_exec, DEFAULT_SYSTEM};
 use crate::manager::{SandboxRecord, VmManager};
-use crate::policy::{default_sandbox_policy, merge_policies};
+use crate::policy::default_sandbox_policy;
 use adapter_traits::{ResourceLimits, SandboxSpec, VmName};
 use terrarium_protocol::{Command, Response};
 
@@ -164,7 +164,7 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
         Err(e) => return Response::err(format!("invalid sandbox name: {}", e)),
     };
     let effective = match policy.clone() {
-        Some(user) => merge_policies(default_sandbox_policy(), user),
+        Some(user) => default_sandbox_policy().merged_with(&user),
         None => default_sandbox_policy(),
     };
     let spec = SandboxSpec {
