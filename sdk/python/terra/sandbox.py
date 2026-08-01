@@ -74,7 +74,12 @@ class FilesClient:
         self._sb = sandbox
 
     def read(self, path: str) -> str:
-        """Read a file from the sandbox and return its content as a string."""
+        """Read a file from the sandbox and return its content as a string.
+
+        Text-only: binary files must be fetched with :meth:`download`
+        (the exec stdout channel carries UTF-8 text, so non-text bytes
+        are corrupted).
+        """
         result = self._sb.exec(["cat", path])
         return result.stdout
 
