@@ -221,17 +221,16 @@ impl VmManager {
         let mut dead = Vec::new();
         let names: Vec<VmName> = self.vms.keys().cloned().collect();
         for name in names {
-            let remove = {
-                if let Some(handle) = self.vms.get_mut(&name) {
-                    match Arc::get_mut(handle) {
-                        Some(h) => !h.is_alive(),
-                        None => false,
-                    }
-                } else {
-                    false
-                }
-            };
-            if remove {
+            // `is_alive(&self)` — unlike the old `Arc::get_mut` gate, a VM
+            // whose handle Arc is shared by an in-flight background exec
+            // task is still probed, so dead VMs get reaped even while a
+            // session task holds a clone.
+            let dead_vm = self
+                .vms
+                .get(&name)
+                .map(|handle| !handle.is_alive())
+                .unwrap_or(false);
+            if dead_vm {
                 tracing::warn!(%name, "Reaping dead VM");
                 self.unregister(name.as_ref());
                 dead.push(name);

@@ -36,7 +36,10 @@ pub(crate) async fn spawn_vm(
 
 struct ChVmHandle {
     name: VmName,
-    child: Child,
+    /// CH subprocess; behind a Mutex so `is_alive(&self)` can `try_wait`
+    /// without exclusive `&mut` access (reap must work while background
+    /// exec tasks hold a second handle Arc).
+    child: Mutex<Child>,
     client: ChClient,
     fs: Mutex<Option<FsStack>>,
     /// Device id of a hot-plugged fs device (needed for remove-device).
@@ -96,7 +99,7 @@ impl ChVmHandle {
 
         Ok(Self {
             name,
-            child,
+            child: Mutex::new(child),
             client,
             fs: Mutex::new(fs),
             fs_device_id: Mutex::new(None),
@@ -280,11 +283,17 @@ impl VmHandle for ChVmHandle {
     }
 
     fn pid(&self) -> u32 {
-        self.child.id()
+        self.child.lock().unwrap_or_else(|e| e.into_inner()).id()
     }
 
-    fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+    fn is_alive(&self) -> bool {
+        matches!(
+            self.child
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .try_wait(),
+            Ok(None)
+        )
     }
 }
 
@@ -332,8 +341,10 @@ impl ChVmHandle {
 impl Drop for ChVmHandle {
     fn drop(&mut self) {
         // Can't call async methods in Drop. Best-effort kill.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(child);
         let socket = format!("/tmp/terra-{}.sock", self.name);
         let _ = std::fs::remove_file(&socket);
         // CH creates a lock file next to the API socket — remove it too,

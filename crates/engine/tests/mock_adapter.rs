@@ -40,7 +40,7 @@ mod tests {
     async fn test_is_alive_and_shutdown() {
         let adapter = MockVmAdapter::new().with_alive(true);
         let spec = test_spec();
-        let mut handle = adapter.create(&spec).await.unwrap();
+        let handle = adapter.create(&spec).await.unwrap();
 
         assert!(handle.is_alive());
 
@@ -120,7 +120,7 @@ mod tests {
             .with_fs_attached(true);
 
         let spec = test_spec();
-        let mut handle = adapter.create(&spec).await.unwrap();
+        let handle = adapter.create(&spec).await.unwrap();
 
         assert_eq!(handle.pid(), 42);
         assert!(handle.is_alive());

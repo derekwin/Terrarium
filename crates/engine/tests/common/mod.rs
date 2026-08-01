@@ -274,7 +274,7 @@ impl VmHandle for MockVmHandle {
         self.inner.lock().unwrap().pid
     }
 
-    fn is_alive(&mut self) -> bool {
+    fn is_alive(&self) -> bool {
         self.inner.lock().unwrap().alive
     }
 }

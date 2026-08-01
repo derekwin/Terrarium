@@ -436,7 +436,9 @@ pub trait VmHandle: Send + Sync {
     fn pid(&self) -> u32;
     /// Check if the VM/sandbox process is still running.
     /// Uses `try_wait()` on the underlying child process.
-    fn is_alive(&mut self) -> bool;
+    /// `&self` (not `&mut`) so reap can probe handles shared by
+    /// in-flight background exec tasks.
+    fn is_alive(&self) -> bool;
 }
 
 // ---------------------------------------------------------------------------

@@ -358,3 +358,52 @@ async fn test_get_vm() {
     // Unknown VM returns None.
     assert!(mgr.get("no-such-vm").is_none());
 }
+
+#[tokio::test]
+async fn test_reap_dead_vm_shared_by_background_task() {
+    // A dead VM whose handle Arc is shared by an in-flight background
+    // exec task must still be reaped (is_alive(&self) probes shared
+    // handles; the old Arc::get_mut gate skipped them).
+    use common::MockVmAdapter;
+    use std::sync::Arc;
+    use terrarium_engine::manager::VmManager;
+    use tokio::sync::Notify;
+
+    let gate = Arc::new(Notify::new());
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_alive(false) // VM process has died
+        .with_exec_gate(gate.clone());
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+    mgr.spawn(test_spec("dead-vm")).await.unwrap();
+
+    // Background exec: the spawned task clones the handle Arc and parks
+    // on the gate, keeping strong_count >= 2 for the whole test.
+    mgr.exec_background(
+        "dead-vm",
+        &["sleep".into(), "100".into()],
+        60,
+        false,
+        "sess-1",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Give the spawned task a moment to clone the handle.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let reaped = mgr.reap_dead();
+    assert!(
+        reaped.iter().any(|n| n.as_ref() == "dead-vm"),
+        "dead VM shared by a background task must still be reaped: {reaped:?}"
+    );
+    assert!(mgr.get("dead-vm").is_none());
+    // Session for the dead VM is terminated, not left running.
+    assert_eq!(mgr.session_status("sess-1").unwrap().status, "terminated");
+
+    gate.notify_one();
+    drop(mgr);
+}
