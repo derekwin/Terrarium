@@ -19,6 +19,30 @@ from pathlib import Path
 _ROOT: Path | None = None
 
 
+def _default_root() -> Path:
+    """The managed root for the current process.
+
+    Follows the service-data convention (docker: /var/lib/docker):
+    the default is a system-wide shared data directory (/var/lib/terra)
+    created by installation, so a root daemon and every user's CLI see
+    one consistent asset tree. A non-root user on a machine without the
+    system install falls back to their own ~/.local/share/terra
+    (zero-config development). TERRA_HOME overrides everything.
+    """
+    if os.geteuid() == 0 or _writable(Path("/var/lib/terra")):
+        return Path("/var/lib/terra")
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / "terra"
+
+
+def _writable(p: Path) -> bool:
+    try:
+        return os.access(p, os.W_OK)
+    except OSError:
+        return False
+
+
 def root() -> Path:
     """Managed root: $TERRA_HOME or ~/.local/share/terra (created lazily)."""
     global _ROOT
@@ -27,9 +51,7 @@ def root() -> Path:
         if env:
             _ROOT = Path(env)
         else:
-            xdg = os.environ.get("XDG_DATA_HOME")
-            base = Path(xdg) if xdg else Path.home() / ".local" / "share"
-            _ROOT = base / "terra"
+            _ROOT = _default_root()
     _ROOT.mkdir(parents=True, exist_ok=True)
     return _ROOT
 
