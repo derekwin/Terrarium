@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
+use std::sync::Arc;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -263,11 +264,19 @@ impl ExecOpts {
 }
 
 /// Command to execute inside a sandbox.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `policy_override` is a per-call override on a bound session: it is
+/// unioned onto the policy bound at [`SandboxAdapter::create`] by the
+/// backend (base first, override capabilities appended — never a replace).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecCommand {
     pub args: Vec<String>,
     pub work_dir: Option<String>,
     pub env: Option<std::collections::HashMap<String, String>>,
+    /// Per-call policy override on the session's bound policy. Optional:
+    /// `None` runs with exactly the bound policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_override: Option<SandboxPolicy>,
 }
 
 /// Result of a command execution.
@@ -425,17 +434,34 @@ pub trait VmHandle: Send + Sync {
 
 #[async_trait]
 pub trait SandboxAdapter: Send + Sync {
+    /// Create a session: binds a VM plus its effective policy into a
+    /// session context (D1 isolation / D7 policy — see
+    /// docs/design/agent-exec-env-boundaries.md). The policy is understood
+    /// host-side and translated into the backend's isolation primitives
+    /// (default: shipped to the guest sandlock via vsock). This is the
+    /// L2 reference-monitor entry (Complete Mediation): every command
+    /// executed on the returned handle runs inside this bound context.
+    ///
+    /// The adapter receives an owned `Arc<dyn VmHandle>` because a session
+    /// backend needs a live reference to its execution substrate at
+    /// exec() time — a `&dyn` borrow cannot outlive `create`.
     async fn create(
         &self,
-        vm: &dyn VmHandle,
+        vm: Arc<dyn VmHandle>,
         spec: &SandboxSpec,
     ) -> Result<Box<dyn SandboxHandle>, AdapterError>;
 }
 
 #[async_trait]
 pub trait SandboxHandle: Send + Sync {
+    /// Run a command within the bound session context. The policy is fixed
+    /// at create time; a per-call `policy_override` on the command is
+    /// unioned onto the bound policy by the backend (never a replace).
     async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, AdapterError>;
+    /// Install persistent tools/state in the session, if the backend has
+    /// any (no-op for per-exec confinement backends like guest sandlock).
     async fn setup(&self, tools: &[String]) -> Result<(), AdapterError>;
+    /// Tear down the session and release any backend resources.
     async fn destroy(&self) -> Result<(), AdapterError>;
 }
 

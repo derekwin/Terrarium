@@ -22,6 +22,7 @@ use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -71,7 +72,7 @@ impl SandlockAdapter {
 impl SandboxAdapter for SandlockAdapter {
     async fn create(
         &self,
-        _vm: &dyn VmHandle,
+        _vm: Arc<dyn VmHandle>,
         spec: &SandboxSpec,
     ) -> Result<Box<dyn SandboxHandle>, AdapterError> {
         if !Self::is_supported() {
