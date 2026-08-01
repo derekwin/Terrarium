@@ -8,10 +8,10 @@
 
 use serde::{Deserialize, Serialize};
 
-// The single definition of the exec policy lives in adapter-traits (it is
+// The single definition of the sandbox policy lives in adapter-traits (it is
 // part of the VmHandle::exec contract); re-exported here so protocol
 // clients and the engine share one type instead of two divergent ones.
-pub use adapter_traits::ExecPolicy;
+pub use adapter_traits::SandboxPolicy;
 
 /// A command sent from a client to the engine daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,11 +86,12 @@ pub struct Command {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<bool>,
 
-    // exec / sandbox_create / sandbox_exec: per-exec sandlock policy.
-    // Only valid for sandboxed exec; sandbox_create stores it so later
-    // sandbox_exec calls inherit it (a per-call policy overrides).
+    // exec / sandbox_create / sandbox_exec: per-exec sandbox policy
+    // (capability-based, default deny). Only valid for sandboxed exec;
+    // sandbox_create stores it so later sandbox_exec calls inherit it
+    // (a per-call policy overrides).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy: Option<ExecPolicy>,
+    pub policy: Option<SandboxPolicy>,
 
     // session commands: session_id for session_status / session_kill
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -255,8 +256,8 @@ impl Command {
         self
     }
 
-    /// Builder: set the per-exec sandlock policy.
-    pub fn with_policy(mut self, policy: ExecPolicy) -> Self {
+    /// Builder: set the per-exec sandbox policy (capability-based).
+    pub fn with_policy(mut self, policy: SandboxPolicy) -> Self {
         self.policy = Some(policy);
         self
     }
@@ -339,35 +340,47 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adapter_traits::{
+        AuditSpec, Capability, DefaultAccess, Direction, Endpoint, FileAccess, PathPattern,
+        ResourceLimits,
+    };
 
-    /// Command with a full policy survives a JSON roundtrip unchanged.
+    /// Command with a full SandboxPolicy survives a JSON roundtrip unchanged.
     #[test]
     fn policy_roundtrip() {
+        let policy = SandboxPolicy {
+            capabilities: vec![
+                Capability::File {
+                    path: PathPattern::Prefix("/opt/data".into()),
+                    access: FileAccess::Read,
+                },
+                Capability::Network {
+                    endpoint: Endpoint {
+                        host: "api.openai.com".into(),
+                        port: Some(443),
+                    },
+                    direction: Direction::Outbound,
+                },
+            ],
+            limits: ResourceLimits {
+                memory_mb: Some(512),
+                ..Default::default()
+            },
+            default: DefaultAccess::Deny,
+            audit: AuditSpec {
+                deny: true,
+                ..Default::default()
+            },
+            version: 1,
+        };
         let cmd = Command::new("sandbox_exec")
             .with_id("sb-1234abcd")
             .with_args(vec!["echo".into(), "hi".into()])
             .with_sandbox(true)
-            .with_policy(ExecPolicy {
-                read_paths: vec!["/opt/data".into()],
-                write_paths: vec!["/output".into()],
-                net_allow: Some(vec!["api.openai.com:443".into(), "pypi.org".into()]),
-                memory_mb: Some(512),
-                procs: Some(20),
-            });
+            .with_policy(policy.clone());
         let json = serde_json::to_string(&cmd).unwrap();
         let back: Command = serde_json::from_str(&json).unwrap();
-        let policy = back.policy.expect("policy must survive roundtrip");
-        assert_eq!(policy.read_paths, vec!["/opt/data"]);
-        assert_eq!(policy.write_paths, vec!["/output"]);
-        assert_eq!(
-            policy.net_allow,
-            Some(vec![
-                "api.openai.com:443".to_string(),
-                "pypi.org".to_string()
-            ])
-        );
-        assert_eq!(policy.memory_mb, Some(512));
-        assert_eq!(policy.procs, Some(20));
+        assert_eq!(back.policy, Some(policy));
     }
 
     /// Absent policy → None, and the key is omitted on serialization.
@@ -379,27 +392,20 @@ mod tests {
         assert!(!json.contains("policy"), "None policy must be omitted");
     }
 
-    /// A present-but-empty net_allow list is distinct from absent at the
-    /// serde level (Some(vec![]) vs None), so it roundtrips faithfully.
-    /// NOTE: an empty list is a footgun (zero --net-allow flags =
-    /// unrestricted network) — the engine and guest-proxy validation
-    /// layers reject it; the protocol layer only carries it.
+    /// Omitted `default` inside the policy deserializes to Deny (fail-safe).
     #[test]
-    fn empty_net_allow_is_preserved() {
+    fn default_deny_when_omitted() {
         let cmd: Command =
-            serde_json::from_str(r#"{"command":"exec","policy":{"net_allow":[]}}"#).unwrap();
-        assert_eq!(cmd.policy.as_ref().unwrap().net_allow, Some(vec![]));
-        let json = serde_json::to_string(&cmd).unwrap();
-        let back: Command = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.policy.unwrap().net_allow, Some(vec![]));
+            serde_json::from_str(r#"{"command":"exec","policy":{"capabilities":[]}}"#).unwrap();
+        assert_eq!(cmd.policy.as_ref().unwrap().default, DefaultAccess::Deny);
     }
 
     /// Unknown fields inside the policy object are rejected
-    /// (deny_unknown_fields).
+    /// (deny_unknown_fields on SandboxPolicy).
     #[test]
     fn policy_rejects_unknown_fields() {
         let res: Result<Command, _> =
-            serde_json::from_str(r#"{"command":"exec","policy":{"read_paths":["/x"],"bogus":1}}"#);
+            serde_json::from_str(r#"{"command":"exec","policy":{"bogus":1}}"#);
         assert!(res.is_err(), "unknown policy field must be rejected");
     }
 
