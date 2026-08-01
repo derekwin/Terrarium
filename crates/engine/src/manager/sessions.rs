@@ -9,6 +9,12 @@ use adapter_traits::{AdapterError, ExecOpts, ExecPolicy};
 
 use super::VmManager;
 
+/// Cap on retained background sessions. Completed/killed/terminated
+/// records are pruned on insert so a long-running daemon cannot grow the
+/// session map without bound; `session_status` keeps querying the most
+/// recent MAX_RETAINED_SESSIONS.
+const MAX_RETAINED_SESSIONS: usize = 100;
+
 /// Information about a background exec session.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
@@ -51,19 +57,23 @@ impl VmManager {
         let work_dir = work_dir.map(String::from);
         let sessions = self.sessions.clone();
 
-        sessions.lock().unwrap().insert(
-            sid.clone(),
-            SessionInfo {
-                session_id: sid.clone(),
-                vm_name: vm_name.clone(),
-                args: args.clone(),
-                status: "running".to_string(),
-                exit_code: None,
-                stdout: None,
-                stderr: None,
-                sandbox: sandbox_id,
-            },
-        );
+        {
+            let mut sessions = sessions.lock().unwrap();
+            sessions.insert(
+                sid.clone(),
+                SessionInfo {
+                    session_id: sid.clone(),
+                    vm_name,
+                    args: args.clone(),
+                    status: "running".to_string(),
+                    exit_code: None,
+                    stdout: None,
+                    stderr: None,
+                    sandbox: sandbox_id.clone(),
+                },
+            );
+            prune_sessions(&mut sessions);
+        }
 
         tokio::spawn(async move {
             let mut opts = ExecOpts::new(args, timeout_secs)
@@ -147,5 +157,80 @@ impl VmManager {
                 info.status = "terminated".to_string();
             }
         }
+    }
+}
+
+/// Prune the oldest non-running session when the map exceeds the cap,
+/// so the daemon cannot grow without bound across many background execs.
+/// Running sessions are never pruned (their results are still pending);
+/// among terminal records the exact oldest is dropped (HashMap order is
+/// arbitrary, but any terminal record is equally stale for the cap).
+fn prune_sessions(sessions: &mut std::collections::HashMap<String, SessionInfo>) {
+    while sessions.len() > MAX_RETAINED_SESSIONS {
+        let victim = sessions
+            .iter()
+            .find(|(_, v)| v.status != "running")
+            .map(|(k, _)| k.clone());
+        match victim {
+            Some(k) => {
+                sessions.remove(&k);
+            }
+            None => break, // all running: never prune an active session
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(sid: &str, status: &str) -> SessionInfo {
+        SessionInfo {
+            session_id: sid.into(),
+            vm_name: "tenant-x".into(),
+            args: vec!["echo".into()],
+            status: status.into(),
+            exit_code: None,
+            stdout: None,
+            stderr: None,
+            sandbox: None,
+        }
+    }
+
+    #[test]
+    fn prune_removes_terminal_sessions_over_cap() {
+        let mut m = std::collections::HashMap::new();
+        // 1 running + MAX_RETAINED_SESSIONS + 5 completed = over cap
+        m.insert("run".into(), info("run", "running"));
+        for i in 0..(MAX_RETAINED_SESSIONS + 5) {
+            m.insert(format!("done-{i}"), info(&format!("done-{i}"), "completed"));
+        }
+        prune_sessions(&mut m);
+        assert!(m.len() <= MAX_RETAINED_SESSIONS);
+        assert!(m.contains_key("run"), "running session must survive");
+    }
+
+    #[test]
+    fn prune_never_drops_running_sessions() {
+        let mut m = std::collections::HashMap::new();
+        for i in 0..(MAX_RETAINED_SESSIONS + 10) {
+            m.insert(format!("run-{i}"), info(&format!("run-{i}"), "running"));
+        }
+        prune_sessions(&mut m);
+        assert_eq!(
+            m.len(),
+            MAX_RETAINED_SESSIONS + 10,
+            "all running, none pruned"
+        );
+    }
+
+    #[test]
+    fn prune_under_cap_is_noop() {
+        let mut m = std::collections::HashMap::new();
+        for i in 0..3 {
+            m.insert(format!("s-{i}"), info(&format!("s-{i}"), "completed"));
+        }
+        prune_sessions(&mut m);
+        assert_eq!(m.len(), 3);
     }
 }
