@@ -258,9 +258,24 @@ def cmd_sandbox_exec(args) -> int:
             cmd_args = ["sh", "-c", " && ".join(prefix_parts + [inner])]
 
         # Sandboxed by default (engine default too); --no-sandbox opts out.
+        policy = _build_policy_from_args(args)
+        if args.detach:
+            # Background exec: return immediately with a session_id (poll via `sandbox session status|kill`).
+            resp = c.sandbox_exec(args.id, cmd_args, args.timeout,
+                                  sandbox=not args.no_sandbox,
+                                  exec_mode="background",
+                                  policy=policy)
+            return _output(
+                {
+                    "session_id": resp.get("session_id"),
+                    "sandbox": resp.get("sandbox", args.id),
+                    "status": resp.get("status"),
+                },
+                args,
+            )
         resp = c.sandbox_exec(args.id, cmd_args, args.timeout,
                               sandbox=not args.no_sandbox,
-                              policy=_build_policy_from_args(args))
+                              policy=policy)
         return _output_exec(resp, args)
     except TerraError as e:
         msg = str(e)
@@ -390,6 +405,41 @@ def cmd_sandbox_destroy_tenant(args) -> int:
         if "not found" in msg.lower():
             return _err(msg, exit_code=EXIT_NOTFOUND)
         return _err(msg)
+
+
+# ── background exec sessions (from `sandbox exec --detach`) ─────
+
+def cmd_session_status(args) -> int:
+    """Show a background exec session's status."""
+    c = _client(args)
+    try:
+        return _output(c.session_status(args.session_id), args)
+    except TerraError as e:
+        msg = str(e)
+        if "not found" in msg.lower():
+            return _err(msg, exit_code=EXIT_NOTFOUND)
+        return _err(msg)
+
+
+def cmd_session_kill(args) -> int:
+    """Kill a background exec session."""
+    c = _client(args)
+    try:
+        return _output(c.session_kill(args.session_id), args)
+    except TerraError as e:
+        msg = str(e)
+        if "not found" in msg.lower():
+            return _err(msg, exit_code=EXIT_NOTFOUND)
+        return _err(msg)
+
+
+def cmd_session_ls(args) -> int:
+    """List background exec sessions."""
+    c = _client(args)
+    try:
+        return _output(c.session_list(), args)
+    except TerraError as e:
+        return _err(str(e))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1382,7 +1432,8 @@ Common workflows:
                     help="run without sandlock permission isolation")
     sp.add_argument("--net-allow", action="append", metavar="HOST[:PORT]",
                     help="per-call exec policy override: deny-by-default egress except these (repeatable)")
-    sp.add_argument("--detach", action="store_true", help="detached mode (reserved)")
+    sp.add_argument("--detach", action="store_true",
+                    help="run in the background — return a session_id immediately (poll with 'sandbox session status')")
     sp.add_argument("args", nargs=argparse.REMAINDER, help="command and arguments (after --)")
     sp.set_defaults(f=cmd_sandbox_exec)
 
@@ -1408,6 +1459,19 @@ Common workflows:
     sp = sbs.add_parser("destroy-tenant", help="destroy a tenant VM and all its sandboxes")
     sp.add_argument("tenant", help="tenant identifier")
     sp.set_defaults(f=cmd_sandbox_destroy_tenant)
+
+    sp = sbs.add_parser("session", help="background exec sessions (from sandbox exec --detach)")
+    ss = sp.add_subparsers(dest="session_action", required=True)
+
+    sp2 = ss.add_parser("status", help="show a background session's status")
+    sp2.add_argument("session_id", help="background session ID")
+    sp2.set_defaults(f=cmd_session_status)
+
+    sp2 = ss.add_parser("kill", help="kill a background session")
+    sp2.add_argument("session_id", help="background session ID")
+    sp2.set_defaults(f=cmd_session_kill)
+
+    ss.add_parser("ls", help="list background sessions").set_defaults(f=cmd_session_ls)
 
     # ── tool ────────────────────────────────────────────────────────
     tl = sub.add_parser("tool", help="tool layers built on distro templates")

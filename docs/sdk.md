@@ -360,6 +360,10 @@ terra daemon start            # 启动引擎（自动 sudo 提权；--no-root �
 terra sandbox create --template alpine --net    # 输出引擎 id 形如 sb-a3f2b1c4
 terra sandbox ls                                # 引擎注册表中的全部 sandbox
 terra sandbox exec sb-a3f2b1c4 -- echo hi       # 默认 sandlock 沙箱化
+terra sandbox exec sb-a3f2b1c4 --detach -- sleep 60   # 后台执行：立即返回 session_id
+terra sandbox session status <session_id>       # 查询后台会话状态
+terra sandbox session ls                        # 列出全部后台会话
+terra sandbox session kill <session_id>         # 终止后台会话
 terra sandbox metrics sb-a3f2b1c4               # 查看资源（CPU/内存属租户 VM）
 terra sandbox kill sb-a3f2b1c4                  # 终止会话 + 删工作目录，VM 保留
 terra sandbox destroy-tenant <tenant>           # 销毁租户 VM + 全部 sandbox
@@ -401,7 +405,10 @@ terra sandbox create [--template <name>] [--layers L1,L2] [--kernel <var>]
 terra sandbox ls                     # 列出引擎注册表中的 sandbox（含 policy）
 terra sandbox info <id>              # 单个 sandbox（含存入的 policy）
 terra sandbox exec <id> [--cwd PATH] [--env KEY=VALUE] [--timeout SEC]
-                      [--no-sandbox] [--net-allow HOST[:PORT]]... -- COMMAND...
+                      [--no-sandbox] [--detach] [--net-allow HOST[:PORT]]... -- COMMAND...
+terra sandbox session status <session_id>   # 后台会话状态
+terra sandbox session kill <session_id>     # 终止后台会话
+terra sandbox session ls                    # 列出全部后台会话
 terra sandbox cp <src> <dst>    # 本地路径 或 <id>:/path
 terra sandbox resize <id> [--cpu N] [--memory MB]   # 作用于整个租户 VM
 terra sandbox metrics <id>
@@ -414,6 +421,10 @@ terra sandbox destroy-tenant <tenant>   # 销毁租户 VM 及其全部 sandbox
 VM 名回退）。`exec` 默认经 sandlock（Landlock/seccomp）沙箱化执行（同
 Python API 的 `sandboxed=True`）；`--no-sandbox` 为逃生舱。镜像缺少
 sandlock 二进制时报错（先跑 `terra setup` 将其烘焙进系统层）。
+`exec --detach` 后台执行：立即返回 `{session_id, sandbox, status}`，
+会话由引擎跟踪（协议 `session_status`/`session_kill`/`session_list`，
+同 SDK `Sandbox.exec(background=True)`），用 `sandbox session`
+子命令查询/终止。
 
 policy 旗标（`create` 存放、`exec --net-allow` 单次覆盖）对应协议
 `policy` 对象：路径授予须绝对路径且在默认策略上追加；`--net-allow`
