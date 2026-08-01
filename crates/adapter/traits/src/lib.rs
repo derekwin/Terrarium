@@ -199,6 +199,10 @@ pub struct SandboxSpec {
     pub limits: ResourceLimits,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// Capability-based policy for the sandbox; `None` lets the engine
+    /// inject its default (deny-by-default) policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<SandboxPolicy>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,36 +212,6 @@ pub struct ResourceLimits {
     pub procs: Option<u32>,
     pub fds: Option<u32>,
     pub bandwidth_kbps: Option<u64>,
-}
-
-/// Per-exec sandbox policy, applied by sandlock in the guest.
-///
-/// All fields are optional; an absent policy (None at the call site) keeps
-/// the hardcoded guest default. Path grants are APPEND-mode: the default
-/// policy (RO system dirs, RW workdir + /tmp, /dev grants) always applies
-/// and user grants add on top — there is no replace mode.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecPolicy {
-    /// Extra read-only path grants, appended to the default grants.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub read_paths: Vec<String>,
-    /// Extra read-write path grants, appended to the default grants.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub write_paths: Vec<String>,
-    /// sandlock `--net-allow` entries. Absent (None) → network
-    /// unrestricted (current default); present → deny-by-default egress
-    /// with these entries passed through verbatim. Must be non-empty when
-    /// present — an empty list is rejected by the engine/guest validation
-    /// layers (zero flags would silently leave egress unrestricted).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub net_allow: Option<Vec<String>>,
-    /// sandlock `-m <n>M` memory limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_mb: Option<u64>,
-    /// sandlock `-P <n>` process-count limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub procs: Option<u32>,
 }
 
 /// Options for a single [`VmHandle::exec`] call.
@@ -254,8 +228,9 @@ pub struct ExecOpts {
     /// Register the process under this id in the guest so it can be
     /// killed later via `kill_exec`.
     pub exec_id: Option<String>,
-    /// Sandlock policy for this exec (only meaningful with `sandbox`).
-    pub policy: Option<ExecPolicy>,
+    /// Capability-based sandbox policy for this exec (only meaningful with
+    /// `sandbox`). See [`SandboxPolicy`].
+    pub policy: Option<SandboxPolicy>,
 }
 
 impl ExecOpts {
@@ -535,8 +510,10 @@ pub struct AuditSpec {
 
 /// Sandbox-level policy: logical capability set + resource limits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SandboxPolicy {
     pub capabilities: Vec<Capability>,
+    #[serde(default)]
     pub limits: ResourceLimits,
     #[serde(default)]
     pub default: DefaultAccess,
@@ -558,6 +535,71 @@ impl SandboxPolicy {
         })
     }
 
+    /// Validate the capability set: every file/device path must be
+    /// absolute, network endpoints must have a non-empty host and a
+    /// positive port when present, resource limits must be > 0 when set,
+    /// and `DefaultAccess::Allow` is rejected (debug escape hatch only).
+    /// An empty capability set is valid (default-deny).
+    pub fn validate(&self) -> Result<(), String> {
+        for cap in &self.capabilities {
+            match cap {
+                Capability::File { path, access: _ } => {
+                    if !is_absolute_path(path) {
+                        return Err(format!(
+                            "capability file path must be absolute (got '{}')",
+                            path_display(path)
+                        ));
+                    }
+                }
+                Capability::Network { endpoint, .. } => {
+                    if endpoint.host.is_empty() {
+                        return Err("network endpoint host must not be empty".into());
+                    }
+                    if let Some(port) = endpoint.port {
+                        if port == 0 {
+                            return Err("network endpoint port must be > 0".into());
+                        }
+                    }
+                }
+                Capability::Device { path } => {
+                    if !path.starts_with(std::path::Path::new("/")) {
+                        return Err(format!(
+                            "device path must be absolute (got '{}')",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
+        if self.default == DefaultAccess::Allow {
+            return Err(
+                "DefaultAccess::Allow is a debug escape hatch and not allowed in production"
+                    .into(),
+            );
+        }
+        if let Some(m) = self.limits.memory_mb {
+            if m == 0 {
+                return Err("limits.memory_mb must be > 0".into());
+            }
+        }
+        if let Some(p) = self.limits.procs {
+            if p == 0 {
+                return Err("limits.procs must be > 0".into());
+            }
+        }
+        if let Some(f) = self.limits.fds {
+            if f == 0 {
+                return Err("limits.fds must be > 0".into());
+            }
+        }
+        if let Some(b) = self.limits.bandwidth_kbps {
+            if b == 0 {
+                return Err("limits.bandwidth_kbps must be > 0".into());
+            }
+        }
+        Ok(())
+    }
+
     /// Resource limits must not exceed the enclosing VM's physical quota.
     pub fn validate_with_vm(&self, vm: &VmPolicy) -> Result<(), String> {
         if let Some(mem) = self.limits.memory_mb {
@@ -569,6 +611,19 @@ impl SandboxPolicy {
             }
         }
         Ok(())
+    }
+}
+
+fn is_absolute_path(pattern: &PathPattern) -> bool {
+    let path = match pattern {
+        PathPattern::Exact(p) | PathPattern::Prefix(p) => p,
+    };
+    path.starts_with(std::path::Path::new("/"))
+}
+
+fn path_display(pattern: &PathPattern) -> String {
+    match pattern {
+        PathPattern::Exact(p) | PathPattern::Prefix(p) => p.display().to_string(),
     }
 }
 
