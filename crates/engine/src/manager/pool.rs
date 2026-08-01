@@ -155,4 +155,31 @@ impl VmManager {
         tracing::info!(vm = %name, "pool VM released to idle");
         Ok(())
     }
+
+    /// Atomically destroy up to *count* idle pool VMs (claimed slots are
+    /// never touched). Returns the destroyed VM names.
+    ///
+    /// Runs under the single manager lock, closing the client-side scale
+    /// TOCTOU window where a concurrent claim could land on a slot about
+    /// to be destroyed. Growth stays `pool_create` (over-provisioning is
+    /// harmless); shrinking must be atomic because destroying a freshly
+    /// claimed VM would kill a live sandbox.
+    pub async fn pool_shrink(&mut self, count: u32) -> Vec<String> {
+        let mut removed = Vec::new();
+        for _ in 0..count {
+            let idx = match self.pool.iter().position(|s| !s.claimed) {
+                Some(i) => i,
+                None => break, // no more idle slots
+            };
+            let name = self.pool[idx].name.clone();
+            // destroy -> unregister cleans the pool slot, net tracking,
+            // sandbox records and sessions atomically.
+            if self.destroy(&name).await.is_ok() {
+                removed.push(name);
+            } else {
+                break; // VM vanished or other error — stop, retry later
+            }
+        }
+        removed
+    }
 }

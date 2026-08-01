@@ -60,8 +60,10 @@ def scale_pool(
 
     - short of target  → ``pool_create(target - idle)`` (delta only —
       the engine spawns exactly *N new* VMs per call),
-    - over target      → ``vm_destroy`` surplus **idle** slots (never
-      claimed ones; the engine deregisters the pool slot on destroy),
+    - over target      → ``pool_shrink(current - target)`` — an
+      **atomic engine-side** shrink that destroys surplus idle slots
+      under the manager lock, so a concurrent claim can never land on a
+      slot about to be destroyed (closes the client-side TOCTOU),
     - at target        → no-op.
 
     Returns a summary dict ``{"idle", "created", "destroyed"}``.
@@ -80,9 +82,8 @@ def scale_pool(
         resp = client.pool_create(target - current, kernel=kernel, net=net)
         created = list(resp.get("created", []))
     elif current > target:
-        destroyed = idle[: current - target]
-        for name in destroyed:
-            client.vm_destroy(name)
+        resp = client.pool_shrink(current - target)
+        destroyed = list(resp.get("removed", []))
     return {"idle": target, "created": created, "destroyed": destroyed}
 
 

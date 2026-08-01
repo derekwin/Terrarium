@@ -87,3 +87,9 @@ pub(crate) async fn cmd_pool_release(mgr: &mut VmManager, cmd: Command) -> Respo
         Err(e) => Response::err(e.to_string()),
     }
 }
+
+pub(crate) async fn cmd_pool_shrink(mgr: &mut VmManager, cmd: Command) -> Response {
+    let count = cmd.pool_size.unwrap_or(1);
+    let removed = mgr.pool_shrink(count).await;
+    Response::ok(serde_json::json!({"removed": removed, "count": removed.len()}))
+}

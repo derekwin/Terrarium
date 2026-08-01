@@ -252,6 +252,7 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "pool_list" => pool::cmd_pool_list(mgr),
         "pool_claim" => pool::cmd_pool_claim(mgr, cmd).await,
         "pool_release" => pool::cmd_pool_release(mgr, cmd).await,
+        "pool_shrink" => pool::cmd_pool_shrink(mgr, cmd).await,
         "session_status" => session::cmd_session_status(mgr, cmd),
         "session_kill" => session::cmd_session_kill(mgr, cmd).await,
         "session_list" => session::cmd_session_list(mgr),

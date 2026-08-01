@@ -99,14 +99,14 @@ def test_scale_shrink_destroys_idle_only():
     }
     pool = _pool(client, size=3)
     client.reset_mock()
+    client.pool_shrink.return_value = {"removed": ["pool-0", "pool-1"], "count": 2}
 
     pool.scale(1)
 
-    # surplus = 3 idle - 1 target = 2 → destroy the first two idle slots
-    assert client.vm_destroy.call_args_list == [call("pool-0"), call("pool-1")]
-    # claimed slots are never touched by a scale-down
-    for c in client.vm_destroy.call_args_list:
-        assert c.args[0] not in ("pool-3", "pool-4")
+    # surplus = 3 idle - 1 target = 2 → engine-side atomic shrink
+    assert client.pool_shrink.call_args.args == (2,)
+    # claimed slots are never touched by a scale-down (engine guarantees it)
+    client.vm_destroy.assert_not_called()
     client.pool_create.assert_not_called()
     assert pool._size == 1
 
@@ -169,8 +169,10 @@ def test_scale_pool_module_level_shrink_destroys():
         "count": 4,
     }
 
+    client.pool_shrink.return_value = {"removed": ["pool-0"], "count": 1}
     out = scale_pool(client, 2)
 
-    # 3 idle - 2 target = 1 surplus → destroy the first idle slot only
-    assert client.vm_destroy.call_args_list == [call("pool-0")]
+    # 3 idle - 2 target = 1 surplus → engine-side atomic shrink of 1
+    assert client.pool_shrink.call_args.args == (1,)
     assert out["destroyed"] == ["pool-0"]
+    client.vm_destroy.assert_not_called()

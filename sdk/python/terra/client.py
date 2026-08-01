@@ -199,6 +199,15 @@ class TerraClient:
         """Release a claimed pool VM back to idle."""
         return self._send({"command": "pool_release", "name": name})
 
+    def pool_shrink(self, count: int) -> dict:
+        """Atomically destroy *count* idle pool VMs (engine-side).
+
+        Claimed slots are never touched; runs under the engine's manager
+        lock, closing the client-side scale TOCTOU window. Returns
+        ``{"removed": [names], "count": N}``.
+        """
+        return self._send({"command": "pool_shrink", "pool_size": count})
+
     def vm_detach_fs(self, name: str) -> dict:
         """Detach a previously attached layered filesystem."""
         return self._send({"command": "detach_fs", "name": name})
