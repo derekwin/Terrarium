@@ -109,6 +109,30 @@ class AsyncSandbox:
     def env(self, value: dict[str, str]) -> None:
         self._sync.env = value
 
+    @property
+    def vm(self) -> str:
+        """The tenant VM name this sandbox runs in."""
+        return self._sync.vm
+
+    @property
+    def pool_backed(self) -> bool:
+        """True when the tenant VM was claimed from the warm pool."""
+        return self._sync.pool_backed
+
+    @property
+    def tenant(self) -> str:
+        """The tenant identifier (VM name is ``tenant-<tenant>``)."""
+        return self._sync.tenant
+
+    async def policy(self) -> dict:
+        """The stored exec policy, as echoed by the engine.
+
+        Queries the engine asynchronously — the sync lookup is a
+        blocking network call and runs in the executor.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._sync.policy)
+
     # ── exec ───────────────────────────────────────────────────────
 
     async def exec(
@@ -143,6 +167,18 @@ class AsyncSandbox:
         """
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._sync.kill)
+
+    @classmethod
+    async def destroy_tenant(cls, tenant_id: str) -> None:
+        """Destroy the tenant VM and all its sandboxes asynchronously.
+
+        Parameters
+        ----------
+        tenant_id:
+            The tenant identifier (the VM name is ``tenant-<tenant_id>``).
+        """
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, Sandbox.destroy_tenant, tenant_id)
 
     async def metrics(self) -> dict:
         """Query current resource usage asynchronously.
