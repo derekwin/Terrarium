@@ -310,13 +310,23 @@ class TestSandboxPolicy:
             Sandbox.destroy_tenant(tenant)
 
     def test_net_allow_live_egress(self):
-        """net_allow deny-by-default egress (needs NAT → root daemon)."""
+        """net_allow deny-by-default egress (requires NAT → root daemon).
+
+        Skips unless a root daemon is running (NAT needs CAP_NET_ADMIN on
+        the terra0 bridge). Run it manually with a root daemon::
+
+            sudo terra daemon start
+            python3 -m pytest sdk/python/tests/test_sandbox.py::TestSandboxPolicy::test_net_allow_live_egress -v
+        """
         tenant = f"polnet{uuid4().hex[:6]}"
         try:
             sb = Sandbox(tenant=tenant, layers=["base"], cpu=1, memory_mb=256,
                          network=True)
         except Exception as e:
-            pytest.skip(f"no NAT networking (rootless daemon): {e}")
+            pytest.skip(
+                "requires NAT networking (root daemon) — run with a root "
+                f"daemon or on a self-hosted runner; skip reason: {e}",
+            )
         try:
             r = sb.exec(
                 ["wget", "-q", "-T", "10", "-O", "/dev/null",

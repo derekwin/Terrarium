@@ -125,6 +125,12 @@ pub(crate) async fn cmd_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
         Ok(()) => {
             // Snapshot artifacts of this VM are garbage until restore
             // lands (then this becomes opt-in). Best-effort cleanup.
+            // Path scheme: the CH adapter produces
+            // {snapshot_dir}/terra-snap-{name}.bin (its snapshot() forms
+            // /tmp/terra-snap-{name}.bin; snapshot_dir is "/tmp" in the
+            // daemon) and Cloud Hypervisor writes a sibling
+            // {snapshot_dir}/terra-snap-{name}.mem — cleanup must mirror
+            // both, so the .mem sibling never leaks.
             for p in [
                 format!("{}/terra-snap-{}.bin", mgr.snapshot_dir(), name),
                 format!("{}/terra-snap-{}.mem", mgr.snapshot_dir(), name),

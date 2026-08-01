@@ -30,8 +30,8 @@ TCP + token 时，客户端先发送一行 token，再发送命令行。
 | `resize` | `name`, `cpus?`, `memory_bytes?` | 在线扩缩（至少一项，否则报错）。**CPU 缩容不支持**（guest 侧无 offlining，显式报错）；内存缩容支持（virtio-mem，guest 驱动处理 unplug） |
 | `shutdown` / `kill` | `name` | 停止并注销（数据保留） |
 | `destroy` | `name` | 停止并注销（同义，永不删数据） |
-| `snapshot` | `name` | 内存快照（restore 未实现；自定义 `snapshot_path` 暂不支持，传入会报错） |
-| `restore` | — | 当前固定返回 not implemented |
+| `snapshot` | `name` | 内存快照（实验性；restore 未实现，自定义 `snapshot_path` 暂不支持） |
+| `restore` | — | 未实现 |
 
 ### 执行
 

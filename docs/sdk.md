@@ -157,6 +157,12 @@ with Sandbox(tenant="my-org", template="py312") as sb:
 > 使出站变为默认拒绝、仅放行列表项（**必须非空**，省略字段才是不限制）；
 > `memory_mb` / `procs` 为资源限制。policy 不能配 `sandboxed=False`（报错）。
 > 注意：`net_allow` 的出站 ACL 尚未在带 NAT 的环境实测（需 root daemon）。
+> 具备带 NAT 的 root daemon 环境可实测 e2e 测试
+> `tests/test_sandbox.py::TestSandboxPolicy::test_net_allow_live_egress`
+> （`sdk/python/tests/test_sandbox.py`）：root daemon 启动
+> （`sudo terra daemon start`）后执行
+> `python3 -m pytest sdk/python/tests/test_sandbox.py::TestSandboxPolicy::test_net_allow_live_egress -v`；
+> 无 root/NAT 时该测试会自动 skip。
 
 ### `terra.AsyncSandbox`
 
