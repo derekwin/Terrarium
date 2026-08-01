@@ -25,7 +25,7 @@ use adapter_traits::{
     AdapterError, ExecOpts, SandboxAdapter, SandboxPolicy, VmAdapter, VmHandle, VmName, VmSpec,
 };
 
-use crate::sandbox_adapter::GuestSandlockAdapter;
+use adapter_sandlock::GuestSandlockAdapter;
 
 /// Central VM registry for the controller.
 pub struct VmManager {
