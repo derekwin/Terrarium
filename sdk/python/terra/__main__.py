@@ -24,6 +24,7 @@ from pathlib import Path
 
 from . import assets, images, paths
 from .client import TerraClient, TerraError
+from .pool import scale_pool
 from .sandbox import Sandbox, _SYSTEM_MAP
 from .template import Template
 
@@ -972,7 +973,12 @@ def cmd_pool_scale(args) -> int:
     """Scale a pool to a new size."""
     try:
         return _output(
-            _client(args).pool_create(args.size, kernel=None, net=False),
+            scale_pool(
+                _client(args),
+                args.size,
+                kernel=args.kernel,
+                net=args.net,
+            ),
             args,
         )
     except TerraError as e:
@@ -1509,6 +1515,8 @@ Common workflows:
 
     sp = pools.add_parser("scale", help="scale pool to new size")
     sp.add_argument("--size", type=int, required=True, help="new pool size")
+    sp.add_argument("--kernel", help="kernel variant for new VMs")
+    sp.add_argument("--net", action="store_true", help="enable NAT networking for new VMs")
     sp.set_defaults(f=cmd_pool_scale)
 
     sp = pools.add_parser("remove", help="remove a pool VM")

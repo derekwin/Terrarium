@@ -34,10 +34,56 @@ import logging
 from uuid import uuid4
 
 from .client import TerraClient
+from .exceptions import TerraError
 from .sandbox import Sandbox, _SYSTEM_MAP
 from .template import Template
 
 _log = logging.getLogger(__name__)
+
+# Engine cap: a single pool_create call spawns 1..=32 VMs.
+_POOL_SIZE_MIN = 1
+_POOL_SIZE_MAX = 32
+
+
+def scale_pool(
+    client: TerraClient,
+    target: int,
+    *,
+    kernel: str | None = None,
+    net: bool = False,
+) -> dict:
+    """Scale a warm pool to exactly *target* idle VMs.
+
+    Module-level so both :class:`Pool` and the ``terra pool scale`` CLI
+    share one implementation.  Reads the current idle count via
+    ``pool_list`` and then:
+
+    - short of target  → ``pool_create(target - idle)`` (delta only —
+      the engine spawns exactly *N new* VMs per call),
+    - over target      → ``vm_destroy`` surplus **idle** slots (never
+      claimed ones; the engine deregisters the pool slot on destroy),
+    - at target        → no-op.
+
+    Returns a summary dict ``{"idle", "created", "destroyed"}``.
+    """
+    if not _POOL_SIZE_MIN <= target <= _POOL_SIZE_MAX:
+        raise TerraError(
+            f"pool size must be between {_POOL_SIZE_MIN} and "
+            f"{_POOL_SIZE_MAX} (got {target})"
+        )
+    slots = client.pool_list().get("pool", [])
+    idle = [s["name"] for s in slots if not s.get("claimed")]
+    current = len(idle)
+    created: list[str] = []
+    destroyed: list[str] = []
+    if current < target:
+        resp = client.pool_create(target - current, kernel=kernel, net=net)
+        created = list(resp.get("created", []))
+    elif current > target:
+        destroyed = idle[: current - target]
+        for name in destroyed:
+            client.vm_destroy(name)
+    return {"idle": target, "created": created, "destroyed": destroyed}
 
 
 class Pool:
@@ -160,13 +206,26 @@ class Pool:
     # ── grow / shrink ──────────────────────────────────────────────
 
     def grow(self, count: int = 1) -> None:
-        """Add *count* more idle VMs to the pool."""
+        """Add *count* more idle VMs to the pool.
+
+        Only the delta is created — the engine spawns exactly *N new*
+        VMs per ``pool_create`` call, never a running total.
+        """
         self._size += count
         self._client.pool_create(
-            self._size,
+            count,
             kernel=self._kernel or None,
             net=self._net,
         )
+
+    def scale(self, target: int) -> None:
+        """Scale the pool to exactly *target* idle VMs.
+
+        Creates the shortfall or destroys surplus idle VMs (claimed
+        slots are never touched).  Valid targets: 1..=32.
+        """
+        scale_pool(self._client, target, kernel=self._kernel, net=self._net)
+        self._size = target
 
     # ── repr ───────────────────────────────────────────────────────
 
