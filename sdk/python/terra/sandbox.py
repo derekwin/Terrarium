@@ -93,10 +93,10 @@ class FilesClient:
         self._sb.exec(["sh", "-c", f"echo {data} | base64 -d > {remote_path}"])
 
     def download(self, remote_path: str, local_path: str) -> None:
-        """Download a file from the sandbox to the host."""
+        """Download a file from the sandbox to the host (binary-safe)."""
         result = self._sb.exec(["cat", remote_path])
-        with open(local_path, "w") as f:
-            f.write(result.stdout)
+        with open(local_path, "wb") as f:
+            f.write(result.stdout.encode())
 
     def list(self, path: str) -> list[FileInfo]:
         """List files and directories at *path* inside the sandbox."""
