@@ -1,8 +1,6 @@
 //! guest-proxy — host→guest command relay.
 //!
-//! Two transports:
-//! - Unix socket (/tmp/sandboxd.sock) for guest-local clients
-//! - vsock port 1024 for the host (via CH `--vsock ... socket=...`)
+//! Single transport: vsock port 1024 for the host (via CH `--vsock ... socket=...`).
 //!
 //! Executes commands locally and returns stdout/stderr/exit_code.
 //! Commands with `"sandbox": true` are confined via sandlock
@@ -13,12 +11,9 @@ mod sandbox;
 mod vsock;
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
 use std::thread;
 use std::time::Duration;
 
-const SOCKET_PATH: &str = "/tmp/sandboxd.sock";
 const VSOCK_PORT: u32 = 1024;
 
 /// Whether a sysfs entry name is a CPU directory (`cpuN`, N a number).
@@ -58,10 +53,12 @@ fn main() {
     start_cpu_onliner();
 
     // vsock listener for the host (FS-M4 hot-plug path). Optional: the
-    // device may be absent (plain boots), then we just skip it.
+    // device may be absent (plain boots), then we just skip it. The
+    // accept loop runs on the main thread so the process stays alive.
     match vsock::listen(VSOCK_PORT) {
         Ok(fd) => {
-            thread::spawn(move || loop {
+            eprintln!("guest-proxy: vsock listening on port {}", VSOCK_PORT);
+            loop {
                 match vsock::accept(fd) {
                     Ok(conn_fd) => {
                         thread::spawn(move || {
@@ -72,28 +69,10 @@ fn main() {
                     }
                     Err(_) => thread::sleep(Duration::from_millis(100)),
                 }
-            });
-            eprintln!("guest-proxy: vsock listening on port {}", VSOCK_PORT);
+            }
         }
         Err(e) => {
-            eprintln!("guest-proxy: vsock unavailable ({}), unix socket only", e);
-        }
-    }
-
-    let _ = std::fs::remove_file(SOCKET_PATH);
-    let listener = UnixListener::bind(SOCKET_PATH).expect("bind sandboxd socket");
-    std::fs::set_permissions(SOCKET_PATH, std::fs::Permissions::from_mode(0o600))
-        .expect("chmod sandboxd socket");
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                thread::spawn(|| handle(stream));
-            }
-            Err(e) => {
-                eprintln!("accept: {}", e);
-                thread::sleep(Duration::from_millis(100));
-            }
+            eprintln!("guest-proxy: vsock unavailable ({})", e);
         }
     }
 }

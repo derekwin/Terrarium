@@ -65,7 +65,7 @@
 ### 4. guest-proxy(VM 内 agent)— 完整,一个死接口
 
 - 5 命令(exec/kill/mount/umount/ping)全实现;exec 模型完整(process group、timeout killpg、10MB 输出上限、reader 线程防管道死锁);exec_id 注册表(registry.rs)完整。
-- **死接口**:`/tmp/sandboxd.sock`(guest 本地 unix socket)被绑定但**仓库内无任何客户端连接**——只有 main.rs 绑定,无使用者。
+- ~~**死接口**:`/tmp/sandboxd.sock`(guest 本地 unix socket)被绑定但**仓库内无任何客户端连接**——只有 main.rs 绑定,无使用者。~~ **已解决(2026-07-31)**:unix socket 传输已移除,vsock 为唯一通道。
 - **net_allow 委托**:repo 内只做 flag 透传(`--net-allow`)+ 非空校验;实际出站限制由**外部 sandlock 二进制**(multikernel/sandlock v0.8.5,seccomp/network 引擎)执行。**无 e2e 测试证明真实拦截**(docs/sdk.md:151 自认"尚未在带 NAT 环境实测")。
 - 不共享 protocol 类型:guest-proxy 手写 JSON(与 host 端 adapter 的 guest_cmd 一致,双层手写)。
 
@@ -116,7 +116,7 @@
 6. **AsyncSandbox 面不一致** — 补 4 属性 + destroy_tenant 或文档声明不支持。
 7. **CLI 8 个 reserved 标志** — 要么实现(如 --name、--detach)要么移除(避免误导)。
 8. **files.download 二进制损坏** — text mode → 二进制安全(binary mode)。
-9. **guest-proxy 死接口** `/tmp/sandboxd.sock` — 删除或补客户端。
+9. ~~**guest-proxy 死接口** `/tmp/sandboxd.sock` — 删除或补客户端。~~ **已删除**(vsock 唯一)。
 10. **文档 drift** — `assets.ensure_engine()/publish_engine()` 不存在、`terra.configure` 未导出、`duration_ms` 不存在、`env` docstring 过期。
 
 ## 五、刻意未做(设计决策,非缺口)
