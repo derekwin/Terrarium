@@ -1434,7 +1434,7 @@ Common workflows:
                     help="per-call exec policy override: deny-by-default egress except these (repeatable)")
     sp.add_argument("--detach", action="store_true",
                     help="run in the background — return a session_id immediately (poll with 'sandbox session status')")
-    sp.add_argument("args", nargs=argparse.REMAINDER, help="command and arguments (after --)")
+    sp.add_argument("args", nargs="*", help="command and arguments (after --)")
     sp.set_defaults(f=cmd_sandbox_exec)
 
     sp = sbs.add_parser("cp", help="copy files between host and sandbox")
@@ -1519,7 +1519,7 @@ Common workflows:
     sp = vms.add_parser("exec", help="execute command in VM")
     sp.add_argument("name", help="VM name")
     sp.add_argument("--timeout", type=int, default=60, help="command timeout (seconds)")
-    sp.add_argument("args", nargs=argparse.REMAINDER, help="command and arguments (after --)")
+    sp.add_argument("args", nargs="*", help="command and arguments (after --)")
     sp.set_defaults(f=cmd_vm_exec)
 
     sp = vms.add_parser("resize", help="resize VM resources")
