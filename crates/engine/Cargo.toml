@@ -11,6 +11,7 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 adapter-cloud-hypervisor = { path = "../adapter/cloud-hypervisor", version = "0.1.0" }
 adapter-traits = { path = "../adapter/traits", version = "0.1.0" }
+async-trait = "0.1"
 terrarium-network = { path = "../network", version = "0.1.0" }
 terrarium-protocol = { path = "../protocol", version = "0.1.0" }
 pyo3 = "0.29"

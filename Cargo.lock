@@ -88,6 +88,7 @@ version = "0.1.0"
 dependencies = [
  "adapter-cloud-hypervisor",
  "adapter-traits",
+ "async-trait",
  "pyo3",
  "serde_json",
  "terrarium-network",

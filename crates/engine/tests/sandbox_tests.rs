@@ -13,6 +13,7 @@ use adapter_traits::{
 use common::MockVmAdapter;
 use terrarium_engine::commands::execute;
 use terrarium_engine::manager::VmManager;
+use terrarium_engine::policy::{default_sandbox_policy, merge_policies};
 use terrarium_protocol::Command;
 
 fn make_mgr() -> VmManager {
@@ -524,8 +525,8 @@ async fn test_sandbox_exec_inherits_stored_policy() {
     assert!(log[0].sandbox);
     assert_eq!(
         log[0].policy.as_ref(),
-        Some(&stored),
-        "exec must inherit the stored policy"
+        Some(&merge_policies(default_sandbox_policy(), stored)),
+        "exec must inherit the stored policy (base ∪ user)"
     );
 }
 
@@ -576,8 +577,8 @@ async fn test_sandbox_exec_policy_override_precedence() {
     assert!(resp.is_ok(), "override exec: {:?}", resp);
     assert_eq!(
         exec_log.lock().unwrap()[0].policy.as_ref(),
-        Some(&override_policy),
-        "per-call policy must win over the stored one"
+        Some(&merge_policies(default_sandbox_policy(), override_policy)),
+        "per-call policy must win over the stored one (base ∪ user)"
     );
 
     // Next call without a policy falls back to the stored one.
@@ -591,7 +592,7 @@ async fn test_sandbox_exec_policy_override_precedence() {
     assert!(resp.is_ok());
     assert_eq!(
         exec_log.lock().unwrap()[1].policy.as_ref(),
-        Some(&stored),
+        Some(&merge_policies(default_sandbox_policy(), stored)),
         "override must not mutate the stored policy"
     );
 }
