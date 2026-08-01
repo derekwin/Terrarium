@@ -6,16 +6,31 @@ mod common;
 
 use std::sync::Arc;
 
+use adapter_traits::{
+    Capability, DefaultAccess, Direction, Endpoint, FileAccess, PathPattern, ResourceLimits,
+    SandboxPolicy,
+};
 use common::MockVmAdapter;
 use terrarium_engine::commands::execute;
 use terrarium_engine::manager::VmManager;
-use terrarium_protocol::{Command, ExecPolicy};
+use terrarium_protocol::Command;
 
 fn make_mgr() -> VmManager {
     let adapter = MockVmAdapter::new()
         .with_state("Running")
         .with_exec("ok\n", "", 0);
     VmManager::new(Arc::new(adapter), "/tmp".into())
+}
+
+/// Build a capability-based policy fixture (deny default, version 1).
+fn make_policy(capabilities: Vec<Capability>, limits: ResourceLimits) -> SandboxPolicy {
+    SandboxPolicy {
+        capabilities,
+        limits,
+        default: DefaultAccess::Deny,
+        audit: Default::default(),
+        version: 1,
+    }
 }
 
 /// sandbox_create: allocates sb-<hex>, VM "tenant-<tenant>", workdir under
@@ -406,13 +421,30 @@ async fn test_tenant_destroy_cascades() {
 #[tokio::test]
 async fn test_sandbox_create_stores_and_echoes_policy() {
     let mut mgr = make_mgr();
-    let policy = ExecPolicy {
-        read_paths: vec!["/opt/data".into()],
-        write_paths: vec!["/output".into()],
-        net_allow: Some(vec!["pypi.org".into()]),
-        memory_mb: Some(512),
-        procs: Some(20),
-    };
+    let policy = make_policy(
+        vec![
+            Capability::File {
+                path: PathPattern::Prefix("/opt/data".into()),
+                access: FileAccess::Read,
+            },
+            Capability::File {
+                path: PathPattern::Prefix("/output".into()),
+                access: FileAccess::ReadWrite,
+            },
+            Capability::Network {
+                endpoint: Endpoint {
+                    host: "pypi.org".into(),
+                    port: None,
+                },
+                direction: Direction::Outbound,
+            },
+        ],
+        ResourceLimits {
+            memory_mb: Some(512),
+            procs: Some(20),
+            ..Default::default()
+        },
+    );
     let resp = execute(
         &mut mgr,
         Command::create("unused", "/fake/vmlinux")
@@ -424,22 +456,19 @@ async fn test_sandbox_create_stores_and_echoes_policy() {
     assert!(resp.is_ok(), "sandbox_create: {:?}", resp);
     let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
 
-    // sandbox_info echoes the stored policy.
+    // sandbox_info echoes the stored policy (full roundtrip).
     let resp = execute(&mut mgr, Command::new("sandbox_info").with_id(&id)).await;
     assert!(resp.is_ok());
     let echoed = &resp.data.unwrap()["policy"];
-    assert_eq!(echoed["read_paths"], serde_json::json!(["/opt/data"]));
-    assert_eq!(echoed["write_paths"], serde_json::json!(["/output"]));
-    assert_eq!(echoed["net_allow"], serde_json::json!(["pypi.org"]));
-    assert_eq!(echoed["memory_mb"], 512);
-    assert_eq!(echoed["procs"], 20);
+    let back: SandboxPolicy = serde_json::from_value(echoed.clone()).unwrap();
+    assert_eq!(back, policy);
 
     // sandbox_list echoes it too.
     let resp = execute(&mut mgr, Command::new("sandbox_list")).await;
     let data = resp.data.unwrap();
     let item = &data["sandboxes"][0];
-    assert_eq!(item["policy"]["memory_mb"], 512);
-    assert_eq!(item["policy"]["net_allow"], serde_json::json!(["pypi.org"]));
+    let back: SandboxPolicy = serde_json::from_value(item["policy"].clone()).unwrap();
+    assert_eq!(back, policy);
 
     // A sandbox created without a policy echoes null.
     let resp = execute(
@@ -461,11 +490,16 @@ async fn test_sandbox_exec_inherits_stored_policy() {
     let exec_log = adapter.exec_log();
     let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
 
-    let stored = ExecPolicy {
-        read_paths: vec!["/opt/data".into()],
-        memory_mb: Some(256),
-        ..ExecPolicy::default()
-    };
+    let stored = make_policy(
+        vec![Capability::File {
+            path: PathPattern::Prefix("/opt/data".into()),
+            access: FileAccess::Read,
+        }],
+        ResourceLimits {
+            memory_mb: Some(256),
+            ..Default::default()
+        },
+    );
     let resp = execute(
         &mut mgr,
         Command::create("unused", "/fake/vmlinux")
@@ -505,10 +539,13 @@ async fn test_sandbox_exec_policy_override_precedence() {
     let exec_log = adapter.exec_log();
     let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
 
-    let stored = ExecPolicy {
-        memory_mb: Some(256),
-        ..ExecPolicy::default()
-    };
+    let stored = make_policy(
+        vec![],
+        ResourceLimits {
+            memory_mb: Some(256),
+            ..Default::default()
+        },
+    );
     let resp = execute(
         &mut mgr,
         Command::create("unused", "/fake/vmlinux")
@@ -520,11 +557,14 @@ async fn test_sandbox_exec_policy_override_precedence() {
     let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
     exec_log.lock().unwrap().clear();
 
-    let override_policy = ExecPolicy {
-        memory_mb: Some(1024),
-        procs: Some(10),
-        ..ExecPolicy::default()
-    };
+    let override_policy = make_policy(
+        vec![],
+        ResourceLimits {
+            memory_mb: Some(1024),
+            procs: Some(10),
+            ..Default::default()
+        },
+    );
     let resp = execute(
         &mut mgr,
         Command::new("sandbox_exec")
@@ -561,10 +601,13 @@ async fn test_sandbox_exec_policy_override_precedence() {
 #[tokio::test]
 async fn test_sandbox_exec_policy_requires_sandbox() {
     let mut mgr = make_mgr();
-    let stored = ExecPolicy {
-        memory_mb: Some(256),
-        ..ExecPolicy::default()
-    };
+    let stored = make_policy(
+        vec![],
+        ResourceLimits {
+            memory_mb: Some(256),
+            ..Default::default()
+        },
+    );
     let resp = execute(
         &mut mgr,
         Command::create("unused", "/fake/vmlinux")
@@ -603,7 +646,7 @@ async fn test_sandbox_exec_policy_requires_sandbox() {
             .with_id(&id2)
             .with_args(vec!["echo".into(), "hi".into()])
             .with_sandbox(false)
-            .with_policy(ExecPolicy::default()),
+            .with_policy(make_policy(vec![], ResourceLimits::default())),
     )
     .await;
     assert!(!resp.is_ok(), "per-call policy + sandbox:false must fail");
@@ -613,43 +656,58 @@ async fn test_sandbox_exec_policy_requires_sandbox() {
         .contains("'policy' requires sandboxed exec"));
 }
 
-/// sandbox_create with an empty net_allow list → explicit error (fail
-/// fast: a stored invalid policy would fail on every later exec).
+/// sandbox_create with a Network capability that has an empty host →
+/// explicit error (fail fast: a stored invalid policy would fail on every
+/// later exec). The old "empty net_allow" footgun is gone — an empty
+/// capability list is valid default-deny; the new validity rule is that
+/// network endpoints must name a host.
 #[tokio::test]
-async fn test_sandbox_create_empty_net_allow_rejected() {
+async fn test_sandbox_create_network_empty_host_rejected() {
     let mut mgr = make_mgr();
     let resp = execute(
         &mut mgr,
         Command::create("unused", "/fake/vmlinux")
             .with_command("sandbox_create")
             .with_tenant("research")
-            .with_policy(ExecPolicy {
-                net_allow: Some(vec![]),
-                ..ExecPolicy::default()
-            }),
+            .with_policy(make_policy(
+                vec![Capability::Network {
+                    endpoint: Endpoint {
+                        host: String::new(),
+                        port: None,
+                    },
+                    direction: Direction::Outbound,
+                }],
+                ResourceLimits::default(),
+            )),
     )
     .await;
-    assert!(!resp.is_ok(), "empty net_allow must fail");
+    assert!(!resp.is_ok(), "empty network host must fail");
     assert!(resp
         .error
         .unwrap()
-        .contains("net_allow must be a non-empty list"));
+        .contains("network endpoint host must not be empty"));
 }
 
-/// sandbox_exec with a per-call empty net_allow override → explicit
-/// error, even when the stored policy is valid.
+/// sandbox_exec with a per-call Network capability with an empty host →
+/// explicit error, even when the stored policy is valid.
 #[tokio::test]
-async fn test_sandbox_exec_empty_net_allow_rejected() {
+async fn test_sandbox_exec_network_empty_host_rejected() {
     let mut mgr = make_mgr();
     let resp = execute(
         &mut mgr,
         Command::create("unused", "/fake/vmlinux")
             .with_command("sandbox_create")
             .with_tenant("research")
-            .with_policy(ExecPolicy {
-                net_allow: Some(vec!["pypi.org".into()]),
-                ..ExecPolicy::default()
-            }),
+            .with_policy(make_policy(
+                vec![Capability::Network {
+                    endpoint: Endpoint {
+                        host: "pypi.org".into(),
+                        port: None,
+                    },
+                    direction: Direction::Outbound,
+                }],
+                ResourceLimits::default(),
+            )),
     )
     .await;
     let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
@@ -659,15 +717,60 @@ async fn test_sandbox_exec_empty_net_allow_rejected() {
         Command::new("sandbox_exec")
             .with_id(&id)
             .with_args(vec!["echo".into(), "hi".into()])
-            .with_policy(ExecPolicy {
-                net_allow: Some(vec![]),
-                ..ExecPolicy::default()
-            }),
+            .with_policy(make_policy(
+                vec![Capability::Network {
+                    endpoint: Endpoint {
+                        host: String::new(),
+                        port: None,
+                    },
+                    direction: Direction::Outbound,
+                }],
+                ResourceLimits::default(),
+            )),
     )
     .await;
-    assert!(!resp.is_ok(), "empty net_allow override must fail");
+    assert!(!resp.is_ok(), "empty network host override must fail");
     assert!(resp
         .error
         .unwrap()
-        .contains("net_allow must be a non-empty list"));
+        .contains("network endpoint host must not be empty"));
+}
+
+/// D2: sandbox_exec with no user policy (per-call or stored) → the engine
+/// injects default_sandbox_policy(), so the guest always receives a
+/// complete policy for sandboxed exec.
+#[tokio::test]
+async fn test_sandbox_exec_injects_default_policy() {
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("ok\n", "", 0);
+    let exec_log = adapter.exec_log();
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research"),
+    )
+    .await;
+    let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+    exec_log.lock().unwrap().clear();
+
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["echo".into(), "hi".into()]),
+    )
+    .await;
+    assert!(resp.is_ok(), "sandbox_exec: {:?}", resp);
+    let log = exec_log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert!(log[0].sandbox);
+    assert_eq!(
+        log[0].policy.as_ref(),
+        Some(&terrarium_engine::policy::default_sandbox_policy()),
+        "no user policy → engine injects the default"
+    );
 }

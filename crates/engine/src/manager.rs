@@ -21,7 +21,7 @@ pub use sessions::SessionInfo;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use adapter_traits::{AdapterError, ExecOpts, ExecPolicy, VmAdapter, VmHandle, VmName, VmSpec};
+use adapter_traits::{AdapterError, ExecOpts, SandboxPolicy, VmAdapter, VmHandle, VmName, VmSpec};
 
 /// Central VM registry for the controller.
 pub struct VmManager {
@@ -111,7 +111,7 @@ impl VmManager {
         timeout_secs: u64,
         sandbox: bool,
         work_dir: Option<&str>,
-        policy: Option<ExecPolicy>,
+        policy: Option<SandboxPolicy>,
     ) -> Result<adapter_traits::ExecResult, AdapterError> {
         let mut opts = ExecOpts::new(args.to_vec(), timeout_secs).with_sandbox(sandbox);
         if let Some(work_dir) = work_dir {

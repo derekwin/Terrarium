@@ -15,7 +15,8 @@ mod vm;
 use std::sync::Arc;
 
 use crate::manager::VmManager;
-use adapter_traits::{AdapterError, ExecOpts, ExecResult, VmHandle, VmName, VmSpec};
+use crate::policy::default_sandbox_policy;
+use adapter_traits::{AdapterError, ExecOpts, ExecResult, SandboxPolicy, VmHandle, VmName, VmSpec};
 pub(crate) use terrarium_protocol::{Command, Response};
 
 /// Extract the required `name` field from a command.
@@ -47,27 +48,17 @@ pub(crate) const DEFAULT_SYSTEM: &str = "base";
 // intentionally not unified — engine cannot depend on fs (layering).
 pub(crate) const SYSTEM_BASES: [&str; 2] = ["base", "ubuntu"];
 
-/// Validate a user-supplied exec policy before it reaches the guest.
-/// `net_allow`, when present, must be a non-empty list: an empty list
-/// emits zero `--net-allow` flags, which would silently leave the network
-/// unrestricted — the opposite of what a user passing `[]` intends.
-pub(crate) fn validate_policy(policy: &adapter_traits::ExecPolicy) -> Result<(), Response> {
-    if let Some(entries) = &policy.net_allow {
-        if entries.is_empty() {
-            return Err(Response::err(
-                "net_allow must be a non-empty list (omit the field for unrestricted network)",
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// Shared blocking/background exec dispatch for `exec` and `sandbox_exec`:
 /// clamps the timeout, defaults the sandbox flag, gates and validates the
 /// policy, then routes to the manager. `sandbox_flag` is the caller's
 /// explicit value (None → `sandbox_default`); `sandbox_id`, when present,
 /// links a background session to an engine sandbox and adds the `sandbox`
 /// field to the response.
+///
+/// Policy validation uses `SandboxPolicy::validate()`. Default injection
+/// (D2) is the caller's job — `cmd_sandbox_exec` fills in
+/// `default_sandbox_policy()` so sandboxed exec always carries a complete
+/// policy; a VM-level `exec` keeps `policy` optional.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_exec(
     mgr: &mut VmManager,
@@ -76,7 +67,7 @@ pub(crate) async fn run_exec(
     timeout_secs: Option<u64>,
     sandbox_default: bool,
     sandbox_flag: Option<bool>,
-    policy: Option<adapter_traits::ExecPolicy>,
+    policy: Option<SandboxPolicy>,
     work_dir: Option<&str>,
     exec_mode: Option<String>,
     sandbox_id: Option<String>,
@@ -90,8 +81,8 @@ pub(crate) async fn run_exec(
         return Response::err("'policy' requires sandboxed exec (set 'sandbox': true)");
     }
     if let Some(policy) = policy.as_ref() {
-        if let Err(resp) = validate_policy(policy) {
-            return resp;
+        if let Err(err) = policy.validate() {
+            return Response::err(err);
         }
     }
 
@@ -180,14 +171,27 @@ pub(crate) fn prepare_blocking_exec(
     }
     let timeout = cmd.timeout_secs.unwrap_or(60).min(3600);
     let sandbox = cmd.sandbox.unwrap_or(sandbox_default);
-    let policy = cmd.policy.clone().or(stored_policy);
+    // D2: a sandboxed exec always carries a complete policy. When neither
+    // the per-call nor the stored policy is present, inject the engine
+    // default — but only for `sandbox_exec` (VM-level `exec` keeps policy
+    // optional; it defaults to unsandboxed).
+    let policy = match (cmd.command.as_str(), sandbox) {
+        ("sandbox_exec", true) => cmd
+            .policy
+            .clone()
+            .or(stored_policy)
+            .or_else(|| Some(default_sandbox_policy())),
+        _ => cmd.policy.clone().or(stored_policy),
+    };
     if !sandbox && policy.is_some() {
         return Err(Response::err(
             "'policy' requires sandboxed exec (set 'sandbox': true)",
         ));
     }
     if let Some(policy) = policy.as_ref() {
-        validate_policy(policy)?;
+        if let Err(err) = policy.validate() {
+            return Err(Response::err(err));
+        }
     }
 
     let handle = mgr.get_handle(&name).ok_or_else(|| {

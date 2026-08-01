@@ -28,8 +28,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use adapter_traits::{
-    AdapterError, ExecOpts, ExecPolicy, ExecResult, FsSpec, Snapshot, VmAdapter, VmHandle, VmInfo,
-    VmSpec,
+    AdapterError, ExecOpts, ExecResult, FsSpec, SandboxPolicy, Snapshot, VmAdapter, VmHandle,
+    VmInfo, VmSpec,
 };
 
 /// One recorded exec invocation (for assertions on engine→guest plumbing).
@@ -42,7 +42,7 @@ pub struct ExecCall {
     pub sandbox: bool,
     pub work_dir: Option<String>,
     pub exec_id: Option<String>,
-    pub policy: Option<ExecPolicy>,
+    pub policy: Option<SandboxPolicy>,
 }
 
 // ---------------------------------------------------------------------------

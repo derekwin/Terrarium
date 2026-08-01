@@ -4,7 +4,7 @@
 //! sandbox map itself stays a flat field on [`VmManager`]; these methods
 //! are split out here because they touch nothing but the map.
 
-use adapter_traits::ExecPolicy;
+use adapter_traits::SandboxPolicy;
 
 use super::VmManager;
 
@@ -19,7 +19,7 @@ pub struct SandboxRecord {
     pub created_at: u64,
     /// Sandlock policy stored at sandbox_create; inherited by sandbox_exec
     /// unless the call carries an override.
-    pub policy: Option<ExecPolicy>,
+    pub policy: Option<SandboxPolicy>,
     /// True when the tenant VM is a claimed warm-pool VM (pool-N);
     /// tenant_destroy releases it back to the pool instead of destroying.
     pub pool_backed: bool,

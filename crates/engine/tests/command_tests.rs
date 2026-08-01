@@ -7,14 +7,29 @@ mod common;
 
 use std::sync::Arc;
 
+use adapter_traits::{
+    Capability, DefaultAccess, Direction, Endpoint, FileAccess, PathPattern, ResourceLimits,
+    SandboxPolicy,
+};
 use common::MockVmAdapter;
 use terrarium_engine::commands::execute;
 use terrarium_engine::manager::VmManager;
-use terrarium_protocol::{Command, ExecPolicy};
+use terrarium_protocol::Command;
 
 // ---------------------------------------------------------------------------
 // Helper: shared VmManager factory
 // ---------------------------------------------------------------------------
+
+/// Build a capability-based policy fixture (deny default, version 1).
+fn make_policy(capabilities: Vec<Capability>, limits: ResourceLimits) -> SandboxPolicy {
+    SandboxPolicy {
+        capabilities,
+        limits,
+        default: DefaultAccess::Deny,
+        audit: Default::default(),
+        version: 1,
+    }
+}
 
 /// Create a VmManager backed by a MockVmAdapter with exec configured
 /// to return "hello world\n" stdout, "" stderr, exit code 0.
@@ -159,11 +174,16 @@ async fn test_exec_policy_forwarded() {
     execute(&mut mgr, Command::create("exec-vm", "/fake/vmlinux")).await;
     exec_log.lock().unwrap().clear();
 
-    let policy = ExecPolicy {
-        read_paths: vec!["/opt/data".into()],
-        memory_mb: Some(512),
-        ..ExecPolicy::default()
-    };
+    let policy = make_policy(
+        vec![Capability::File {
+            path: PathPattern::Prefix("/opt/data".into()),
+            access: FileAccess::Read,
+        }],
+        ResourceLimits {
+            memory_mb: Some(512),
+            ..Default::default()
+        },
+    );
     let resp = execute(
         &mut mgr,
         Command::new("exec")
@@ -189,10 +209,13 @@ async fn test_exec_policy_requires_sandbox() {
         let mut cmd = Command::new("exec")
             .with_name("exec-vm")
             .with_args(vec!["echo".into(), "hello".into()])
-            .with_policy(ExecPolicy {
-                read_paths: vec!["/opt/data".into()],
-                ..ExecPolicy::default()
-            });
+            .with_policy(make_policy(
+                vec![Capability::File {
+                    path: PathPattern::Prefix("/opt/data".into()),
+                    access: FileAccess::Read,
+                }],
+                ResourceLimits::default(),
+            ));
         if let Some(s) = sandbox {
             cmd = cmd.with_sandbox(s);
         }
@@ -633,10 +656,11 @@ async fn test_daemon_stop_outside_daemon() {
     );
 }
 
-/// Exec with an empty net_allow list → explicit error (zero --net-allow
-/// flags would silently leave the network unrestricted).
+/// Exec with a Network capability that has an empty host → explicit error
+/// (validate() rejects nameless endpoints). The old "empty net_allow"
+/// footgun is gone — an empty capability list is valid default-deny.
 #[tokio::test]
-async fn test_exec_policy_empty_net_allow_rejected() {
+async fn test_exec_policy_network_empty_host_rejected() {
     let mut mgr = make_mgr();
     execute(&mut mgr, Command::create("exec-vm", "/fake/vmlinux")).await;
     let resp = execute(
@@ -645,17 +669,23 @@ async fn test_exec_policy_empty_net_allow_rejected() {
             .with_name("exec-vm")
             .with_args(vec!["echo".into(), "hello".into()])
             .with_sandbox(true)
-            .with_policy(ExecPolicy {
-                net_allow: Some(vec![]),
-                ..ExecPolicy::default()
-            }),
+            .with_policy(make_policy(
+                vec![Capability::Network {
+                    endpoint: Endpoint {
+                        host: String::new(),
+                        port: None,
+                    },
+                    direction: Direction::Outbound,
+                }],
+                ResourceLimits::default(),
+            )),
     )
     .await;
-    assert!(!resp.is_ok(), "empty net_allow must fail");
+    assert!(!resp.is_ok(), "empty network host must fail");
     assert!(
         resp.error
             .unwrap()
-            .contains("net_allow must be a non-empty list"),
-        "error should name the net_allow constraint"
+            .contains("network endpoint host must not be empty"),
+        "error should name the endpoint constraint"
     );
 }

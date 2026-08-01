@@ -5,7 +5,7 @@
 //! out here because they only touch the sessions map plus the VM handle
 //! lookup (`get_handle` on `self`).
 
-use adapter_traits::{AdapterError, ExecOpts, ExecPolicy};
+use adapter_traits::{AdapterError, ExecOpts, SandboxPolicy};
 
 use super::VmManager;
 
@@ -45,7 +45,7 @@ impl VmManager {
         session_id: &str,
         work_dir: Option<&str>,
         sandbox_id: Option<String>,
-        policy: Option<ExecPolicy>,
+        policy: Option<SandboxPolicy>,
     ) -> Result<(), AdapterError> {
         let handle = self
             .get_handle(name)
