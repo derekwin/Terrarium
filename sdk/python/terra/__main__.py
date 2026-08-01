@@ -1340,18 +1340,15 @@ Common workflows:
 
     sp = sbs.add_parser("create", help="create a sandbox from a template")
     sp.add_argument("--template", help="template name")
-    sp.add_argument("-n", "--name", help="sandbox name (auto-generated if omitted)")
     sp.add_argument("--layers", nargs="*", help="explicit layer names (comma-separated)")
     sp.add_argument("--kernel", help="kernel variant name or path")
     sp.add_argument("--cpu", type=int, default=1, help="vCPU count (default: 1)")
     sp.add_argument("--memory", type=int, default=256, metavar="MB", help="memory in MiB (default: 256)")
-    sp.add_argument("--disk", type=int, metavar="MB", help="disk size in MiB (reserved)")
     sp.add_argument("--net", action="store_true", help="attach NAT networking")
     sp.add_argument("--no-pool", action="store_true",
                     help="force a cold-booted dedicated tenant VM instead of claiming from the warm pool")
     sp.add_argument("--env", nargs="*", help="environment variables (KEY=VALUE)")
     sp.add_argument("--timeout", type=int, default=600, help="default command timeout (seconds)")
-    sp.add_argument("--backend", default="auto", choices=["auto", "ch", "sandlock"])
     sp.add_argument("--read-path", action="append", metavar="PATH",
                     help="exec policy: extra read-only grant (repeatable)")
     sp.add_argument("--write-path", action="append", metavar="PATH",
@@ -1380,7 +1377,6 @@ Common workflows:
     sp.add_argument("--net-allow", action="append", metavar="HOST[:PORT]",
                     help="per-call exec policy override: deny-by-default egress except these (repeatable)")
     sp.add_argument("--detach", action="store_true", help="detached mode (reserved)")
-    sp.add_argument("--follow", help="follow exec ID (reserved)")
     sp.add_argument("args", nargs=argparse.REMAINDER, help="command and arguments (after --)")
     sp.set_defaults(f=cmd_sandbox_exec)
 
@@ -1497,14 +1493,12 @@ Common workflows:
     pools.add_parser("ls", help="list pools").set_defaults(f=cmd_pool_ls)
 
     sp = pools.add_parser("create", help="create a warm pool")
-    sp.add_argument("-n", "--name", help="pool name (reserved)")
     sp.add_argument("--size", type=int, default=1, help="number of idle VMs")
     sp.add_argument("--kernel", help="kernel variant")
     sp.add_argument("--net", action="store_true", help="enable NAT networking")
     sp.set_defaults(f=cmd_pool_create)
 
     sp = pools.add_parser("claim", help="claim an idle pool VM")
-    sp.add_argument("name", nargs="?", help="pool name (reserved)")
     sp.add_argument("--template", help="template name for layers")
     sp.add_argument("--layers", nargs="+", help="explicit layers (comma-separated)")
     sp.set_defaults(f=cmd_pool_claim)
@@ -1514,7 +1508,6 @@ Common workflows:
     sp.set_defaults(f=cmd_pool_release)
 
     sp = pools.add_parser("scale", help="scale pool to new size")
-    sp.add_argument("name", nargs="?", help="pool name (reserved)")
     sp.add_argument("--size", type=int, required=True, help="new pool size")
     sp.set_defaults(f=cmd_pool_scale)
 
@@ -1529,8 +1522,6 @@ Common workflows:
     nets.add_parser("ls", help="list networks").set_defaults(f=cmd_net_ls)
 
     sp = nets.add_parser("create", help="create NAT network")
-    sp.add_argument("-n", "--name", nargs="?", const="default", default="default",
-                    help="network name (default: 'default')")
     sp.set_defaults(f=cmd_net_create)
 
     sp = nets.add_parser("remove", help="remove NAT network")

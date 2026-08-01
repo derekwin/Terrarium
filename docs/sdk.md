@@ -348,7 +348,7 @@ terra sandbox kill sb-a3f2b1c4                  # 终止会话 + 删工作目录
 terra sandbox destroy-tenant <tenant>           # 销毁租户 VM + 全部 sandbox
 
 # 3) 预热池（批量任务）
-terra pool create -n mypool --size 3                        # 创建 3 个预热 VM 的池
+terra pool create --size 3                                  # 创建 3 个预热 VM 的池
 terra pool claim --template alpine                          # 认领就绪 Sandbox
 terra pool release <vm-name>                                # 归还池
 terra pool scale --size 5                                   # 缩放池大小
@@ -427,7 +427,7 @@ terra vm shutdown|kill|destroy <name>
 **pool** — 预热池
 
 ```
-terra pool create -n <name> --size N [--kernel <var>] [--net]
+terra pool create --size N [--kernel <var>] [--net]
 terra pool ls
 terra pool claim --template <name>  或  --layers L1,L2
 terra pool release <name>
@@ -438,7 +438,7 @@ terra pool remove <name>
 **net** — NAT 网络
 
 ```
-terra net create [-n <name>]
+terra net create
 terra net ls
 terra net remove <name>
 ```
