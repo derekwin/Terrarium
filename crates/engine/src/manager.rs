@@ -25,15 +25,13 @@ use adapter_traits::{
     AdapterError, ExecOpts, SandboxAdapter, SandboxPolicy, VmAdapter, VmHandle, VmName, VmSpec,
 };
 
-use adapter_sandlock::GuestSandlockAdapter;
-
 /// Central VM registry for the controller.
 pub struct VmManager {
     adapter: Arc<dyn VmAdapter>,
     /// L2 session boundary backend (C-phase contract). Sandbox lifecycle
     /// (create/exec/kill) routes through this adapter's handles; the
-    /// default is the in-engine guest-sandlock proxy, so the existing
-    /// guest-side isolation is preserved exactly (zero behavior change).
+    /// default comes from [`crate::default_sandbox_adapter`] (guest-sandlock
+    /// with the `sandlock` feature, an unavailable stub without it).
     sandbox_adapter: Box<dyn SandboxAdapter>,
     vms: HashMap<VmName, Arc<dyn VmHandle>>,
     /// VMs created with networking enabled.
@@ -58,7 +56,7 @@ impl VmManager {
     pub fn new(adapter: Arc<dyn VmAdapter>, snapshot_dir: String) -> Self {
         Self {
             adapter,
-            sandbox_adapter: Box::new(GuestSandlockAdapter::new()),
+            sandbox_adapter: crate::default_sandbox_adapter(),
             vms: HashMap::new(),
             net_vms: HashSet::new(),
             pool: Vec::new(),
