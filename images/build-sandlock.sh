@@ -15,7 +15,10 @@ FORCE=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 TAG="go/v0.8.5"
-PATCH="$REPO/thirdparty/sandlock-v0.8.5-musl.patch"
+PATCHES=(
+    "$REPO/thirdparty/sandlock-v0.8.5-musl.patch"
+    "$REPO/thirdparty/sandlock-v0.8.5-denyfd.patch"
+)
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/terrarium"
 SRC="$CACHE_DIR/sandlock-src"
@@ -40,16 +43,18 @@ fi
 git -C "$SRC" fetch --tags --quiet
 git -C "$SRC" checkout --quiet "$TAG"
 
-# 2. musl patch (idempotent)
-if git -C "$SRC" apply --check "$PATCH" 2>/dev/null; then
-    echo "applying $(basename "$PATCH")"
-    git -C "$SRC" apply "$PATCH"
-elif git -C "$SRC" apply --reverse --check "$PATCH" 2>/dev/null; then
-    echo "patch already applied"
-else
-    echo "ERROR: patch $PATCH applies neither forward nor reverse" >&2
-    exit 1
-fi
+# 2. local patches (idempotent)
+for PATCH in "${PATCHES[@]}"; do
+    if git -C "$SRC" apply --check "$PATCH" 2>/dev/null; then
+        echo "applying $(basename "$PATCH")"
+        git -C "$SRC" apply "$PATCH"
+    elif git -C "$SRC" apply --reverse --check "$PATCH" 2>/dev/null; then
+        echo "patch already applied: $(basename "$PATCH")"
+    else
+        echo "ERROR: patch $PATCH applies neither forward nor reverse" >&2
+        exit 1
+    fi
+done
 
 # 3. musl cross toolchain
 if [ ! -x "$TOOLCHAIN/bin/x86_64-linux-musl-gcc" ]; then

@@ -1,0 +1,129 @@
+diff --git a/crates/sandlock-core/src/seccomp/notif.rs b/crates/sandlock-core/src/seccomp/notif.rs
+index e4a4bc0..22c35d5 100644
+--- a/crates/sandlock-core/src/seccomp/notif.rs
++++ b/crates/sandlock-core/src/seccomp/notif.rs
+@@ -1430,11 +1430,70 @@ pub(crate) fn rewrite_exec_path_to_fd(
+ // Response dispatch
+ // ============================================================
+ 
++/// Structured policy-denial channel (Terrarium M7).
++///
++/// The seccomp supervisor's deny responses are the only authoritative
++/// "this syscall was rejected by policy" signal available to the
++/// supervisor process. Surfacing them as a machine-readable stream lets
++/// the supervising runtime (Terrarium's guest-proxy) classify denials
++/// without sniffing child stderr text.
++///
++/// The channel is a single fd named by `SANDBOX_DENY_FD` in the
++/// supervisor's environment (the owning runtime inherits the write end
++/// into the sandlock process with CLOEXEC cleared). Every deny response
++/// is emitted as one JSON line: `{"syscall":"<name>","errno":<n>}` for
++/// EACCES/EPERM responses and `{"syscall":"<name>","killed":<sig>}` for
++/// supervisor kills. All other responses (ordinary child failures,
++/// EAGAIN defer backpressure, EEXIST COW races, ...) are NOT denials and
++/// are never recorded.
++///
++/// Best-effort by design: a missing/invalid fd, a closed pipe, or a
++/// partial write must never affect sandbox execution — the record is
++/// advisory.
++fn deny_fd() -> Option<i32> {
++    static FD: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
++    *FD.get_or_init(|| {
++        std::env::var("SANDBOX_DENY_FD")
++            .ok()
++            .and_then(|s| s.parse::<i32>().ok())
++            .filter(|fd| *fd >= 0)
++    })
++}
++
++fn write_deny_record(nr: i64, fields: &str) {
++    if let Some(fd) = deny_fd() {
++        let line = format!("{{\"syscall\":\"{}\",{}}}\n", syscall_name(nr), fields);
++        // Best-effort single write; the pipe is drained by the owner after
++        // the run. A closed pipe (owner gone) is simply ignored.
++        let _ = unsafe {
++            libc::write(fd, line.as_ptr() as *const libc::c_void, line.len())
++        };
++    }
++}
++
++/// Record a policy-denial errno response. EACCES/EPERM are the errno
++/// values the supervisor itself uses when it rejects a syscall; any other
++/// errno is an ordinary failure, not a denial.
++fn maybe_record_deny_errno(nr: i64, errno: i32) {
++    if matches!(errno, libc::EACCES | libc::EPERM) {
++        write_deny_record(nr, &format!("\"errno\":{}", errno));
++    }
++}
++
++/// Record a supervisor kill — the child's process group was killed as a
++/// denial action.
++fn maybe_record_deny_kill(nr: i64, sig: i32) {
++    write_deny_record(nr, &format!("\"killed\":{}", sig));
++}
++
+ /// Dispatch a `NotifAction` to the appropriate low-level response function.
+-fn send_response(fd: RawFd, id: u64, action: NotifAction) -> io::Result<()> {
++fn send_response(fd: RawFd, id: u64, nr: i64, action: NotifAction) -> io::Result<()> {
+     match action {
+         NotifAction::Continue => respond_continue(fd, id),
+-        NotifAction::Errno(errno) => respond_errno(fd, id, errno),
++        NotifAction::Errno(errno) => {
++            maybe_record_deny_errno(nr, errno);
++            respond_errno(fd, id, errno)
++        }
+         NotifAction::InjectFd { srcfd, targetfd } => {
+             inject_fd(fd, id, srcfd, targetfd)?;
+             respond_continue(fd, id)
+@@ -1471,6 +1530,7 @@ fn send_response(fd: RawFd, id: u64, action: NotifAction) -> io::Result<()> {
+         NotifAction::Kill { sig, pgid } => {
+             // Kill the entire process group, then return ENOMEM so the
+             // seccomp notification is resolved (avoids a kernel warning).
++            maybe_record_deny_kill(nr, sig);
+             unsafe { libc::killpg(pgid, sig) };
+             respond_errno(fd, id, ENOMEM)
+         }
+@@ -1896,13 +1956,14 @@ async fn run_deferred_within(deferred: Deferred, limit: std::time::Duration) ->
+ fn spawn_deferred(
+     fd: RawFd,
+     id: u64,
++    nr: i64,
+     deferred: Deferred,
+     permit: tokio::sync::OwnedSemaphorePermit,
+ ) {
+     tokio::spawn(async move {
+         let _permit = permit; // released when the worker finishes
+         let action = run_deferred_within(deferred, DEFER_TIMEOUT).await;
+-        let _ = send_response(fd, id, action);
++        let _ = send_response(fd, id, nr, action);
+     });
+ }
+ 
+@@ -2073,15 +2134,15 @@ async fn handle_notification(
+         if crate::freeze::requires_freeze_on_continue(nr)
+             || crate::resource::requires_process_creation_tracking(&notif, fd, policy)
+         {
+-            let _ = send_response(fd, notif.id, NotifAction::Errno(libc::EPERM));
++            let _ = send_response(fd, notif.id, nr, NotifAction::Errno(libc::EPERM));
+             return;
+         }
+         match Arc::clone(defer_sem).try_acquire_owned() {
+-            Ok(permit) => spawn_deferred(fd, notif.id, deferred, permit),
++            Ok(permit) => spawn_deferred(fd, notif.id, nr, deferred, permit),
+             // Too many deferrals in flight: fail fast with EAGAIN rather than
+             // blocking the loop or letting unbounded workers accrete.
+             Err(_) => {
+-                let _ = send_response(fd, notif.id, NotifAction::Errno(libc::EAGAIN));
++                let _ = send_response(fd, notif.id, nr, NotifAction::Errno(libc::EAGAIN));
+             }
+         }
+         return;
+@@ -2089,7 +2150,7 @@ async fn handle_notification(
+ 
+     // Ignore error — child may have exited between recv and response.
+     let exec_continued = exec_freeze.is_some() && matches!(action, NotifAction::Continue);
+-    let send_result = send_response(fd, notif.id, action);
++    let send_result = send_response(fd, notif.id, nr, action);
+ 
+     if let Some(trace) = creation_trace {
+         if send_result.is_ok() {
