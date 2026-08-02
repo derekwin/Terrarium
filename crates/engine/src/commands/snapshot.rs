@@ -15,7 +15,3 @@ pub(crate) async fn cmd_snapshot(mgr: &VmManager, cmd: Command) -> Response {
         Err(e) => Response::err(e.to_string()),
     }
 }
-
-pub(crate) fn cmd_restore(_mgr: &mut VmManager, _cmd: Command) -> Response {
-    Response::err("restore not implemented")
-}

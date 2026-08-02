@@ -123,8 +123,9 @@ pub(crate) async fn cmd_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
     };
     match mgr.destroy(&name).await {
         Ok(()) => {
-            // Snapshot artifacts of this VM are garbage until restore
-            // lands (then this becomes opt-in). Best-effort cleanup.
+            // Snapshot artifacts of this VM are garbage — snapshot is a
+            // platform extension (not an agent contract) with no state
+            // reload consumer yet. Best-effort cleanup.
             // Path scheme: the CH adapter produces
             // {snapshot_dir}/terra-snap-{name}.bin (its snapshot() forms
             // /tmp/terra-snap-{name}.bin; snapshot_dir is "/tmp" in the

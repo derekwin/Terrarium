@@ -68,8 +68,8 @@ impl ChClient {
 
     /// Send an HTTP request with an explicit timeout.
     ///
-    /// Long-running operations (snapshot, restore) need a much larger
-    /// budget than interactive ones (info, resize).
+    /// Long-running operations (snapshot) need a much larger budget than
+    /// interactive ones (info, resize).
     async fn request_with_timeout(
         &self,
         timeout: Duration,
@@ -202,8 +202,8 @@ impl ChClient {
     // Snapshot API
     // -----------------------------------------------------------------------
 
-    /// Snapshot/restore can take minutes for large-memory VMs — far beyond
-    /// the interactive default timeout.
+    /// Snapshot can take minutes for large-memory VMs — far beyond the
+    /// interactive default timeout.
     const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(600);
 
     pub async fn vm_snapshot(&self, snapshot_path: &str) -> Result<()> {

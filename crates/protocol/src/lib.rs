@@ -61,7 +61,7 @@ pub struct Command {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_memory_mb: Option<u64>,
 
-    // snapshot / restore
+    // snapshot
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_path: Option<String>,
 

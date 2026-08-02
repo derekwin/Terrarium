@@ -383,13 +383,6 @@ pub trait VmAdapter: Send + Sync {
     /// physical isolation boundary between tenants (D1); Availability — the
     /// create-time physical quota (D4).
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, AdapterError>;
-    /// Boundary contract (L1): Availability — session-lifecycle restore of
-    /// a persisted state (D3).
-    async fn restore(
-        &self,
-        snapshot: &Snapshot,
-        spec: &VmSpec,
-    ) -> Result<Box<dyn VmHandle>, AdapterError>;
 }
 
 #[async_trait]
@@ -450,25 +443,10 @@ pub trait VmHandle: Send + Sync {
         ))
     }
 
-    /// Take a VM snapshot. Boundary contract (L1): Availability — state
-    /// persistence for fault tolerance (D3). Not supported by all backends.
+    /// Take a VM snapshot. Platform fault-tolerance extension (not an
+    /// agent-session contract — see docs/design/agent-exec-env-boundaries.md
+    /// D3). Not supported by all backends.
     async fn snapshot(&self) -> Result<Snapshot, AdapterError>;
-
-    /// Pause the VM. Boundary contract (L1): Availability — resource
-    /// control (D3). Default: not supported.
-    async fn pause(&self) -> Result<(), AdapterError> {
-        Err(AdapterError::not_supported(
-            "pause not supported by this backend",
-        ))
-    }
-
-    /// Resume a paused VM. Boundary contract (L1): Availability — resource
-    /// control (D3). Default: not supported.
-    async fn resume(&self) -> Result<(), AdapterError> {
-        Err(AdapterError::not_supported(
-            "resume not supported by this backend",
-        ))
-    }
 
     /// Boundary contract (L1): Availability — resource reclamation (D3/D4).
     async fn shutdown(&self) -> Result<(), AdapterError>;

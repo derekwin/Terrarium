@@ -11,7 +11,7 @@ mod fs;
 mod handle;
 mod process;
 
-use adapter_traits::{AdapterError, Snapshot, VmAdapter, VmHandle, VmSpec};
+use adapter_traits::{AdapterError, VmAdapter, VmHandle, VmSpec};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -41,15 +41,5 @@ impl VmAdapter for ChAdapter {
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, AdapterError> {
         spec.validate().map_err(AdapterError::invalid_argument)?;
         handle::spawn_vm(spec, self.config.clone()).await
-    }
-
-    async fn restore(
-        &self,
-        _snapshot: &Snapshot,
-        _spec: &VmSpec,
-    ) -> Result<Box<dyn VmHandle>, AdapterError> {
-        Err(AdapterError::not_supported(
-            "CH restore not yet implemented via adapter",
-        ))
     }
 }

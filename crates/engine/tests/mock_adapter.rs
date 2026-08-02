@@ -7,7 +7,7 @@ mod common;
 #[cfg(test)]
 mod tests {
     use super::common::MockVmAdapter;
-    use adapter_traits::{ExecOpts, FsSpec, Snapshot, UpperPolicy, VmAdapter, VmName, VmSpec};
+    use adapter_traits::{ExecOpts, FsSpec, UpperPolicy, VmAdapter, VmName, VmSpec};
 
     fn test_spec() -> VmSpec {
         VmSpec {
@@ -73,16 +73,6 @@ mod tests {
         let handle = adapter.create(&spec).await.unwrap();
 
         assert!(handle.snapshot().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_restore_not_supported() {
-        let adapter = MockVmAdapter::new();
-        let snapshot = Snapshot {
-            path: "/fake".into(),
-        };
-        let spec = test_spec();
-        assert!(adapter.restore(&snapshot, &spec).await.is_err());
     }
 
     #[tokio::test]

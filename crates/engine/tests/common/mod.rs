@@ -465,20 +465,6 @@ impl VmAdapter for MockVmAdapter {
     {
         Box::pin(async move { Ok(Box::new(self.build_handle()) as Box<dyn VmHandle>) })
     }
-
-    fn restore<'life0, 'life1, 'life2, 'async_trait>(
-        &'life0 self,
-        _snapshot: &'life1 Snapshot,
-        _spec: &'life2 VmSpec,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn VmHandle>, AdapterError>> + Send + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        'life2: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move { Err(AdapterError::not_supported("restore")) })
-    }
 }
 
 // ---------------------------------------------------------------------------
