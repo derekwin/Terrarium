@@ -285,6 +285,104 @@ fn sandbox_create_emits_audit_resource_event() {
     assert!(field(resources[0], "detail").is_some());
 }
 
+/// M3 regression: on the C3 handle path the backend executes
+/// `bound ∪ per-call`, so the STORED policy's audit flags must survive a
+/// per-call override that carries none. The audit events gate on the
+/// actually-executed policy, not on the replace-chain
+/// `default.merged_with(per_call.or(stored))` (which silently drops the
+/// stored policy — including its audit flags — whenever an override is
+/// present). Pre-fix: the executed exec had `audit.exec=true` but the
+/// gating policy had `audit.exec=false` → no event was emitted.
+#[test]
+fn stored_audit_exec_survives_per_call_override_without_audit() {
+    let stored = policy_with_audit(AuditSpec {
+        exec: true,
+        deny: false,
+        resource: false,
+    });
+    let per_call = policy_with_audit(AuditSpec::default()); // all-false audit
+    let sandbox = MockSandboxAdapter::new();
+    let handle_log = sandbox.exec_log();
+    let mut mgr = make_mgr(sandbox);
+    let ((resp, id), events) = run_captured(async {
+        let id = create_sandbox(&mut mgr, "research", &stored).await;
+        let resp = execute(
+            &mut mgr,
+            Command::create("unused", "/fake/vmlinux")
+                .with_command("sandbox_exec")
+                .with_id(&id)
+                .with_args(vec!["echo".into(), "hi".into()])
+                .with_sandbox(true)
+                .with_policy(per_call),
+        )
+        .await;
+        (resp, id)
+    });
+    assert!(resp.is_ok(), "sandbox_exec failed: {:?}", resp);
+
+    // The raw per-call override reached the bound handle (C3 plumbing)...
+    let log = handle_log.lock().unwrap();
+    assert_eq!(log.len(), 1, "one handle.exec call");
+    assert!(
+        log[0].policy_override.is_some(),
+        "the per-call override must reach the handle"
+    );
+
+    // ...yet the stored audit.exec flag still gates an audit event.
+    let execs: Vec<_> = events
+        .iter()
+        .filter(|f| field(f, "audit") == Some("exec"))
+        .collect();
+    assert_eq!(
+        execs.len(),
+        1,
+        "stored audit.exec must survive a per-call override, got {events:?}"
+    );
+    assert_eq!(field(execs[0], "sandbox_id"), Some(id.as_str()));
+}
+
+/// M3 symmetric: a denied exec (stderr "denied") with the stored
+/// `audit.deny` flag and a per-call override carrying no audit flags must
+/// still emit `audit.deny` — the gating policy is the executed one
+/// (`bound ∪ per_call`), not the replace-chain that drops the stored
+/// policy.
+#[test]
+fn stored_audit_deny_survives_per_call_override_without_audit() {
+    let stored = policy_with_audit(AuditSpec {
+        exec: false,
+        deny: true,
+        resource: false,
+    });
+    let per_call = policy_with_audit(AuditSpec::default());
+    let mut mgr = make_mgr(MockSandboxAdapter::new().with_exec("", "sandlock: access denied\n", 1));
+    let ((resp, id), events) = run_captured(async {
+        let id = create_sandbox(&mut mgr, "research", &stored).await;
+        let resp = execute(
+            &mut mgr,
+            Command::create("unused", "/fake/vmlinux")
+                .with_command("sandbox_exec")
+                .with_id(&id)
+                .with_args(vec!["cat".into(), "/etc/passwd".into()])
+                .with_sandbox(true)
+                .with_policy(per_call),
+        )
+        .await;
+        (resp, id)
+    });
+    assert!(resp.is_ok(), "sandbox_exec failed: {:?}", resp);
+
+    let denies: Vec<_> = events
+        .iter()
+        .filter(|f| field(f, "audit") == Some("deny"))
+        .collect();
+    assert_eq!(
+        denies.len(),
+        1,
+        "stored audit.deny must survive a per-call override, got {events:?}"
+    );
+    assert_eq!(field(denies[0], "sandbox_id"), Some(id.as_str()));
+}
+
 /// T4: VM resize is a platform action with no per-sandbox policy — it is
 /// always audited as `audit = "resource", kind = "vm_resize"`.
 #[test]

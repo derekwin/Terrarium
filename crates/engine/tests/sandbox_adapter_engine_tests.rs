@@ -217,7 +217,7 @@ async fn test_sandbox_exec_blocking_override_precedence_through_handle() {
     let override_policy = make_policy(
         vec![],
         ResourceLimits {
-            memory_mb: Some(1024),
+            memory_mb: Some(512),
             ..Default::default()
         },
     );
@@ -369,6 +369,180 @@ async fn test_sandbox_exec_unsandboxed_stays_direct() {
     assert!(
         handle_log.lock().unwrap().is_empty(),
         "sandbox:false must not route through the handle"
+    );
+}
+
+/// M2 (policy-model.md §3.5): a per-call override may not escalate the
+/// sandbox's limits beyond the tenant VM's physical quota — the G2 check
+/// wired at sandbox_create cannot see this, because the override is only
+/// ever merged at exec time. On the handle path the backend executes
+/// `bound ∪ override`; 1024 MB on the default 512 MB tenant VM must be
+/// rejected before dispatch, with the `validate_with_vm` message.
+#[tokio::test]
+async fn test_sandbox_exec_override_over_vm_quota_rejected() {
+    let sandbox = MockSandboxAdapter::new();
+    let handle_log = sandbox.exec_log();
+    let mut mgr = make_mgr(sandbox);
+
+    let id = create_sandbox(&mut mgr, "research").await;
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_policy(make_policy(
+                vec![],
+                ResourceLimits {
+                    memory_mb: Some(1024),
+                    ..Default::default()
+                },
+            )),
+    )
+    .await;
+    assert!(!resp.is_ok(), "over-quota override must be rejected");
+    assert!(
+        resp.error.unwrap().contains("exceeds VM quota"),
+        "validate_with_vm error message expected"
+    );
+    assert!(
+        handle_log.lock().unwrap().is_empty(),
+        "the handle must never see an over-quota override"
+    );
+}
+
+/// M2, background path: `exec_background` receives the effective policy —
+/// the quota check runs before dispatch, so no session is registered and
+/// no guest exec is started for an over-quota override.
+#[tokio::test]
+async fn test_sandbox_exec_background_override_over_vm_quota_rejected() {
+    let vm = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("ok\n", "", 0);
+    let vm_log = vm.exec_log();
+    let mut mgr = VmManager::new(Arc::new(vm), "/tmp".into())
+        .with_sandbox_adapter(Box::new(MockSandboxAdapter::new()));
+
+    let id = create_sandbox(&mut mgr, "research").await;
+    vm_log.lock().unwrap().clear();
+
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["sleep".into(), "1".into()])
+            .with_exec_mode("background")
+            .with_policy(make_policy(
+                vec![],
+                ResourceLimits {
+                    memory_mb: Some(1024),
+                    ..Default::default()
+                },
+            )),
+    )
+    .await;
+    assert!(
+        !resp.is_ok(),
+        "over-quota background override must be rejected"
+    );
+    assert!(resp.error.unwrap().contains("exceeds VM quota"));
+    assert!(
+        vm_log.lock().unwrap().is_empty(),
+        "no guest exec may start for an over-quota override"
+    );
+}
+
+/// M2: an override within the tenant VM's quota still succeeds, and the
+/// handle receives the raw override (C3 plumbing unchanged).
+#[tokio::test]
+async fn test_sandbox_exec_override_within_vm_quota_ok() {
+    let sandbox = MockSandboxAdapter::new().with_exec("out\n", "", 0);
+    let handle_log = sandbox.exec_log();
+    let mut mgr = make_mgr(sandbox);
+
+    let id = create_sandbox(&mut mgr, "research").await;
+    let override_policy = make_policy(
+        vec![],
+        ResourceLimits {
+            memory_mb: Some(256),
+            ..Default::default()
+        },
+    );
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_policy(override_policy.clone()),
+    )
+    .await;
+    assert!(resp.is_ok(), "in-quota override: {:?}", resp);
+    let log = handle_log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].policy_override.as_ref(), Some(&override_policy));
+}
+
+/// M2, stored-limits fallback: the executed policy on the handle path is
+/// `bound ∪ per_call`, so a stored limit can violate the quota even when
+/// the override itself carries none. Create on a 1024 MB tenant VM with a
+/// 1024 MB stored limit (valid at create), shrink the VM to 512 MB, then
+/// exec with a policy-free override: the executed policy keeps the stored
+/// 1024 MB (fallback) → rejected. The replace-chain gating policy
+/// (`default ∪ override`) would carry no memory limit and pass — this
+/// locks the quota check to the ACTUAL executed policy.
+#[tokio::test]
+async fn test_sandbox_exec_stored_limit_over_quota_after_vm_shrink_rejected() {
+    let sandbox = MockSandboxAdapter::new();
+    let handle_log = sandbox.exec_log();
+    let mut mgr = make_mgr(sandbox);
+
+    // Tenant VM cold-boots at 1024 MB; stored limit 1024 MB ⊆ quota → OK.
+    let stored = make_policy(
+        vec![],
+        ResourceLimits {
+            memory_mb: Some(1024),
+            ..Default::default()
+        },
+    );
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research")
+            .with_memory_mb(1024)
+            .with_policy(stored),
+    )
+    .await;
+    assert!(resp.is_ok(), "sandbox_create: {:?}", resp);
+    let id = resp.data.unwrap()["id"].as_str().unwrap().to_string();
+
+    // Shrink the tenant VM to 512 MB (the recorded quota follows, M1).
+    let resp = execute(
+        &mut mgr,
+        Command::new("resize")
+            .with_name("tenant-research")
+            .with_memory_bytes(512 * 1024 * 1024),
+    )
+    .await;
+    assert!(resp.is_ok(), "resize: {:?}", resp);
+
+    // Policy-free override → the executed policy falls back to the stored
+    // 1024 MB limit, now over the 512 MB quota.
+    let resp = execute(
+        &mut mgr,
+        Command::new("sandbox_exec")
+            .with_id(&id)
+            .with_args(vec!["echo".into(), "hi".into()])
+            .with_policy(make_policy(vec![], ResourceLimits::default())),
+    )
+    .await;
+    assert!(
+        !resp.is_ok(),
+        "stored limit over the current quota must be rejected"
+    );
+    assert!(resp.error.unwrap().contains("exceeds VM quota"));
+    assert!(
+        handle_log.lock().unwrap().is_empty(),
+        "the handle must never see an over-quota exec"
     );
 }
 

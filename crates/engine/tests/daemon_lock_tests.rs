@@ -126,10 +126,118 @@ async fn test_second_command_served_during_blocking_exec() {
     let _ = std::fs::remove_file(&socket);
 }
 
-/// D2 parity on the daemon's lock-free blocking path: `prepare_blocking_exec`
-/// injects the engine default for a sandboxed `exec` with no policy — the
-/// injection keys on the sandbox flag, not on the command name. An
-/// unsandboxed `exec` reaches the guest policy-free.
+/// M2 on the daemon's lock-free blocking path: `prepare_blocking_exec`
+/// validates the ACTUAL executed policy of a sandboxed blocking
+/// `sandbox_exec` against the tenant VM's quota before resolving the
+/// handle. A per-call override declaring more memory than the 512 MB
+/// default quota must fail with the `validate_with_vm` message, and the
+/// exec must never reach the guest.
+#[tokio::test]
+async fn test_daemon_blocking_sandbox_exec_over_vm_quota_rejected() {
+    let socket = format!("/tmp/terra-test-quota-sb-{}.sock", std::process::id());
+    let _ = std::fs::remove_file(&socket);
+
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("done\n", "", 0);
+    let exec_log = adapter.exec_log();
+
+    let sock = socket.clone();
+    let daemon = tokio::spawn(async move {
+        terrarium_engine::daemon::run(&sock, None, Arc::new(adapter), false).await
+    });
+    wait_for_socket(&socket).await;
+
+    let resp = roundtrip(
+        &socket,
+        r#"{"command":"create","name":"quota-vm","kernel":"/fake/vmlinux"}"#,
+    )
+    .await;
+    assert_eq!(resp["status"], "ok", "create should succeed: {resp}");
+
+    let resp = roundtrip(
+        &socket,
+        r#"{"command":"sandbox_create","tenant":"research","name":"unused","kernel":"/fake/vmlinux"}"#,
+    )
+    .await;
+    assert_eq!(resp["status"], "ok", "sandbox_create: {resp}");
+    let id = resp["data"]["id"].as_str().unwrap().to_string();
+    exec_log.lock().unwrap().clear(); // drop the workdir mkdir call
+
+    let resp = roundtrip(
+        &socket,
+        &format!(
+            r#"{{"command":"sandbox_exec","id":"{}","args":["echo","hi"],"policy":{{"capabilities":[],"limits":{{"memory_mb":1024}},"default":"deny","audit":{{"deny":false,"exec":false,"resource":false}},"version":1}}}}"#,
+            id
+        ),
+    )
+    .await;
+    assert_eq!(resp["status"], "error", "over-quota override must fail");
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("exceeds VM quota"),
+        "validate_with_vm message expected: {resp}"
+    );
+    assert!(
+        exec_log.lock().unwrap().is_empty(),
+        "no guest exec may run for an over-quota override"
+    );
+
+    daemon.abort();
+    let _ = std::fs::remove_file(&socket);
+}
+
+/// M2 on the direct variant of `prepare_blocking_exec`: a sandboxed
+/// blocking `exec` (no sandbox id) with an over-quota policy runs the
+/// computed effective policy — the quota check must reject it before the
+/// guest exec.
+#[tokio::test]
+async fn test_daemon_blocking_sandboxed_exec_over_vm_quota_rejected() {
+    let socket = format!("/tmp/terra-test-quota-exec-{}.sock", std::process::id());
+    let _ = std::fs::remove_file(&socket);
+
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec("done\n", "", 0);
+    let exec_log = adapter.exec_log();
+
+    let sock = socket.clone();
+    let daemon = tokio::spawn(async move {
+        terrarium_engine::daemon::run(&sock, None, Arc::new(adapter), false).await
+    });
+    wait_for_socket(&socket).await;
+
+    let resp = roundtrip(
+        &socket,
+        r#"{"command":"create","name":"quota-vm","kernel":"/fake/vmlinux"}"#,
+    )
+    .await;
+    assert_eq!(resp["status"], "ok", "create should succeed: {resp}");
+    exec_log.lock().unwrap().clear();
+
+    let resp = roundtrip(
+        &socket,
+        r#"{"command":"exec","name":"quota-vm","args":["echo","hi"],"sandbox":true,"policy":{"capabilities":[],"limits":{"memory_mb":1024},"default":"deny","audit":{"deny":false,"exec":false,"resource":false},"version":1}}"#,
+    )
+    .await;
+    assert_eq!(resp["status"], "error", "over-quota exec must fail");
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("exceeds VM quota"),
+        "validate_with_vm message expected: {resp}"
+    );
+    assert!(
+        exec_log.lock().unwrap().is_empty(),
+        "no guest exec may run for an over-quota policy"
+    );
+
+    daemon.abort();
+    let _ = std::fs::remove_file(&socket);
+}
 #[tokio::test]
 async fn test_blocking_exec_sandboxed_injects_default_policy() {
     let socket = format!("/tmp/terra-test-inject-{}.sock", std::process::id());

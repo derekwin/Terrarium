@@ -107,12 +107,12 @@ pub(crate) async fn run_exec(
     // carries sandlock's execute grant). An unsandboxed exec stays
     // policy-free; when sandboxed, the effective policy is base ∪ user.
     let policy = if sandbox {
-        Some(match per_call.clone().or(stored) {
-            Some(user) => default_sandbox_policy().merged_with(&user),
+        Some(match per_call.as_ref().or(stored.as_ref()) {
+            Some(user) => default_sandbox_policy().merged_with(user),
             None => default_sandbox_policy(),
         })
     } else {
-        per_call.clone().or(stored)
+        per_call.clone().or_else(|| stored.clone())
     };
     if !sandbox && policy.is_some() {
         return Response::err("'policy' requires sandboxed exec (set 'sandbox': true)");
@@ -126,6 +126,14 @@ pub(crate) async fn run_exec(
     let mode = exec_mode.as_deref().unwrap_or("blocking");
     match mode {
         "background" => {
+            // M2: the background exec runs with the computed `policy` —
+            // enforce the VM quota before dispatch, so an over-quota
+            // override never spawns a session or a guest exec.
+            if let Some(policy) = policy.as_ref() {
+                if let Err(err) = validate_exec_quota(mgr, vm_name, policy) {
+                    return err;
+                }
+            }
             let session_id = uuid::Uuid::new_v4().to_string();
             match mgr
                 .exec_background(
@@ -160,10 +168,26 @@ pub(crate) async fn run_exec(
             if let Some(sb_id) = sandbox_id.as_deref() {
                 if sandbox {
                     if let Some(handle) = mgr.sandbox_handle(sb_id) {
+                        // M2/M3: the backend executes `bound ∪ per_call`,
+                        // NOT the replace-chain `policy` — compute the
+                        // ACTUAL executed policy (it carries the stored
+                        // policy's limits-as-fallback and audit flags),
+                        // validate its limits against the VM quota, and
+                        // gate the audit events on it.
+                        let executed = handle_executed_policy(stored.as_ref(), per_call.as_ref());
+                        if let Err(err) = validate_exec_quota(mgr, vm_name, &executed) {
+                            return err;
+                        }
                         let cmd = sandbox_exec_command(args, work_dir, per_call, timeout);
                         let prepared = PreparedExec::Sandbox { handle, cmd };
-                        return prepared_exec_audited(prepared, policy.as_ref(), sb_id, args).await;
+                        return prepared_exec_audited(prepared, Some(&executed), sb_id, args).await;
                     }
+                }
+            }
+            // Direct blocking path: the computed `policy` is what runs.
+            if let Some(policy) = policy.as_ref() {
+                if let Err(err) = validate_exec_quota(mgr, vm_name, policy) {
+                    return err;
                 }
             }
             blocking_exec_audited(
@@ -197,6 +221,53 @@ fn sandbox_exec_command(
         policy_override,
         timeout_secs: Some(timeout_secs),
     }
+}
+
+/// The policy a sandboxed blocking exec actually runs with on the C3
+/// handle path (the sandlock backend's `bound ∪ per-call` merge): the
+/// policy fixed at `sandbox_create` (`default ∪ stored` — reconstructed
+/// here from the record's raw user policy, which is what create bound)
+/// unioned with the per-call override.
+///
+/// This is NOT `default.merged_with(per_call.or(stored))`: the `.or()`
+/// replace-chain silently drops the stored policy whenever an override is
+/// present, losing its limits-as-fallback and its audit flags — exactly
+/// what the executed policy keeps. Audit gating and quota validation must
+/// see this executed policy, or they describe a policy that never ran.
+fn handle_executed_policy(
+    stored: Option<&SandboxPolicy>,
+    per_call: Option<&SandboxPolicy>,
+) -> SandboxPolicy {
+    let bound = match stored {
+        Some(user) => default_sandbox_policy().merged_with(user),
+        None => default_sandbox_policy(),
+    };
+    match per_call {
+        Some(override_policy) => bound.merged_with(override_policy),
+        None => bound,
+    }
+}
+
+/// M2 (policy-model.md §3.5): reject an exec whose effective policy's
+/// limits exceed the tenant VM's current physical quota.
+/// `SandboxPolicy::validate_with_vm` is only wired at `sandbox_create`;
+/// without this check a per-call override (or a post-create VM shrink)
+/// could run limits the VM cannot honor. The executed policy is
+/// path-specific: the direct/background paths run the computed `policy`,
+/// the C3 handle path runs `bound ∪ per_call` (see
+/// [`handle_executed_policy`]). No `VmPolicy` → nothing to validate
+/// against (mirrors the create-path guard).
+fn validate_exec_quota(
+    mgr: &VmManager,
+    vm_name: &str,
+    executed: &SandboxPolicy,
+) -> Result<(), Response> {
+    if let Some(vm_policy) = mgr.vm_policy(vm_name) {
+        if let Err(err) = executed.validate_with_vm(vm_policy) {
+            return Err(Response::err(err));
+        }
+    }
+    Ok(())
 }
 
 /// A blocking exec resolved while the manager lock is held. The `Arc`
@@ -280,12 +351,12 @@ pub(crate) fn prepare_blocking_exec(
     // The bound handle path uses the per-call override + create-bound
     // policy instead; this effective policy serves the direct paths.
     let policy = if sandbox {
-        Some(match per_call.clone().or(stored_policy) {
-            Some(user) => default_sandbox_policy().merged_with(&user),
+        Some(match per_call.as_ref().or(stored_policy.as_ref()) {
+            Some(user) => default_sandbox_policy().merged_with(user),
             None => default_sandbox_policy(),
         })
     } else {
-        per_call.clone().or(stored_policy)
+        per_call.clone().or_else(|| stored_policy.clone())
     };
     if !sandbox && policy.is_some() {
         return Err(Response::err(
@@ -313,6 +384,13 @@ pub(crate) fn prepare_blocking_exec(
     if sandbox {
         if let Some(record) = &sandbox_record {
             if let Some(handle) = &record.handle {
+                // M2/M3: the backend executes `bound ∪ per_call`, NOT the
+                // replace-chain `policy` — return the ACTUAL executed
+                // policy (it carries the stored policy's limits-as-fallback
+                // and audit flags) so the caller gates audit and enforces
+                // the VM quota on the policy that really runs.
+                let executed = handle_executed_policy(stored_policy.as_ref(), per_call.as_ref());
+                validate_exec_quota(mgr, &name, &executed)?;
                 return Ok(PreparedBlockingExec {
                     prepared: PreparedExec::Sandbox {
                         handle: handle.clone(),
@@ -323,11 +401,17 @@ pub(crate) fn prepare_blocking_exec(
                             timeout,
                         ),
                     },
-                    policy,
+                    policy: Some(executed),
                     audit_id,
                 });
             }
         }
+    }
+
+    // Direct path (unsandboxed, or pre-C3 record without a handle): the
+    // computed `policy` is what runs — enforce the VM quota on it.
+    if let Some(policy) = policy.as_ref() {
+        validate_exec_quota(mgr, &name, policy)?;
     }
 
     let handle = mgr.get_handle(&name).ok_or_else(|| {

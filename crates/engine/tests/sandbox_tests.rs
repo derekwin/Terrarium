@@ -642,7 +642,7 @@ async fn test_sandbox_exec_policy_override_precedence() {
     let override_policy = make_policy(
         vec![],
         ResourceLimits {
-            memory_mb: Some(1024),
+            memory_mb: Some(512),
             procs: Some(10),
             ..Default::default()
         },
