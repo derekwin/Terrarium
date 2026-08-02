@@ -147,6 +147,19 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
         Err(resp) => return resp,
     };
 
+    // G2: the two-layer invariant — sandbox limits ⊆ VM quota
+    // (policy-model.md §3.5). The tenant VM is registered by now (spawn
+    // stored its `VmPolicy`), so validate the user's requested limits
+    // against the VM's physical quota and reject the create on violation.
+    // No limits → trivially valid.
+    if let Some(user) = policy.as_ref() {
+        if let Some(vm_policy) = mgr.vm_policy(&vm_name) {
+            if let Err(err) = user.validate_with_vm(vm_policy) {
+                return Response::err(err);
+            }
+        }
+    }
+
     // 48-bit suffix: a collision with a live record would silently drop
     // its workdir mapping (bare HashMap::insert), so re-roll until free.
     let mut id = new_sandbox_id();

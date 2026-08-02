@@ -22,7 +22,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use adapter_traits::{
-    AdapterError, ExecOpts, SandboxAdapter, SandboxPolicy, VmAdapter, VmHandle, VmName, VmSpec,
+    AdapterError, ExecOpts, SandboxAdapter, SandboxPolicy, VmAdapter, VmHandle, VmName, VmPolicy,
+    VmSpec,
 };
 
 /// Central VM registry for the controller.
@@ -34,6 +35,10 @@ pub struct VmManager {
     /// with the `sandlock` feature, an unavailable stub without it).
     sandbox_adapter: Box<dyn SandboxAdapter>,
     vms: HashMap<VmName, Arc<dyn VmHandle>>,
+    /// Each VM's VM-layer policy (recorded at spawn via
+    /// `VmSpec::to_policy`) — the physical quota that sandbox resource
+    /// limits must stay within (policy-model.md §3.5).
+    vm_policies: HashMap<VmName, VmPolicy>,
     /// VMs created with networking enabled.
     net_vms: HashSet<String>,
     /// Warm pool slots (idle agent VMs ready for hot-plug assignment).
@@ -58,6 +63,7 @@ impl VmManager {
             adapter,
             sandbox_adapter: crate::default_sandbox_adapter(),
             vms: HashMap::new(),
+            vm_policies: HashMap::new(),
             net_vms: HashSet::new(),
             pool: Vec::new(),
             pool_next_id: 0,
@@ -118,6 +124,8 @@ impl VmManager {
         if net {
             self.net_vms.insert(name.to_string());
         }
+        let policy = spec.to_policy();
+        self.vm_policies.insert(name.clone(), policy);
         self.vms.insert(name, Arc::from(handle));
         Ok(())
     }
@@ -171,6 +179,14 @@ impl VmManager {
         self.vms.get(name).map(|v| v.as_ref())
     }
 
+    /// The recorded VM-layer policy of a registered VM — the physical
+    /// quota that sandbox resource limits must stay within
+    /// (`SandboxPolicy::validate_with_vm`). `None` when the VM is not
+    /// registered.
+    pub fn vm_policy(&self, name: &str) -> Option<&VmPolicy> {
+        self.vm_policies.get(name)
+    }
+
     /// Get an `Arc` clone of a handle (for background tasks).
     pub fn get_handle(&self, name: &str) -> Option<Arc<dyn VmHandle>> {
         self.vms.get(name).cloned()
@@ -182,13 +198,14 @@ impl VmManager {
     }
 
     /// Atomically remove `name` from every auxiliary registry: the VM map,
-    /// the net-enabled set, warm-pool slots, sandbox records pointing at
-    /// this VM, and any in-flight background sessions on it (marked
-    /// `terminated` — their VM is gone, so they can never complete; the
-    /// completion task never overwrites a non-running status). Returns the
-    /// removed handle when the VM was registered.
+    /// its VM-layer policy, the net-enabled set, warm-pool slots, sandbox
+    /// records pointing at this VM, and any in-flight background sessions
+    /// on it (marked `terminated` — their VM is gone, so they can never
+    /// complete; the completion task never overwrites a non-running
+    /// status). Returns the removed handle when the VM was registered.
     fn unregister(&mut self, name: &str) -> Option<Arc<dyn VmHandle>> {
         let handle = self.vms.remove(name);
+        self.vm_policies.remove(name);
         self.net_vms.remove(name);
         self.pool.retain(|s| s.name != name);
         self.sandboxes.retain(|_, r| r.vm_name != name);

@@ -482,6 +482,87 @@ async fn test_sandbox_create_stores_and_echoes_policy() {
     assert!(resp.data.unwrap()["policy"].is_null());
 }
 
+/// G2: the two-layer invariant (policy-model §3.5) — a sandbox whose
+/// requested limits fit within the tenant VM's physical quota creates fine.
+/// The tenant VM cold-boots at 512 MB (build_spec default); 256 ≤ 512.
+#[tokio::test]
+async fn test_sandbox_create_limits_within_vm_quota_ok() {
+    let mut mgr = make_mgr();
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research")
+            .with_policy(make_policy(
+                vec![],
+                ResourceLimits {
+                    memory_mb: Some(256),
+                    ..Default::default()
+                },
+            )),
+    )
+    .await;
+    assert!(resp.is_ok(), "limits within quota: {:?}", resp);
+    assert_eq!(resp.data.unwrap()["vm"], "tenant-research");
+}
+
+/// G2: a sandbox requesting more memory than the tenant VM's physical
+/// quota is rejected at create with the `validate_with_vm` message.
+/// The tenant VM cold-boots at 512 MB; 1024 > 512.
+#[tokio::test]
+async fn test_sandbox_create_limits_exceeding_vm_quota_rejected() {
+    let mut mgr = make_mgr();
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research")
+            .with_policy(make_policy(
+                vec![],
+                ResourceLimits {
+                    memory_mb: Some(1024),
+                    ..Default::default()
+                },
+            )),
+    )
+    .await;
+    assert!(!resp.is_ok(), "limits over VM quota must be rejected");
+    assert!(
+        resp.error.unwrap().contains("exceeds VM quota"),
+        "validate_with_vm error message expected"
+    );
+}
+
+/// G2: a tenant VM created with a small physical quota (256 MB) rejects a
+/// sandbox requesting 512 MB.
+#[tokio::test]
+async fn test_sandbox_create_limits_vs_small_vm_rejected() {
+    let mut mgr = make_mgr();
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("research")
+            .with_memory_mb(256)
+            .with_policy(make_policy(
+                vec![],
+                ResourceLimits {
+                    memory_mb: Some(512),
+                    ..Default::default()
+                },
+            )),
+    )
+    .await;
+    assert!(
+        !resp.is_ok(),
+        "512 MB limit on a 256 MB VM must be rejected"
+    );
+    assert!(
+        resp.error.unwrap().contains("exceeds VM quota"),
+        "validate_with_vm error message expected"
+    );
+}
+
 /// sandbox_exec without a per-call policy inherits the stored one.
 #[tokio::test]
 async fn test_sandbox_exec_inherits_stored_policy() {
