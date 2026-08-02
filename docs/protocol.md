@@ -125,7 +125,7 @@ Sandbox 是租户共享 VM（`tenant-<tenant>`）内的一个会话（独立工�
 | 事件 | 触发 | 字段 |
 |---|---|---|
 | `audit.exec` | 沙箱化 exec 完成（`policy.audit.exec`） | `sandbox_id`, `args`, `exit_code`, `duration_ms` |
-| `audit.deny` | 沙箱化 exec 被策略拒绝——guest sandlock 返回含 `"denied"` 的失败（`policy.audit.deny`） | `sandbox_id`, `args`, `reason` |
+| `audit.deny` | 沙箱化 exec 被策略拒绝——guest sandlock 后端拒绝该 exec，guest-proxy 将子进程 exit code 改写为保留值 `SANDBOX_DENY_EXIT_CODE`；引擎按 exit code 判定，不嗅探 stderr 文本（`policy.audit.deny`） | `sandbox_id`, `args`, `reason` |
 | `audit.resource` | 资源声明/调整（`policy.audit.resource`）：`sandbox_create` 的 limits | `sandbox_id`, `kind`, `detail` |
 | `audit.resource` | VM `resize`（平台动作，**无条件**发射，无 sandbox 策略门控） | `kind: "vm_resize"`, `vm_name`, `cpus`, `memory_bytes` |
 
