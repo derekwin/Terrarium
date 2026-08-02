@@ -335,6 +335,42 @@ impl VmSpec {
         }
         Ok(())
     }
+
+    /// Project this create-time spec into the design's [`VmPolicy`] — the
+    /// VM-layer physical policy owned by the `VmAdapter` (policy-model.md
+    /// §2.1). `VmSpec` remains the create-time implementation carrier;
+    /// this is the canonical projection the engine records per VM, so the
+    /// sandbox-limits-⊆-VM-quota invariant (§3.5) has a concrete quota to
+    /// check against.
+    ///
+    /// Mapping: `net` → [`VmNetwork::Nat`] when networking is enabled,
+    /// else [`VmNetwork::None`] (`VmSpec` has no bridge equivalent);
+    /// storage `upper` comes from the `fs` layer spec (persistent name or
+    /// ephemeral); the bandwidth field has no `VmSpec` counterpart and
+    /// stays `None`.
+    pub fn to_policy(&self) -> VmPolicy {
+        VmPolicy {
+            resources: VmResources {
+                cpus: self.boot_vcpus,
+                memory_mb: self.memory_mb,
+                max_cpus: self.max_vcpus,
+                max_memory_mb: self.max_memory_mb,
+                bandwidth_kbps: None,
+            },
+            network: if self.net {
+                VmNetwork::Nat
+            } else {
+                VmNetwork::None
+            },
+            storage: VmStorage {
+                upper: self
+                    .fs
+                    .as_ref()
+                    .map(|fs| fs.upper.clone())
+                    .unwrap_or(UpperPolicy::Ephemeral),
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +379,12 @@ impl VmSpec {
 
 #[async_trait]
 pub trait VmAdapter: Send + Sync {
+    /// Boundary contract (L1): Confidentiality + Integrity — the VM is the
+    /// physical isolation boundary between tenants (D1); Availability — the
+    /// create-time physical quota (D4).
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, AdapterError>;
+    /// Boundary contract (L1): Availability — session-lifecycle restore of
+    /// a persisted state (D3).
     async fn restore(
         &self,
         snapshot: &Snapshot,
@@ -353,9 +394,12 @@ pub trait VmAdapter: Send + Sync {
 
 #[async_trait]
 pub trait VmHandle: Send + Sync {
+    /// Boundary contract (L1): Availability — inspectability of VM state
+    /// and resource usage (D3/D6).
     async fn info(&self) -> Result<VmInfo, AdapterError>;
 
-    /// Resize vCPUs and/or memory. Backends that don't support this
+    /// Boundary contract (L1): Availability — runtime resource governance
+    /// (D4). Resize vCPUs and/or memory. Backends that don't support this
     /// return an error.
     async fn resize(&self, cpu: Option<u32>, memory: Option<u64>) -> Result<(), AdapterError>;
 
@@ -406,23 +450,27 @@ pub trait VmHandle: Send + Sync {
         ))
     }
 
-    /// Take a VM snapshot. Not supported by all backends.
+    /// Take a VM snapshot. Boundary contract (L1): Availability — state
+    /// persistence for fault tolerance (D3). Not supported by all backends.
     async fn snapshot(&self) -> Result<Snapshot, AdapterError>;
 
-    /// Pause the VM. Default: not supported.
+    /// Pause the VM. Boundary contract (L1): Availability — resource
+    /// control (D3). Default: not supported.
     async fn pause(&self) -> Result<(), AdapterError> {
         Err(AdapterError::not_supported(
             "pause not supported by this backend",
         ))
     }
 
-    /// Resume a paused VM. Default: not supported.
+    /// Resume a paused VM. Boundary contract (L1): Availability — resource
+    /// control (D3). Default: not supported.
     async fn resume(&self) -> Result<(), AdapterError> {
         Err(AdapterError::not_supported(
             "resume not supported by this backend",
         ))
     }
 
+    /// Boundary contract (L1): Availability — resource reclamation (D3/D4).
     async fn shutdown(&self) -> Result<(), AdapterError>;
     fn pid(&self) -> u32;
     /// Check if the VM/sandbox process is still running.
@@ -446,6 +494,10 @@ pub trait SandboxAdapter: Send + Sync {
     /// L2 reference-monitor entry (Complete Mediation): every command
     /// executed on the returned handle runs inside this bound context.
     ///
+    /// Boundary contract (L2): Confidentiality + Integrity (D1 isolation),
+    /// Non-interference (D1 — sibling sessions unreachable), Availability
+    /// (D4 — the resource limits bound here must stay within the VM quota).
+    ///
     /// The adapter receives an owned `Arc<dyn VmHandle>` because a session
     /// backend needs a live reference to its execution substrate at
     /// exec() time — a `&dyn` borrow cannot outlive `create`.
@@ -458,14 +510,20 @@ pub trait SandboxAdapter: Send + Sync {
 
 #[async_trait]
 pub trait SandboxHandle: Send + Sync {
+    /// Boundary contract (L2): Confidentiality + Integrity — complete
+    /// mediation of every command inside the bound context (D1/D7);
+    /// Availability — per-call resource bounds (D4).
     /// Run a command within the bound session context. The policy is fixed
     /// at create time; a per-call `policy_override` on the command is
     /// unioned onto the bound policy by the backend (never a replace).
     async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, AdapterError>;
+    /// Boundary contract (L2): Integrity — session tooling installed
+    /// inside the bound context (D2).
     /// Install persistent tools/state in the session, if the backend has
     /// any (no-op for per-exec confinement backends like guest sandlock).
     async fn setup(&self, tools: &[String]) -> Result<(), AdapterError>;
-    /// Tear down the session and release any backend resources.
+    /// Boundary contract (L2): Availability — session resource reclamation
+    /// (D3/D4). Tear down the session and release any backend resources.
     async fn destroy(&self) -> Result<(), AdapterError>;
 }
 
@@ -851,6 +909,59 @@ mod policy_tests {
         };
         let err = over.validate_with_vm(&vm).unwrap_err();
         assert!(err.contains("exceeds VM quota"), "{err}");
+    }
+
+    #[test]
+    fn vm_spec_to_policy_projects_quota_and_topology() {
+        let spec = VmSpec {
+            name: VmName::new("test-vm").unwrap(),
+            kernel: "/fake/vmlinux".into(),
+            cmdline: None,
+            boot_vcpus: 2,
+            max_vcpus: Some(4),
+            memory_mb: 1024,
+            max_memory_mb: Some(2048),
+            initramfs: None,
+            net: true,
+            fs: Some(FsSpec {
+                layers: vec!["base".into()],
+                upper: UpperPolicy::Persistent("work".into()),
+            }),
+        };
+        let policy = spec.to_policy();
+        assert_eq!(
+            policy.resources,
+            VmResources {
+                cpus: 2,
+                memory_mb: 1024,
+                max_cpus: Some(4),
+                max_memory_mb: Some(2048),
+                bandwidth_kbps: None,
+            }
+        );
+        assert_eq!(policy.network, VmNetwork::Nat);
+        assert_eq!(policy.storage.upper, UpperPolicy::Persistent("work".into()));
+    }
+
+    #[test]
+    fn vm_spec_to_policy_defaults_no_net_ephemeral_upper() {
+        let spec = VmSpec {
+            name: VmName::new("test-vm").unwrap(),
+            kernel: "/fake/vmlinux".into(),
+            cmdline: None,
+            boot_vcpus: 1,
+            max_vcpus: None,
+            memory_mb: 256,
+            max_memory_mb: None,
+            initramfs: None,
+            net: false,
+            fs: None,
+        };
+        let policy = spec.to_policy();
+        assert_eq!(policy.network, VmNetwork::None);
+        assert_eq!(policy.storage.upper, UpperPolicy::Ephemeral);
+        assert_eq!(policy.resources.max_cpus, None);
+        assert_eq!(policy.resources.max_memory_mb, None);
     }
 
     #[test]
