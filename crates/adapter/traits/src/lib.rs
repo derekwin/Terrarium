@@ -283,6 +283,21 @@ pub struct ExecCommand {
     pub timeout_secs: Option<u64>,
 }
 
+/// Reserved exit code signaling "the guest sandlock backend rejected this
+/// exec by policy" — the structured deny signal.
+///
+/// guest-proxy owns the sandlock integration: when a sandboxed child's
+/// stderr carries sandlock's "denied" marker, guest-proxy rewrites the
+/// child's exit code to this value before serializing the result. The
+/// engine's audit layer matches `exit_code == SANDBOX_DENY_EXIT_CODE`
+/// instead of parsing stderr text, so a wording change in sandlock can
+/// never silently kill the deny audit.
+///
+/// The value (200, the "200 series" convention) is reserved: a sandboxed
+/// exec must never legitimately produce it, and it travels the wire
+/// unchanged in [`ExecResult::exit_code`].
+pub const SANDBOX_DENY_EXIT_CODE: i32 = 200;
+
 /// Result of a command execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecResult {

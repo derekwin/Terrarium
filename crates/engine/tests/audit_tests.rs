@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use adapter_traits::{
     AuditSpec, Capability, DefaultAccess, FileAccess, PathPattern, SandboxPolicy,
+    SANDBOX_DENY_EXIT_CODE,
 };
 use common::{MockSandboxAdapter, MockVmAdapter};
 use terrarium_engine::commands::execute;
@@ -213,8 +214,10 @@ fn sandbox_exec_with_audit_off_emits_nothing() {
     );
 }
 
-/// T3: a sandboxed exec rejected by the guest sandlock (stderr contains
-/// "denied") emits `audit.deny` when `audit.deny` is set.
+/// T3: a sandboxed exec rejected by the guest sandlock (reserved deny exit
+/// code) emits `audit.deny` when `audit.deny` is set. The deny is signaled
+/// by the exit code alone — the stderr carries no marker, only the reason
+/// (M4: the engine never sniffs stderr text).
 #[test]
 fn denied_sandbox_exec_emits_audit_deny_event() {
     let user = policy_with_audit(AuditSpec {
@@ -222,7 +225,11 @@ fn denied_sandbox_exec_emits_audit_deny_event() {
         deny: true,
         resource: false,
     });
-    let mut mgr = make_mgr(MockSandboxAdapter::new().with_exec("", "sandlock: access denied\n", 1));
+    let mut mgr = make_mgr(MockSandboxAdapter::new().with_exec(
+        "",
+        "sandlock: EACCES opening /etc/passwd\n",
+        SANDBOX_DENY_EXIT_CODE,
+    ));
     let ((resp, id), events) = run_captured(async {
         let id = create_sandbox(&mut mgr, "research", &user).await;
         let resp = execute(
@@ -245,9 +252,10 @@ fn denied_sandbox_exec_emits_audit_deny_event() {
         .collect();
     assert_eq!(denies.len(), 1, "one audit.deny event, got {events:?}");
     assert_eq!(field(denies[0], "sandbox_id"), Some(id.as_str()));
-    assert!(
-        field(denies[0], "reason").unwrap_or("").contains("denied"),
-        "reason carries the sandlock rejection"
+    assert_eq!(
+        field(denies[0], "reason"),
+        Some("sandlock: EACCES opening /etc/passwd"),
+        "the stderr text is the informative deny reason"
     );
 }
 
@@ -341,7 +349,7 @@ fn stored_audit_exec_survives_per_call_override_without_audit() {
     assert_eq!(field(execs[0], "sandbox_id"), Some(id.as_str()));
 }
 
-/// M3 symmetric: a denied exec (stderr "denied") with the stored
+/// M3 symmetric: a denied exec (reserved deny exit code) with the stored
 /// `audit.deny` flag and a per-call override carrying no audit flags must
 /// still emit `audit.deny` — the gating policy is the executed one
 /// (`bound ∪ per_call`), not the replace-chain that drops the stored
@@ -354,7 +362,11 @@ fn stored_audit_deny_survives_per_call_override_without_audit() {
         resource: false,
     });
     let per_call = policy_with_audit(AuditSpec::default());
-    let mut mgr = make_mgr(MockSandboxAdapter::new().with_exec("", "sandlock: access denied\n", 1));
+    let mut mgr = make_mgr(MockSandboxAdapter::new().with_exec(
+        "",
+        "sandlock: EACCES opening /etc/passwd\n",
+        SANDBOX_DENY_EXIT_CODE,
+    ));
     let ((resp, id), events) = run_captured(async {
         let id = create_sandbox(&mut mgr, "research", &stored).await;
         let resp = execute(

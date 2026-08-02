@@ -253,10 +253,13 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
         match sandbox::wrap_for_sandbox(&args, work_dir, policy.as_ref(), |p| {
             std::path::Path::new(p).exists()
         }) {
-            Ok(argv) => sandbox::exec_isolated(&argv[0], &argv, work_dir, timeout, exec_id),
+            Ok(argv) => sandbox::exec_isolated(&argv[0], &argv, work_dir, timeout, exec_id)
+                .map(sandbox::classify_sandlock_result),
             Err(e) => Err(e),
         }
     } else {
+        // Unsandboxed execs pass through untouched — a legitimate exit 200
+        // must never be rewritten into the deny signal.
         sandbox::exec_isolated(&args[0], &args, work_dir, timeout, exec_id)
     };
 

@@ -248,6 +248,29 @@ pub fn exec_isolated(
     })
 }
 
+/// Map a sandlock policy denial onto the structured deny signal (M4).
+///
+/// sandlock rejects denied accesses by printing a "denied" marker to
+/// stderr and exiting nonzero. Sniffing that text in the engine is
+/// fragile — a wording change in the pinned binary would silently kill
+/// the deny audit. This module owns the sandlock integration, so it owns
+/// the marker check: on a denial the exit code is rewritten to
+/// `adapter_traits::SANDBOX_DENY_EXIT_CODE`, which travels the wire and is
+/// what consumers match on. Everything else passes through unchanged.
+///
+/// Callers must apply this ONLY to sandboxed execs — a legitimate exit
+/// 200 from an unsandboxed command must never be misclassified.
+pub fn classify_sandlock_result(result: ExecResult) -> ExecResult {
+    if result.exit_code != 0 && result.stderr.contains("denied") {
+        ExecResult {
+            exit_code: adapter_traits::SANDBOX_DENY_EXIT_CODE,
+            ..result
+        }
+    } else {
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,5 +657,46 @@ mod tests {
         assert_eq!(policy.limits.memory_mb, Some(512));
         assert_eq!(policy.limits.procs, Some(20));
         assert_eq!(policy.default, DefaultAccess::Deny);
+    }
+
+    /// A sandlock policy denial: nonzero child exit + the "denied" marker
+    /// on stderr → the exit code is rewritten to the reserved deny code so
+    /// the engine audits the deny structurally (M4), never by parsing
+    /// stderr text.
+    #[test]
+    fn sandlock_denial_maps_to_deny_exit_code() {
+        let result = classify_sandlock_result(ExecResult {
+            stdout: String::new(),
+            stderr: "sandlock: access denied for /etc/passwd".into(),
+            exit_code: 1,
+        });
+        assert_eq!(result.exit_code, adapter_traits::SANDBOX_DENY_EXIT_CODE);
+        // stdout/stderr pass through untouched — stderr stays the reason.
+        assert_eq!(result.stderr, "sandlock: access denied for /etc/passwd");
+    }
+
+    /// A plain nonzero exit without the marker is NOT a denial — pass
+    /// through unchanged (e.g. `sh -c "exit 127"`).
+    #[test]
+    fn nonzero_without_denial_marker_passes_through() {
+        let result = classify_sandlock_result(ExecResult {
+            stdout: String::new(),
+            stderr: "command not found".into(),
+            exit_code: 127,
+        });
+        assert_eq!(result.exit_code, 127);
+        assert_eq!(result.stderr, "command not found");
+    }
+
+    /// A successful exec passes through unchanged.
+    #[test]
+    fn successful_exec_passes_through() {
+        let result = classify_sandlock_result(ExecResult {
+            stdout: "hi\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+        });
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "hi\n");
     }
 }

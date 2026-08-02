@@ -4,11 +4,14 @@
 //!
 //! Event model (consumers aggregate from the log stream):
 //! - `audit.exec` — a sandboxed exec completed (exit_code + duration).
-//! - `audit.deny` — a sandboxed exec was rejected by policy (the guest
-//!   sandlock denial surfaces as a "denied" failure).
+//! - `audit.deny` — a sandboxed exec rejected by policy. The guest
+//!   sandlock denial is a structured signal: guest-proxy rewrites the
+//!   child exit code to `adapter_traits::SANDBOX_DENY_EXIT_CODE` on
+//!   detection, and this module matches on that code — never on stderr
+//!   text, which is carried only as the informative `reason`.
 //! - `audit.resource` — resource declarations / adjustments (sandbox limits
 //!   at create; VM resize as an always-on platform event).
-use adapter_traits::{AdapterError, ExecResult, SandboxPolicy};
+use adapter_traits::{AdapterError, ExecResult, SandboxPolicy, SANDBOX_DENY_EXIT_CODE};
 
 /// `audit.exec` — a sandbox exec completed, with its exit code and
 /// wall-clock duration. Gated by `policy.audit.exec`; `None` policy emits
@@ -58,8 +61,12 @@ pub(crate) fn audit_resource(
 }
 
 /// Record the audit events for one completed exec: `audit.exec` when the
-/// exec completed with an exit code, plus `audit.deny` when it failed and
-/// the failure text contains "denied" (the guest sandlock rejection).
+/// exec completed with an exit code, plus `audit.deny` when it exited with
+/// [`SANDBOX_DENY_EXIT_CODE`] — the structured guest sandlock deny signal
+/// (guest-proxy rewrites the child exit code to it on detection; see the
+/// constant's docs). The stderr text is carried as the deny `reason` —
+/// informative, never a signal. An `AdapterError` is a transport failure,
+/// not a policy denial, and emits nothing.
 ///
 /// Shared by every exec path (blocking `run_exec`, the daemon's lock-free
 /// prepared path, and background sessions) so the audit semantics stay
@@ -74,15 +81,13 @@ pub(crate) fn audit_exec_outcome(
     match result {
         Ok(r) => {
             audit_exec(policy, sandbox_id, args, r.exit_code, duration_ms);
-            if r.exit_code != 0 && r.stderr.contains("denied") {
+            if r.exit_code == SANDBOX_DENY_EXIT_CODE {
                 audit_deny(policy, sandbox_id, args, r.stderr.trim());
             }
         }
-        Err(e) => {
-            let text = e.to_string();
-            if text.contains("denied") {
-                audit_deny(policy, sandbox_id, args, text.trim());
-            }
+        Err(_) => {
+            // A policy denial arrives as an Ok result with the reserved
+            // deny exit code — never as an AdapterError.
         }
     }
 }
@@ -104,7 +109,7 @@ pub(crate) fn audit_vm_resize(vm: &str, cpus: Option<u32>, memory_bytes: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adapter_traits::AuditSpec;
+    use adapter_traits::{AuditSpec, SANDBOX_DENY_EXIT_CODE};
     use std::sync::{Arc, Mutex};
     use tracing::field::Field;
     use tracing::subscriber::with_default;
@@ -331,16 +336,19 @@ mod tests {
         assert_eq!(field(&events[0], "memory_bytes"), Some("1073741824"));
     }
 
+    /// A sandlock denial as it now arrives (M4): the reserved deny exit
+    /// code with a marker-free stderr — the structured signal is the code,
+    /// the stderr text is only the informative reason.
     fn denied_result() -> Result<ExecResult, AdapterError> {
         Ok(ExecResult {
             stdout: String::new(),
-            stderr: "sandlock: access denied for /etc/passwd".into(),
-            exit_code: 1,
+            stderr: "sandlock: EACCES opening /etc/passwd".into(),
+            exit_code: SANDBOX_DENY_EXIT_CODE,
         })
     }
 
     #[test]
-    fn exec_outcome_emits_exec_and_deny_when_stderr_denied() {
+    fn exec_outcome_emits_exec_and_deny_on_deny_exit_code() {
         let sub = RecordingSubscriber::default();
         with_default(sub.clone(), || {
             audit_exec_outcome(
@@ -361,6 +369,11 @@ mod tests {
             .find(|f| field(f, "audit") == Some("deny"))
             .unwrap();
         assert_eq!(field(deny, "duration_ms"), None, "deny carries no duration");
+        assert_eq!(
+            field(deny, "reason"),
+            Some("sandlock: EACCES opening /etc/passwd"),
+            "the stderr text is the informative reason, not the signal"
+        );
     }
 
     #[test]
@@ -386,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_outcome_engine_error_containing_denied_emits_deny_only() {
+    fn exec_outcome_engine_error_emits_nothing() {
         let sub = RecordingSubscriber::default();
         with_default(sub.clone(), || {
             audit_exec_outcome(
@@ -397,16 +410,9 @@ mod tests {
                 0,
             );
         });
-        let events = recorded(&sub);
-        assert_eq!(
-            events.len(),
-            1,
-            "engine error has no exit code → no exec event"
-        );
-        assert_eq!(field(&events[0], "audit"), Some("deny"));
-        assert_eq!(
-            field(&events[0], "reason"),
-            Some("sandlock denied the exec")
+        assert!(
+            recorded(&sub).is_empty(),
+            "transport errors are not policy denials — no events"
         );
     }
 
