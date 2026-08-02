@@ -189,6 +189,16 @@ write_paths / net_allow）已移除，一律拒绝：
   判定，不嗅探 stderr 文本）、`audit.resource`（sandbox_create 的 limits
   声明 + VM resize 平台动作）。门控用生效策略（默认 ∪ 用户，`audit` 标志 OR
   合并）；事件与发射点见 `docs/protocol.md`「审计」小节。
+- **拒绝信号是结构化通道（M7）**：guest-proxy 不再从子进程 stderr 文本推断
+  拒绝。sandlock supervisor（seccomp notify 层）把每次拒绝响应写成一行 JSON
+  记录（`{"syscall":...,"errno":...}` / `{"syscall":...,"killed":...}`）到
+  `SANDBOX_DENY_FD` 指定的 fd（见 `thirdparty/sandlock-v0.8.5-denyfd.patch`）；
+  guest-proxy 仅在收到记录**且** exec 非零退出时改写 exit code 为
+  `SANDBOX_DENY_EXIT_CODE`，子进程 stderr 仅作为 `reason` 附带。覆盖边界
+  （诚实声明）：seccomp-notify 可观测的拒绝（网络、动态 deny、COW、chroot
+  等）精确上报；静态 Landlock fs 拒绝由内核直接以 EACCES 返回给子进程，
+  supervisor 不可见——此类失败按普通非零退出呈现（不产生 `audit.deny`），
+  完整覆盖需要把静态 fs 规则也路由到 notify supervisor（后续工作）。
 
 原"映射层保留协议兼容"的设计已取消——契约面即唯一实现，无兼容输入。
 

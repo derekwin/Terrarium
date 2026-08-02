@@ -9,15 +9,26 @@ use std::time::Duration;
 
 use adapter_traits::{
     Capability, DefaultAccess, Direction, FileAccess, PathPattern, SandboxPolicy,
+    SANDBOX_DENY_EXIT_CODE,
 };
 
 pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    /// Structured policy-denial signal (M7): true only when the sandlock
+    /// supervisor itself reported a denied syscall on the deny channel —
+    /// never inferred from child stderr text.
+    pub denied: bool,
 }
 
 const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+
+/// fd the sandlock supervisor writes deny records to (inherited via
+/// `SANDBOX_DENY_FD`, CLOEXEC cleared; see the sandlock denyfd patch).
+/// A high number avoids colliding with the stdio/pipe fds std::process
+/// allocates for the child.
+const DENY_FD: i32 = 63;
 
 /// In-guest candidates for the sandlock confinement binary, probed in
 /// order; the first that exists wins. Cold-boot VMs have composed layers
@@ -149,10 +160,29 @@ pub fn exec_isolated(
     work_dir: &str,
     timeout_secs: u64,
     exec_id: Option<&str>,
+    deny_signal: bool,
 ) -> Result<ExecResult, String> {
     if let Some(id) = exec_id {
         crate::registry::validate_exec_id(id)?;
     }
+
+    // Structured deny channel (M7): when confining with sandlock, hand it
+    // a pipe via SANDBOX_DENY_FD (fd 63, CLOEXEC cleared) and classify
+    // denials from what sandlock itself writes — never from child stderr
+    // text. Unsandboxed execs skip the pipe entirely.
+    let (deny_read, deny_write) = if deny_signal {
+        let mut fds = [0 as libc::c_int; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(format!(
+                "failed to create deny pipe: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        (fds[0], fds[1])
+    } else {
+        (-1, -1)
+    };
+
     let mut child = Command::new(program);
     // Agents inherit an almost-empty environment from init; give commands
     // a sane default PATH so /sbin tools (ip, apk, ...) resolve.
@@ -160,7 +190,27 @@ pub fn exec_isolated(
         "PATH",
         std::env::var("PATH").unwrap_or_else(|_| "/sbin:/usr/sbin:/bin:/usr/bin".into()),
     );
-    let mut child = child
+    if deny_write >= 0 {
+        child.env("SANDBOX_DENY_FD", DENY_FD.to_string());
+        // SAFETY: dup2/fcntl are async-signal-safe and only touch this
+        // process's own fds inside the pre-exec child.
+        unsafe {
+            child.pre_exec(move || {
+                if libc::dup2(deny_write, DENY_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let flags = libc::fcntl(DENY_FD, libc::F_GETFD);
+                if flags < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(DENY_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = match child
         .args(&args[1..])
         .current_dir(work_dir)
         .stdin(Stdio::null())
@@ -168,7 +218,18 @@ pub fn exec_isolated(
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
-        .map_err(|e| format!("spawn failed: {}", e))?;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            close_fd_pair(deny_read, deny_write);
+            return Err(format!("spawn failed: {}", e));
+        }
+    };
+    // The child owns the write end now — close ours so EOF arrives the
+    // moment the sandlock supervisor exits.
+    if deny_write >= 0 {
+        unsafe { libc::close(deny_write) };
+    }
 
     let pid = child.id();
 
@@ -182,6 +243,7 @@ pub fn exec_isolated(
                 // just above; killpg(-pid, SIGKILL) kills the whole group.
                 unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
                 let _ = child.wait();
+                drain_and_close_deny(deny_read);
                 return Err(e);
             }
             Some(crate::registry::UnregisterGuard::new(id))
@@ -221,19 +283,25 @@ pub fn exec_isolated(
 
     let exit_status = match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
         Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(format!("wait failed: {}", e)),
+        Ok(Err(e)) => {
+            drain_and_close_deny(deny_read);
+            return Err(format!("wait failed: {}", e));
+        }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             // SAFETY: pid is a valid process ID from Command::spawn().
             // killpg(-pid, SIGKILL) kills the entire process group,
             // preventing orphaned grandchild processes.
             unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            drain_and_close_deny(deny_read);
             return Err(format!("command timed out after {}s", timeout_secs));
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
+            drain_and_close_deny(deny_read);
             return Err("process wait thread panicked".into());
         }
     };
 
+    let denied = drain_and_close_deny(deny_read);
     let stdout_buf = stdout_rx.recv().unwrap_or_default();
     let stderr_buf = stderr_rx.recv().unwrap_or_default();
 
@@ -245,30 +313,57 @@ pub fn exec_isolated(
         stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
         stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
         exit_code: exit_status.code().unwrap_or(-1),
+        denied,
     })
 }
 
-/// Map a sandlock policy denial onto the structured deny signal (M4).
+/// Map a sandlock policy denial onto the structured deny signal (M7).
 ///
-/// sandlock rejects denied accesses by printing a "denied" marker to
-/// stderr and exiting nonzero. Sniffing that text in the engine is
-/// fragile — a wording change in the pinned binary would silently kill
-/// the deny audit. This module owns the sandlock integration, so it owns
-/// the marker check: on a denial the exit code is rewritten to
-/// `adapter_traits::SANDBOX_DENY_EXIT_CODE`, which travels the wire and is
-/// what consumers match on. Everything else passes through unchanged.
+/// The signal is `ExecResult.denied` — set only when the sandlock
+/// supervisor itself reported a denied syscall through the deny channel
+/// (see [`exec_isolated`] and the sandlock denyfd patch). The exit code
+/// is rewritten to `adapter_traits::SANDBOX_DENY_EXIT_CODE` when a denial
+/// was reported AND the exec failed: a denied attempt the command
+/// recovered from (exit 0) is not a rejected exec. Child stderr text is
+/// NEVER a signal — it is carried only as the informative reason.
 ///
 /// Callers must apply this ONLY to sandboxed execs — a legitimate exit
 /// 200 from an unsandboxed command must never be misclassified.
-pub fn classify_sandlock_result(result: ExecResult) -> ExecResult {
-    if result.exit_code != 0 && result.stderr.contains("denied") {
-        ExecResult {
-            exit_code: adapter_traits::SANDBOX_DENY_EXIT_CODE,
-            ..result
-        }
-    } else {
-        result
+pub fn classify_sandlock_result(mut result: ExecResult) -> ExecResult {
+    if result.denied && result.exit_code != 0 {
+        result.exit_code = SANDBOX_DENY_EXIT_CODE;
     }
+    result
+}
+
+/// Close both ends of a deny pipe (best-effort).
+fn close_fd_pair(read_fd: libc::c_int, write_fd: libc::c_int) {
+    if read_fd >= 0 {
+        unsafe { libc::close(read_fd) };
+    }
+    if write_fd >= 0 {
+        unsafe { libc::close(write_fd) };
+    }
+}
+
+/// Drain the deny pipe to EOF and report whether the sandlock supervisor
+/// recorded any denial. Best-effort: read errors are treated as
+/// end-of-stream; the fd is always closed.
+fn drain_and_close_deny(read_fd: libc::c_int) -> bool {
+    if read_fd < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 4096];
+    let mut saw_record = false;
+    loop {
+        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n <= 0 {
+            break; // 0 = EOF; <0 = error (best-effort, treat as EOF)
+        }
+        saw_record = true;
+    }
+    unsafe { libc::close(read_fd) };
+    saw_record
 }
 
 #[cfg(test)]
@@ -659,44 +754,81 @@ mod tests {
         assert_eq!(policy.default, DefaultAccess::Deny);
     }
 
-    /// A sandlock policy denial: nonzero child exit + the "denied" marker
-    /// on stderr → the exit code is rewritten to the reserved deny code so
-    /// the engine audits the deny structurally (M4), never by parsing
-    /// stderr text.
+    /// A deny record from the sandlock supervisor + nonzero exit → the
+    /// exit code is rewritten to the reserved deny code (M7). Child
+    /// stderr is carried only as the informative reason.
     #[test]
-    fn sandlock_denial_maps_to_deny_exit_code() {
+    fn supervisor_deny_record_maps_to_deny_exit_code() {
         let result = classify_sandlock_result(ExecResult {
             stdout: String::new(),
-            stderr: "sandlock: access denied for /etc/passwd".into(),
+            stderr: "cat: /etc/passwd: Permission denied".into(),
             exit_code: 1,
+            denied: true,
         });
         assert_eq!(result.exit_code, adapter_traits::SANDBOX_DENY_EXIT_CODE);
-        // stdout/stderr pass through untouched — stderr stays the reason.
-        assert_eq!(result.stderr, "sandlock: access denied for /etc/passwd");
+        assert_eq!(result.stderr, "cat: /etc/passwd: Permission denied");
     }
 
-    /// A plain nonzero exit without the marker is NOT a denial — pass
-    /// through unchanged (e.g. `sh -c "exit 127"`).
+    /// No deny record → never a deny, even when stderr contains the word
+    /// "denied" — the pre-M7 fuzzy sniffing misclassified this.
     #[test]
-    fn nonzero_without_denial_marker_passes_through() {
+    fn denied_stderr_without_deny_record_passes_through() {
+        let result = classify_sandlock_result(ExecResult {
+            stdout: String::new(),
+            stderr: "echo: denied".into(),
+            exit_code: 3,
+            denied: false,
+        });
+        assert_eq!(result.exit_code, 3);
+        assert_eq!(result.stderr, "echo: denied");
+    }
+
+    /// A deny record with a successful exec is not a rejected exec.
+    #[test]
+    fn deny_record_with_zero_exit_passes_through() {
+        let result = classify_sandlock_result(ExecResult {
+            stdout: "hi\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            denied: true,
+        });
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "hi\n");
+    }
+
+    /// A plain nonzero exit passes through unchanged.
+    #[test]
+    fn nonzero_without_deny_record_passes_through() {
         let result = classify_sandlock_result(ExecResult {
             stdout: String::new(),
             stderr: "command not found".into(),
             exit_code: 127,
+            denied: false,
         });
         assert_eq!(result.exit_code, 127);
         assert_eq!(result.stderr, "command not found");
     }
 
-    /// A successful exec passes through unchanged.
+    /// The deny pipe drain detects a supervisor record.
     #[test]
-    fn successful_exec_passes_through() {
-        let result = classify_sandlock_result(ExecResult {
-            stdout: "hi\n".into(),
-            stderr: String::new(),
-            exit_code: 0,
-        });
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(result.stdout, "hi\n");
+    fn deny_pipe_drain_detects_records() {
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (r, w) = (fds[0], fds[1]);
+        let rec = b"{\"syscall\":\"openat\",\"errno\":13}\n";
+        let written = unsafe { libc::write(w, rec.as_ptr() as *const libc::c_void, rec.len()) };
+        assert_eq!(written as usize, rec.len());
+        unsafe { libc::close(w) };
+        assert!(drain_and_close_deny(r), "a record must be detected");
+    }
+
+    /// An empty deny pipe means no denial.
+    #[test]
+    fn deny_pipe_drain_empty_is_not_denied() {
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (r, w) = (fds[0], fds[1]);
+        unsafe { libc::close(w) };
+        assert!(!drain_and_close_deny(r), "no records → no deny");
     }
 }
