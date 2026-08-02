@@ -192,6 +192,38 @@ impl VmManager {
         self.vms.get(name).cloned()
     }
 
+    /// Update the recorded VM policy's current allocation after a
+    /// successful resize.
+    ///
+    /// The recorded policy is the quota sandbox resource limits are
+    /// validated against (`SandboxPolicy::validate_with_vm`, policy-model.md
+    /// §3.5); without this sync a resized VM keeps its boot-time quota — a
+    /// grown VM would reject sandboxes it can now host, and a shrunk VM
+    /// would admit sandboxes beyond its physical allocation. Only the
+    /// current `resources` dimensions move; the `max_*` ceilings are
+    /// unchanged (they are limits, not the current allocation). Returns an
+    /// error when the VM is not registered — never a silent no-op.
+    pub fn record_resize(
+        &mut self,
+        name: &str,
+        cpus: Option<u32>,
+        memory_mb: Option<u64>,
+    ) -> Result<(), AdapterError> {
+        let policy = self
+            .vm_policies
+            .get_mut(name)
+            .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
+        if let Some(cpus) = cpus {
+            policy.resources.cpus = u8::try_from(cpus).map_err(|_| {
+                AdapterError::internal(format!("cpus {} exceeds the u8 range", cpus))
+            })?;
+        }
+        if let Some(memory_mb) = memory_mb {
+            policy.resources.memory_mb = memory_mb;
+        }
+        Ok(())
+    }
+
     /// List all VM names.
     pub fn list_names(&self) -> Vec<&str> {
         self.vms.keys().map(|s| s.as_ref()).collect()

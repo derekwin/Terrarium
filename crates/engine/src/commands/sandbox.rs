@@ -92,6 +92,16 @@ async fn ensure_tenant_vm(
                         let _ = mgr.pool_release(&name).await;
                         return Err(Response::err(format!("pool VM resize failed: {}", e)));
                     }
+                    // Sync the recorded policy with the post-claim
+                    // allocation (the quota sandbox limits validate
+                    // against, policy-model.md §3.5) — a stale boot-time
+                    // entry (1 vCPU / 256 MB) would reject sandboxes the
+                    // resized pool VM can host.
+                    let memory_mb = mem.map(|b| b / 1024 / 1024);
+                    if let Err(e) = mgr.record_resize(&name, cpus, memory_mb) {
+                        let _ = mgr.pool_release(&name).await;
+                        return Err(Response::err(format!("pool VM policy sync failed: {}", e)));
+                    }
                 }
             }
             return Ok((name, true));

@@ -57,7 +57,7 @@ pub(crate) async fn cmd_info(mgr: &VmManager, cmd: Command) -> Response {
     }))
 }
 
-pub(crate) async fn cmd_resize(mgr: &VmManager, cmd: Command) -> Response {
+pub(crate) async fn cmd_resize(mgr: &mut VmManager, cmd: Command) -> Response {
     let (vm, name) = match super::get_vm(mgr, &cmd) {
         Ok(v) => v,
         Err(r) => return r,
@@ -89,6 +89,14 @@ pub(crate) async fn cmd_resize(mgr: &VmManager, cmd: Command) -> Response {
         }
     }
     if let Err(e) = vm.resize(cpus, cmd.memory_bytes).await {
+        return Response::err(e.to_string());
+    }
+    // Sync the recorded policy with the new allocation: it is the quota
+    // sandbox limits are validated against (policy-model.md §3.5), so a
+    // stale boot-time entry would reject sandboxes a grown VM can host
+    // (and admit sandboxes a shrunk VM cannot). `max_*` ceilings stay.
+    let memory_mb = cmd.memory_bytes.map(|b| b / 1024 / 1024);
+    if let Err(e) = mgr.record_resize(&name, cpus, memory_mb) {
         return Response::err(e.to_string());
     }
     // VM-level resource governance is always auditable — a platform action
