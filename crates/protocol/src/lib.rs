@@ -178,12 +178,6 @@ impl Command {
         self
     }
 
-    /// Builder: set max vCPUs.
-    pub fn with_max_cpus(mut self, max: u8) -> Self {
-        self.max_cpus = Some(max);
-        self
-    }
-
     /// Set the maximum memory in MB (enables memory hotplug up to this size).
     pub fn with_max_memory_mb(mut self, max: u64) -> Self {
         self.max_memory_mb = Some(max);
@@ -202,12 +196,6 @@ impl Command {
         self
     }
 
-    /// Builder: set the system base layer (default "base").
-    pub fn with_system(mut self, name: impl Into<String>) -> Self {
-        self.system = Some(name.into());
-        self
-    }
-
     /// Builder: set virtiofs layers (highest priority first, base last).
     pub fn with_layers(mut self, layers: Vec<String>) -> Self {
         self.layers = layers;
@@ -217,12 +205,6 @@ impl Command {
     /// Builder: set exec argv.
     pub fn with_args(mut self, args: Vec<String>) -> Self {
         self.args = args;
-        self
-    }
-
-    /// Builder: set persistent upperdir name.
-    pub fn with_upper(mut self, name: impl Into<String>) -> Self {
-        self.upper = Some(name.into());
         self
     }
 
