@@ -222,11 +222,18 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
         vm_name: vm_name.clone(),
         workdir: workdir.clone(),
         created_at: now_secs(),
-        policy,
+        policy: policy.clone(),
         pool_backed,
         handle: Some(Arc::from(handle)),
     };
     mgr.sandbox_insert(record);
+    // D-phase audit: the declared resource limits are a resource
+    // declaration, recorded when the (stored user) policy asks for it.
+    // Limits only ever come from the user layer — the engine default
+    // carries none — so the stored user policy both carries and gates them.
+    if let Some(user) = policy.as_ref() {
+        crate::audit::audit_resource(Some(user), &id, "limits", &format!("{:?}", user.limits));
+    }
     Response::ok(serde_json::json!({
         "id": id,
         "vm": vm_name,

@@ -3,6 +3,7 @@
 // proc macros, so a crate-level attribute is needed.
 #![allow(clippy::useless_conversion)]
 
+pub mod audit;
 pub mod commands;
 pub mod daemon;
 pub mod manager;

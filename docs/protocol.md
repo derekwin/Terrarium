@@ -103,7 +103,8 @@ Sandbox 是租户共享 VM（`tenant-<tenant>`）内的一个会话（独立工�
   `cpu_shares`（可为空对象）。**注意**：后三者当前仅被接受与传递（校验
   值合法），默认 sandlock 后端**尚未强制实施**——不产生实际约束。
 - `default`：缺省 `"deny"`；`"allow"` **一律拒绝**（仅调试逃逸门，生产禁用）。
-- `audit`：审计规格 `{"deny": bool, "exec": bool, "resource": bool}`。
+- `audit`：审计规格 `{"deny": bool, "exec": bool, "resource": bool}`——按策略声明
+  的门控开关，驱动结构化审计事件输出（见下方「审计」小节）。
 - `version`：策略版本（审计可追溯）。
 - 未知字段一律拒绝。
 - **后端能力缺口（诚实报错）**：`File` 的 `Execute`、`Network` 的 `Inbound`、
@@ -114,6 +115,24 @@ Sandbox 是租户共享 VM（`tenant-<tenant>`）内的一个会话（独立工�
   `sandbox_list` 回显），后续 `sandbox_exec` 继承；`sandbox_exec` 自带的
   policy **整体替换**已存策略（不合并、不追加），仅对该次调用生效；二者皆无
   且沙箱化执行时注入引擎默认。
+
+### 审计（可观测性，D 阶段）
+
+`policy.audit.{deny, exec, resource}` 按策略门控结构化 tracing 事件——**审计
+通道就是日志流，不引入任何新协议面**。事件由引擎在 `exec` /
+`sandbox_exec` / `sandbox_create` / `resize` 路径发射，消费方从日志聚合：
+
+| 事件 | 触发 | 字段 |
+|---|---|---|
+| `audit.exec` | 沙箱化 exec 完成（`policy.audit.exec`） | `sandbox_id`, `args`, `exit_code`, `duration_ms` |
+| `audit.deny` | 沙箱化 exec 被策略拒绝——guest sandlock 返回含 `"denied"` 的失败（`policy.audit.deny`） | `sandbox_id`, `args`, `reason` |
+| `audit.resource` | 资源声明/调整（`policy.audit.resource`）：`sandbox_create` 的 limits | `sandbox_id`, `kind`, `detail` |
+| `audit.resource` | VM `resize`（平台动作，**无条件**发射，无 sandbox 策略门控） | `kind: "vm_resize"`, `vm_name`, `cpus`, `memory_bytes` |
+
+门控使用**生效策略**（引擎默认 ∪ 用户；`audit` 各标志按 OR 合并）。日志行示例：
+`sandbox exec audited`（`audit="exec"`）、`sandbox exec denied by policy`
+（`audit="deny"`，warn 级）、`sandbox resource audit` / `vm resize audited`
+（`audit="resource"`）。
 
 ### 文件系统（分层 virtiofs）
 

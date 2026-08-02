@@ -14,6 +14,7 @@ mod vm;
 
 use std::sync::Arc;
 
+use crate::audit;
 use crate::manager::VmManager;
 use crate::policy::default_sandbox_policy;
 use adapter_traits::{
@@ -160,14 +161,18 @@ pub(crate) async fn run_exec(
                 if sandbox {
                     if let Some(handle) = mgr.sandbox_handle(sb_id) {
                         let cmd = sandbox_exec_command(args, work_dir, per_call, timeout);
-                        return blocking_exec_response(handle.exec(&cmd).await);
+                        let prepared = PreparedExec::Sandbox { handle, cmd };
+                        return prepared_exec_audited(prepared, policy.as_ref(), sb_id, args).await;
                     }
                 }
             }
-            blocking_exec_response(
-                mgr.exec(vm_name, args, timeout, sandbox, work_dir, policy)
-                    .await,
+            blocking_exec_audited(
+                mgr.exec(vm_name, args, timeout, sandbox, work_dir, policy.clone()),
+                policy.as_ref(),
+                sandbox_id.as_deref().unwrap_or(vm_name),
+                args,
             )
+            .await
         }
         other => Response::err(format!(
             "invalid exec_mode {:?}: expected \"blocking\" or \"background\"",
@@ -214,6 +219,16 @@ pub(crate) enum PreparedExec {
     },
 }
 
+/// A resolved blocking exec plus the audit context captured at resolution:
+/// the effective policy the exec ran with (gating `audit.{exec,deny}`) and
+/// the audit subject id (the engine sandbox id for `sandbox_exec`, else
+/// the vm name).
+pub(crate) struct PreparedBlockingExec {
+    pub prepared: PreparedExec,
+    pub policy: Option<SandboxPolicy>,
+    pub audit_id: String,
+}
+
 /// Resolve a blocking `exec` / `sandbox_exec` command to its handle and
 /// options. Runs under the manager lock (cheap registry lookups); the
 /// caller drops the lock before awaiting the exec.
@@ -227,7 +242,7 @@ pub(crate) enum PreparedExec {
 pub(crate) fn prepare_blocking_exec(
     mgr: &VmManager,
     cmd: &Command,
-) -> Result<PreparedExec, Response> {
+) -> Result<PreparedBlockingExec, Response> {
     match cmd.command.as_str() {
         "exec" | "sandbox_exec" => {}
         other => return Err(Response::err(format!("Unknown command: {}", other))),
@@ -283,6 +298,14 @@ pub(crate) fn prepare_blocking_exec(
         }
     }
 
+    // Audit subject id: the engine sandbox id for `sandbox_exec`, else the
+    // vm name (the entity the caller addressed).
+    let audit_id = if cmd.command.as_str() == "sandbox_exec" {
+        cmd.id.clone().unwrap_or_else(|| name.clone())
+    } else {
+        name.clone()
+    };
+
     // C3: a sandboxed blocking sandbox_exec resolves to the session's
     // bound handle — the Arc is cloned under the lock and awaited outside
     // (the point of `prepare`). Records without a handle (pre-C3) and the
@@ -290,9 +313,18 @@ pub(crate) fn prepare_blocking_exec(
     if sandbox {
         if let Some(record) = &sandbox_record {
             if let Some(handle) = &record.handle {
-                return Ok(PreparedExec::Sandbox {
-                    handle: handle.clone(),
-                    cmd: sandbox_exec_command(&cmd.args, work_dir.as_deref(), per_call, timeout),
+                return Ok(PreparedBlockingExec {
+                    prepared: PreparedExec::Sandbox {
+                        handle: handle.clone(),
+                        cmd: sandbox_exec_command(
+                            &cmd.args,
+                            work_dir.as_deref(),
+                            per_call,
+                            timeout,
+                        ),
+                    },
+                    policy,
+                    audit_id,
                 });
             }
         }
@@ -306,8 +338,12 @@ pub(crate) fn prepare_blocking_exec(
     if let Some(work_dir) = work_dir {
         opts = opts.with_work_dir(work_dir);
     }
-    opts.policy = policy;
-    Ok(PreparedExec::Direct { handle, opts })
+    opts.policy = policy.clone();
+    Ok(PreparedBlockingExec {
+        prepared: PreparedExec::Direct { handle, opts },
+        policy,
+        audit_id,
+    })
 }
 
 /// Build the blocking-exec response — `{stdout, stderr, exit_code}` on
@@ -323,6 +359,55 @@ pub(crate) fn blocking_exec_response(result: Result<ExecResult, AdapterError>) -
         })),
         Err(e) => Response::err(e.to_string()),
     }
+}
+
+/// Await a blocking exec with audit instrumentation (shared by `run_exec`'s
+/// direct path and the daemon's lock-free prepared path). The `Instant` is
+/// taken here — at the exec call, not at command entry — so `duration_ms`
+/// is the exec's own wall-clock time. `audit_id` is the engine sandbox id
+/// for `sandbox_exec`, else the vm name; gating uses the effective policy.
+async fn blocking_exec_audited<F>(
+    exec: F,
+    policy: Option<&SandboxPolicy>,
+    audit_id: &str,
+    args: &[String],
+) -> Response
+where
+    F: std::future::Future<Output = Result<ExecResult, AdapterError>>,
+{
+    let start = std::time::Instant::now();
+    let result = exec.await;
+    audit::audit_exec_outcome(
+        policy,
+        audit_id,
+        args,
+        &result,
+        start.elapsed().as_millis() as u64,
+    );
+    blocking_exec_response(result)
+}
+
+/// Await a [`PreparedExec`] with audit instrumentation — the daemon's
+/// lock-free blocking path. Same audit semantics as [`blocking_exec_audited`].
+pub(crate) async fn prepared_exec_audited(
+    prepared: PreparedExec,
+    policy: Option<&SandboxPolicy>,
+    audit_id: &str,
+    args: &[String],
+) -> Response {
+    let start = std::time::Instant::now();
+    let result = match prepared {
+        PreparedExec::Direct { handle, opts } => handle.exec(&opts).await,
+        PreparedExec::Sandbox { handle, cmd } => handle.exec(&cmd).await,
+    };
+    audit::audit_exec_outcome(
+        policy,
+        audit_id,
+        args,
+        &result,
+        start.elapsed().as_millis() as u64,
+    );
+    blocking_exec_response(result)
 }
 
 /// The system base is implicit: tool layers stack on top of it. Append it

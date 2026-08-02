@@ -58,7 +58,7 @@ pub(crate) async fn cmd_info(mgr: &VmManager, cmd: Command) -> Response {
 }
 
 pub(crate) async fn cmd_resize(mgr: &VmManager, cmd: Command) -> Response {
-    let (vm, _name) = match super::get_vm(mgr, &cmd) {
+    let (vm, name) = match super::get_vm(mgr, &cmd) {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -91,6 +91,9 @@ pub(crate) async fn cmd_resize(mgr: &VmManager, cmd: Command) -> Response {
     if let Err(e) = vm.resize(cpus, cmd.memory_bytes).await {
         return Response::err(e.to_string());
     }
+    // VM-level resource governance is always auditable — a platform action
+    // with no per-sandbox policy, so it is emitted unconditionally.
+    crate::audit::audit_vm_resize(&name, cpus, cmd.memory_bytes);
     Response::ok_msg("resize completed")
 }
 

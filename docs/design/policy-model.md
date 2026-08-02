@@ -182,6 +182,12 @@ write_paths / net_allow）已移除，一律拒绝：
   `--read-path/--write-path/--net-allow/--memory-mb/--procs` 直接产出新形状。
 - **继承语义**：per-call policy **替换**存储策略（`.or()` 链：per-call →
   存储 → 引擎默认），非并集。
+- **AuditSpec 已接线（D 阶段）**：`policy.audit.{deny, exec, resource}` 按策略
+  门控结构化审计事件（tracing 输出，无协议面）——`audit.exec`（沙箱 exec
+  完成：exit_code + duration）、`audit.deny`（guest sandlock 拒绝，错误含
+  `"denied"`）、`audit.resource`（sandbox_create 的 limits 声明 + VM resize
+  平台动作）。门控用生效策略（默认 ∪ 用户，`audit` 标志 OR 合并）；事件与
+  发射点见 `docs/protocol.md`「审计」小节。
 
 原"映射层保留协议兼容"的设计已取消——契约面即唯一实现，无兼容输入。
 

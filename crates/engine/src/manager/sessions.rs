@@ -54,6 +54,9 @@ impl VmManager {
         let args = args.to_vec();
         let sid = session_id.to_string();
         let vm_name = name.to_string();
+        // Audit subject id: the linked engine sandbox id (sandbox_exec),
+        // else the vm name.
+        let audit_id = sandbox_id.clone().unwrap_or_else(|| vm_name.clone());
         let work_dir = work_dir.map(String::from);
         let sessions = self.sessions.clone();
 
@@ -83,7 +86,19 @@ impl VmManager {
                 opts = opts.with_work_dir(work_dir);
             }
             opts.policy = policy;
+            let start = std::time::Instant::now();
             let result = handle.exec(&opts).await;
+            // Audit the completion regardless of session state: a killed or
+            // terminated session still ran its exec, and the outcome must
+            // be observable. `opts.policy` is the effective policy the exec
+            // ran with (the gating AuditSpec).
+            crate::audit::audit_exec_outcome(
+                opts.policy.as_ref(),
+                &audit_id,
+                &opts.args,
+                &result,
+                start.elapsed().as_millis() as u64,
+            );
             let mut sessions = sessions.lock().unwrap();
             if let Some(info) = sessions.get_mut(&sid) {
                 // A killed session stays killed — never overwrite with the
