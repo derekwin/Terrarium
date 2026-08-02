@@ -106,22 +106,12 @@ pub(crate) async fn run_exec(
     // user granting only /opt still runs /bin/sh (the default's -r /bin
     // carries sandlock's execute grant). An unsandboxed exec stays
     // policy-free; when sandboxed, the effective policy is base ∪ user.
-    let policy = if sandbox {
-        Some(match per_call.as_ref().or(stored.as_ref()) {
-            Some(user) => default_sandbox_policy().merged_with(user),
-            None => default_sandbox_policy(),
-        })
-    } else {
-        per_call.clone().or_else(|| stored.clone())
+    // Shared resolution with the daemon's lock-free path
+    // (`prepare_blocking_exec`) — the two must never drift.
+    let policy = match resolve_effective_policy(sandbox, per_call.as_ref(), stored.as_ref()) {
+        Ok(p) => p,
+        Err(resp) => return resp,
     };
-    if !sandbox && policy.is_some() {
-        return Response::err("'policy' requires sandboxed exec (set 'sandbox': true)");
-    }
-    if let Some(policy) = policy.as_ref() {
-        if let Err(err) = policy.validate() {
-            return Response::err(err);
-        }
-    }
 
     let mode = exec_mode.as_deref().unwrap_or("blocking");
     match mode {
@@ -248,6 +238,44 @@ fn handle_executed_policy(
     }
 }
 
+/// Resolve the effective policy for an exec command and validate it.
+///
+/// Unsandboxed execs keep the per-call policy (or the record's stored
+/// policy) untouched; sandboxed execs run the engine default `base ∪
+/// user` (D2 — every sandboxed exec carries a complete policy). A policy
+/// on an unsandboxed exec is rejected, and the resolved policy must pass
+/// [`SandboxPolicy::validate`].
+///
+/// Shared by `run_exec` (the shared `execute` path — CLI and embedded
+/// modes, and the daemon's background fallback) and `prepare_blocking_exec`
+/// (the daemon's lock-free blocking path), so validation order and error
+/// messages stay byte-identical whichever path served the command.
+fn resolve_effective_policy(
+    sandbox: bool,
+    per_call: Option<&SandboxPolicy>,
+    stored: Option<&SandboxPolicy>,
+) -> Result<Option<SandboxPolicy>, Response> {
+    let policy = if sandbox {
+        Some(match per_call.or(stored) {
+            Some(user) => default_sandbox_policy().merged_with(user),
+            None => default_sandbox_policy(),
+        })
+    } else {
+        per_call.cloned().or_else(|| stored.cloned())
+    };
+    if !sandbox && policy.is_some() {
+        return Err(Response::err(
+            "'policy' requires sandboxed exec (set 'sandbox': true)",
+        ));
+    }
+    if let Some(policy) = policy.as_ref() {
+        if let Err(err) = policy.validate() {
+            return Err(Response::err(err));
+        }
+    }
+    Ok(policy)
+}
+
 /// M2 (policy-model.md §3.5): reject an exec whose effective policy's
 /// limits exceed the tenant VM's current physical quota.
 /// `SandboxPolicy::validate_with_vm` is only wired at `sandbox_create`;
@@ -347,27 +375,11 @@ pub(crate) fn prepare_blocking_exec(
     let timeout = cmd.timeout_secs.unwrap_or(60).min(3600);
     let sandbox = cmd.sandbox.unwrap_or(sandbox_default);
     let per_call = cmd.policy.clone();
-    // Capability model: base ∪ user for sandboxed exec (mirrors run_exec).
-    // The bound handle path uses the per-call override + create-bound
-    // policy instead; this effective policy serves the direct paths.
-    let policy = if sandbox {
-        Some(match per_call.as_ref().or(stored_policy.as_ref()) {
-            Some(user) => default_sandbox_policy().merged_with(user),
-            None => default_sandbox_policy(),
-        })
-    } else {
-        per_call.clone().or_else(|| stored_policy.clone())
-    };
-    if !sandbox && policy.is_some() {
-        return Err(Response::err(
-            "'policy' requires sandboxed exec (set 'sandbox': true)",
-        ));
-    }
-    if let Some(policy) = policy.as_ref() {
-        if let Err(err) = policy.validate() {
-            return Err(Response::err(err));
-        }
-    }
+    // Capability model: base ∪ user for sandboxed exec; the bound handle
+    // path uses the per-call override + create-bound policy instead —
+    // this effective policy serves the direct paths only. Shared with
+    // `run_exec` (see `resolve_effective_policy`).
+    let policy = resolve_effective_policy(sandbox, per_call.as_ref(), stored_policy.as_ref())?;
 
     // Audit subject id: the engine sandbox id for `sandbox_exec`, else the
     // vm name (the entity the caller addressed).
@@ -577,4 +589,91 @@ pub(crate) fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
             })
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adapter_traits::{Capability, DefaultAccess, FileAccess, PathPattern, ResourceLimits};
+
+    fn user_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            capabilities: vec![Capability::File {
+                path: PathPattern::Prefix("/opt".into()),
+                access: FileAccess::ReadWrite,
+            }],
+            limits: ResourceLimits {
+                memory_mb: Some(512),
+                ..Default::default()
+            },
+            default: DefaultAccess::Deny,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unsandboxed_with_policy_is_rejected() {
+        let err = resolve_effective_policy(false, Some(&user_policy()), None).unwrap_err();
+        assert!(
+            err.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("'policy' requires sandboxed exec"),
+            "unexpected error: {:?}",
+            err.error
+        );
+    }
+
+    #[test]
+    fn unsandboxed_without_policy_is_none() {
+        let policy = resolve_effective_policy(false, None, None).unwrap();
+        assert!(policy.is_none(), "unsandboxed exec carries no policy");
+    }
+
+    #[test]
+    fn sandboxed_without_user_policy_is_engine_default() {
+        let policy = resolve_effective_policy(true, None, None).unwrap();
+        assert_eq!(policy, Some(default_sandbox_policy()));
+    }
+
+    #[test]
+    fn sandboxed_unions_user_capabilities_on_default() {
+        let policy = resolve_effective_policy(true, Some(&user_policy()), None)
+            .unwrap()
+            .unwrap();
+        // Base set retained: read-only system dirs still granted.
+        assert!(policy.grants_path(std::path::Path::new("/usr/bin/ls"), FileAccess::Read));
+        assert!(policy.grants_path(std::path::Path::new("/etc/passwd"), FileAccess::Read));
+        // User grant appended, user limits win.
+        assert!(policy.grants_path(std::path::Path::new("/opt/app"), FileAccess::ReadWrite));
+        assert_eq!(policy.limits.memory_mb, Some(512));
+        assert_eq!(policy.default, DefaultAccess::Deny);
+    }
+
+    #[test]
+    fn stored_policy_is_fallback_for_sandboxed_exec() {
+        let policy = resolve_effective_policy(true, None, Some(&user_policy()))
+            .unwrap()
+            .unwrap();
+        assert!(policy.grants_path(std::path::Path::new("/opt/app"), FileAccess::ReadWrite));
+        assert_eq!(policy.limits.memory_mb, Some(512));
+    }
+
+    #[test]
+    fn invalid_user_policy_is_rejected() {
+        let mut bad = user_policy();
+        bad.capabilities.push(Capability::File {
+            path: PathPattern::Prefix("opt/relative".into()),
+            access: FileAccess::Read,
+        });
+        let err = resolve_effective_policy(true, Some(&bad), None).unwrap_err();
+        assert!(
+            err.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("must be absolute"),
+            "{}",
+            err.error.as_deref().unwrap_or("")
+        );
+    }
 }
