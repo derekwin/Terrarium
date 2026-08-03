@@ -52,7 +52,6 @@ def _start(config: HostConfig | None = None) -> TerraClient:
 
 def configure(config: HostConfig) -> None:
     """Set host configuration before the first call."""
-    global _client, _daemon
     if _client is not None:
         raise RuntimeError("default session already started — configure() must come first")
     _start(config)

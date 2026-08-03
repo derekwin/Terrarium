@@ -15,7 +15,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-from . import assets, paths
+from . import paths
 
 _ARTIFACTS = {
     "vmlinux.bin": "vmlinux.bin",
