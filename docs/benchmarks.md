@@ -7,26 +7,54 @@
 > virtiofsd. The script refuses to run (exit 2) when KVM is absent rather
 > than reporting fake numbers.
 
-## Results — 2026-08-03 (first real run)
+## Results — 2026-08-03 (12-tenant sweeps)
 
 Host: 128-core x86-64 with nested KVM; Terrarium inside a **privileged
 Docker container** on that host (the containerized workspace blocks
 user/mount namespaces otherwise); guest assets rebuilt with the current
-guest-proxy. Raw JSON: `docs/benchmark-results-2026-08-03.json`.
+guest-proxy. Two sweeps of 12 tenants each — `base` (20 MB layer) and
+`ubuntu` (99 MB layer). Raw JSON:
+`docs/benchmark-results-2026-08-03-{base,ubuntu}-12.json`.
 
-| Metric | Value |
-|---|---|
-| `cold_create_ms` (p50 / p95) | **803 / 876 ms** per new tenant VM (boot included) |
-| `per_vm_memory_mb` (4 tenants) | RSS **230.6 MB** total (~57.7/VM), Pss **206.0 MB** (~51.5/VM) |
-| `sandbox_in_tenant_ms` (p50) | **11.3 ms** — ~70× cheaper than a cold VM |
-| `warm_claim_ms` / `warm_exec_ms` | **627 ms** / 18.6 ms |
-| `exec_ms` (p50 / p95) | **7.7 / 17.6 ms** |
-| `execs_per_sec` (16 concurrent) | **239** |
+| Metric | base-12 | ubuntu-12 |
+|---|---|---|
+| `cold_create_ms` (p50 / p95) | 848 / 869 ms | 850 / 872 ms |
+| `sandbox_in_tenant_ms` (p50) | 17.7 ms | 19.8 ms |
+| `warm_claim_ms` / `warm_exec_ms` | 617 / 12.6 ms | 627 / 15.9 ms |
+| `exec_ms` (p50 / p95) | 5.1 / 7.0 ms | 4.7 / 7.6 ms |
+| `execs_per_sec` (16 concurrent) | 344 | 330 |
+| per-VM RSS / Pss (12 tenants) | 63.6 / 52.5 MB | 65.3 / 51.7 MB |
+| shared memory (12 tenants) | **134 MB (17.6%)** | **164 MB (20.9%)** |
 
-Reading: Pss < RSS by ~11% at 4 tenants — the shared-layer page-cache
-effect exists but is modest for the small base layer; it should grow with
-layer count and more VMs sharing the same layers. The 70× in-tenant
-sandbox cost vs cold boot is the tenant-first density model working.
+## Quantified sharing benefit
+
+The measurement includes the CH VMM process *and* its virtiofsd (the
+composed-layer server); Pss counts shared pages once across all VMs, RSS
+per-process. Findings:
+
+- **Per-VM host cost is almost layer-size-independent**: a 99 MB ubuntu
+  layer costs ~65 MB/VM vs ~64 MB/VM for the 20 MB base — the 79 MB extra
+  environment adds ~2 MB per VM. Layer bytes are stored once and shared;
+  VM cost is dominated by the fixed boot working set, not the layer.
+- **Shared fraction grows slightly with layer size**: 17.6% of per-VM RSS
+  is shared pages for base, 20.9% for ubuntu. At 12 VMs that is 134 MB
+  (base) / 164 MB (ubuntu) of host memory not duplicated across VMs.
+- **Marginal cost is stable**: incremental per-VM Pss holds at ~52 MB
+  (base) / ~52 MB (ubuntu) from VM 1 to VM 12 — no per-VM degradation as
+  the host fills.
+- The shared-file cache itself lives in the kernel page cache behind
+  virtiofsd, so real-world sharing grows with how much of the layer the
+  workload actually reads; these numbers reflect the boot+echo working
+  set.
+
+## Known limit: guest-proxy concurrency
+
+The guest runs **1 vCPU by default**, and guest-proxy serves each vsock
+connection on its own thread. At 32 concurrent execs on one VM the guest
+becomes CPU-bound and starts dropping connections (vsock handshake
+failures); 16 concurrent execs are clean (~330-344 execs/s). The
+benchmark retries transient handshake failures (as real clients would)
+and defaults to 16 concurrent execs.
 
 ### Environment lessons (why the first runs failed)
 

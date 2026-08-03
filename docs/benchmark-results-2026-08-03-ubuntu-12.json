@@ -1,0 +1,194 @@
+{
+  "host": {
+    "kvm": true,
+    "mem_total_mb": 515628,
+    "argv": [
+      "--tenants",
+      "12",
+      "--sandboxes-per-tenant",
+      "8",
+      "--pool-size",
+      "2",
+      "--concurrency",
+      "16",
+      "--total-execs",
+      "256",
+      "--repeats",
+      "20",
+      "--layers",
+      "ubuntu",
+      "--label",
+      "ubuntu-12",
+      "--out",
+      "docs/benchmark-results-2026-08-03-ubuntu-12.json"
+    ],
+    "label": "ubuntu-12"
+  },
+  "cold_create_ms": {
+    "p50_ms": 850.47,
+    "p95_ms": 871.52,
+    "mean_ms": 853.63,
+    "n": 12
+  },
+  "per_vm_memory_mb": [
+    {
+      "tenants": 1,
+      "rss_mb": 71.2,
+      "pss_mb": 57.9,
+      "shared_mb": 13.3,
+      "shared_pct": 18.7,
+      "per_vm_rss_mb": 71.2,
+      "per_vm_pss_mb": 57.9
+    },
+    {
+      "tenants": 2,
+      "rss_mb": 135.0,
+      "pss_mb": 108.1,
+      "shared_mb": 26.9,
+      "shared_pct": 19.9,
+      "per_vm_rss_mb": 67.5,
+      "per_vm_pss_mb": 54.1,
+      "incr_rss_mb": 63.8,
+      "incr_pss_mb": 50.2
+    },
+    {
+      "tenants": 3,
+      "rss_mb": 200.5,
+      "pss_mb": 159.9,
+      "shared_mb": 40.5,
+      "shared_pct": 20.2,
+      "per_vm_rss_mb": 66.8,
+      "per_vm_pss_mb": 53.3,
+      "incr_rss_mb": 65.4,
+      "incr_pss_mb": 51.8
+    },
+    {
+      "tenants": 4,
+      "rss_mb": 264.6,
+      "pss_mb": 210.3,
+      "shared_mb": 54.3,
+      "shared_pct": 20.5,
+      "per_vm_rss_mb": 66.1,
+      "per_vm_pss_mb": 52.6,
+      "incr_rss_mb": 64.1,
+      "incr_pss_mb": 50.3
+    },
+    {
+      "tenants": 5,
+      "rss_mb": 328.6,
+      "pss_mb": 260.6,
+      "shared_mb": 68.0,
+      "shared_pct": 20.7,
+      "per_vm_rss_mb": 65.7,
+      "per_vm_pss_mb": 52.1,
+      "incr_rss_mb": 64.0,
+      "incr_pss_mb": 50.3
+    },
+    {
+      "tenants": 6,
+      "rss_mb": 394.0,
+      "pss_mb": 312.4,
+      "shared_mb": 81.7,
+      "shared_pct": 20.7,
+      "per_vm_rss_mb": 65.7,
+      "per_vm_pss_mb": 52.1,
+      "incr_rss_mb": 65.4,
+      "incr_pss_mb": 51.7
+    },
+    {
+      "tenants": 7,
+      "rss_mb": 459.5,
+      "pss_mb": 364.1,
+      "shared_mb": 95.4,
+      "shared_pct": 20.8,
+      "per_vm_rss_mb": 65.6,
+      "per_vm_pss_mb": 52.0,
+      "incr_rss_mb": 65.4,
+      "incr_pss_mb": 51.8
+    },
+    {
+      "tenants": 8,
+      "rss_mb": 525.2,
+      "pss_mb": 416.0,
+      "shared_mb": 109.1,
+      "shared_pct": 20.8,
+      "per_vm_rss_mb": 65.6,
+      "per_vm_pss_mb": 52.0,
+      "incr_rss_mb": 65.7,
+      "incr_pss_mb": 51.9
+    },
+    {
+      "tenants": 9,
+      "rss_mb": 589.4,
+      "pss_mb": 466.7,
+      "shared_mb": 122.8,
+      "shared_pct": 20.8,
+      "per_vm_rss_mb": 65.5,
+      "per_vm_pss_mb": 51.9,
+      "incr_rss_mb": 64.3,
+      "incr_pss_mb": 50.6
+    },
+    {
+      "tenants": 10,
+      "rss_mb": 654.9,
+      "pss_mb": 518.4,
+      "shared_mb": 136.5,
+      "shared_pct": 20.8,
+      "per_vm_rss_mb": 65.5,
+      "per_vm_pss_mb": 51.8,
+      "incr_rss_mb": 65.5,
+      "incr_pss_mb": 51.8
+    },
+    {
+      "tenants": 11,
+      "rss_mb": 718.7,
+      "pss_mb": 568.5,
+      "shared_mb": 150.2,
+      "shared_pct": 20.9,
+      "per_vm_rss_mb": 65.3,
+      "per_vm_pss_mb": 51.7,
+      "incr_rss_mb": 63.7,
+      "incr_pss_mb": 50.1
+    },
+    {
+      "tenants": 12,
+      "rss_mb": 784.1,
+      "pss_mb": 620.3,
+      "shared_mb": 163.9,
+      "shared_pct": 20.9,
+      "per_vm_rss_mb": 65.3,
+      "per_vm_pss_mb": 51.7,
+      "incr_rss_mb": 65.5,
+      "incr_pss_mb": 51.8
+    }
+  ],
+  "sharing_summary": {
+    "tenants": 12,
+    "rss_mb": 784.1,
+    "pss_mb": 620.3,
+    "shared_mb": 163.9,
+    "shared_pct": 20.9,
+    "per_vm_rss_mb": 65.3,
+    "per_vm_pss_mb": 51.7
+  },
+  "sandbox_in_tenant_ms": {
+    "p50_ms": 19.8,
+    "p95_ms": 22.41,
+    "mean_ms": 20.29,
+    "n": 8
+  },
+  "warm_claim_ms": 626.9,
+  "warm_exec_ms": 15.94,
+  "exec_ms": {
+    "p50_ms": 4.7,
+    "p95_ms": 7.58,
+    "mean_ms": 5.87,
+    "n": 20
+  },
+  "throughput": {
+    "concurrency": 16,
+    "execs": 256,
+    "wall_s": 0.77,
+    "execs_per_sec": 330.4
+  }
+}

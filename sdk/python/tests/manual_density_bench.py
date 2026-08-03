@@ -92,7 +92,36 @@ def host_vm_memory_mb(client: TerraClient) -> tuple[float | None, float | None]:
         if pss is not None:
             pss_sum += pss
             seen_pss = True
+    # virtiofsd processes serve the composed layers; their footprint is
+    # part of the per-VM host cost (the shared file cache itself lives in
+    # the kernel page cache, shared across VMs, and is not per-process).
+    for pid in _proc_comm_pids("virtiofsd"):
+        rss, pss = vm_memory_mb(pid)
+        if rss is not None:
+            rss_sum += rss
+            seen_rss = True
+        if pss is not None:
+            pss_sum += pss
+            seen_pss = True
     return (rss_sum if seen_rss else None), (pss_sum if seen_pss else None)
+
+
+def _proc_comm_pids(name: str) -> list[int]:
+    """PIDs whose process comm equals *name* (best-effort /proc scan)."""
+    out: list[int] = []
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/comm") as f:
+                    if f.read().strip() == name:
+                        out.append(int(entry))
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return out
 
 
 def median_pct(latencies: list[float]) -> dict[str, float]:
@@ -114,26 +143,50 @@ def median_pct(latencies: list[float]) -> dict[str, float]:
 
 
 def bench_cold_create(
-    client: TerraClient, tenants: int, results: dict[str, Any]
+    client: TerraClient, tenants: int, layers: list[str], results: dict[str, Any]
 ) -> list[str]:
     created: list[str] = []
     latencies: list[float] = []
     memory_rows: list[dict[str, Any]] = []
     base_rss, base_pss = host_vm_memory_mb(client)
+    prev_delta: tuple[float, float] | None = None
     for i in range(1, tenants + 1):
         tenant = f"bench-cold-{i}"
         t0 = time.perf_counter()
-        Sandbox(tenant=tenant, layers=["base"])
+        Sandbox(tenant=tenant, layers=layers)
         latencies.append((time.perf_counter() - t0) * 1000)
         created.append(tenant)
         rss, pss = host_vm_memory_mb(client)
-        memory_rows.append({
-            "tenants": i,
-            "rss_mb": None if rss is None or base_rss is None else round(rss - base_rss, 1),
-            "pss_mb": None if pss is None or base_pss is None else round(pss - base_pss, 1),
-        })
+        drss = None if rss is None or base_rss is None else rss - base_rss
+        dpss = None if pss is None or base_pss is None else pss - base_pss
+        row: dict[str, Any] = {"tenants": i, "rss_mb": round(drss, 1) if drss is not None else None}
+        if dpss is not None:
+            row["pss_mb"] = round(dpss, 1)
+            # Sharing quantification: RSS counts shared layer pages once per
+            # VM, Pss counts them once across all VMs — the gap is the
+            # page-cache sharing benefit.
+            row["shared_mb"] = round(drss - dpss, 1)
+            row["shared_pct"] = round((drss - dpss) / drss * 100, 1) if drss else 0.0
+            row["per_vm_rss_mb"] = round(drss / i, 1)
+            row["per_vm_pss_mb"] = round(dpss / i, 1)
+            if prev_delta is not None:
+                row["incr_rss_mb"] = round(drss - prev_delta[0], 1)
+                row["incr_pss_mb"] = round(dpss - prev_delta[1], 1)
+            prev_delta = (drss, dpss)
+        memory_rows.append(row)
     results["cold_create_ms"] = median_pct(latencies)
     results["per_vm_memory_mb"] = memory_rows
+    if memory_rows and memory_rows[-1].get("pss_mb") is not None:
+        last = memory_rows[-1]
+        results["sharing_summary"] = {
+            "tenants": last["tenants"],
+            "rss_mb": last["rss_mb"],
+            "pss_mb": last["pss_mb"],
+            "shared_mb": last["shared_mb"],
+            "shared_pct": last["shared_pct"],
+            "per_vm_rss_mb": last["per_vm_rss_mb"],
+            "per_vm_pss_mb": last["per_vm_pss_mb"],
+        }
     return created
 
 
@@ -162,8 +215,15 @@ def bench_pool(pool_size: int, results: dict[str, Any]) -> Sandbox:
 def bench_exec(sb: Sandbox, repeats: int, results: dict[str, Any]) -> None:
     latencies: list[float] = []
     for _ in range(repeats):
-        t0 = time.perf_counter()
-        r = sb.exec(["echo", "ok"])
+        for attempt in range(5):
+            try:
+                t0 = time.perf_counter()
+                r = sb.exec(["echo", "ok"])
+                break
+            except TerraError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.2)
         if r.exit_code != 0:
             raise RuntimeError(f"exec failed: {r.stderr!r}")
         latencies.append((time.perf_counter() - t0) * 1000)
@@ -177,7 +237,14 @@ def bench_throughput(
 
     def worker() -> None:
         for _ in range(per_worker):
-            r = sb.exec(["echo", "ok"])
+            for attempt in range(5):
+                try:
+                    r = sb.exec(["echo", "ok"])
+                    break
+                except TerraError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.2)
             if r.exit_code != 0:
                 raise RuntimeError(f"exec failed: {r.stderr!r}")
 
@@ -216,8 +283,21 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tenants", type=int, default=4, help="cold-create sweep size")
     ap.add_argument("--sandboxes-per-tenant", type=int, default=8)
+    ap.add_argument(
+        "--layers",
+        type=str,
+        default="base",
+        help="comma-separated layer list for the sweep (default: base)",
+    )
+    ap.add_argument("--label", type=str, default=None, help="result label (host section)")
     ap.add_argument("--pool-size", type=int, default=2)
-    ap.add_argument("--concurrency", type=int, default=16)
+    ap.add_argument(
+        "--concurrency",
+        type=int,
+        default=16,
+        help="concurrent execs for throughput (a 1-vCPU guest-proxy drops "
+        "connections above ~16-32 concurrent execs; see docs/benchmarks.md)",
+    )
     ap.add_argument("--total-execs", type=int, default=64)
     ap.add_argument("--repeats", type=int, default=10, help="exec latency repeats")
     ap.add_argument("--out", type=str, default=None, help="write JSON to FILE")
@@ -235,14 +315,17 @@ def main() -> int:
             "argv": sys.argv[1:],
         },
     }
+    layers = [s.strip() for s in args.layers.split(",") if s.strip()]
+    if args.label:
+        results["host"]["label"] = args.label
     created: list[str] = []
     try:
         # Warm-up: asset resolution + daemon readiness land on a throwaway
         # tenant, not on the measured sweep.
-        Sandbox(tenant="bench-warmup", layers=["base"])
+        Sandbox(tenant="bench-warmup", layers=layers)
         created.append("bench-warmup")
 
-        created += bench_cold_create(client, args.tenants, results)
+        created += bench_cold_create(client, args.tenants, layers, results)
         bench_sandboxes_in_tenant(
             created[-1], args.sandboxes_per_tenant, results
         )
