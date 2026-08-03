@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   atomic idle-slot `pool_shrink`.
 - Blocking execs run outside the global manager lock (concurrent daemon); VM
   liveness reaping is restricted to state-changing commands.
+- Density benchmark harness (`manual_density_bench.py`): cold-create latency,
+  per-VM RSS/Pss (shared-layer page-cache evidence), in-tenant sandbox cost,
+  warm-pool claim/exec, exec latency and concurrent throughput. Real runs
+  need a KVM host — methodology in `docs/benchmarks.md`.
 
 ### Fixed
 - `sandbox_create` resize no longer errors when the pool VM already matches the
