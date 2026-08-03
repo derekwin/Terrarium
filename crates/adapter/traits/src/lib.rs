@@ -195,11 +195,7 @@ pub struct Snapshot {
 pub struct SandboxSpec {
     pub name: VmName,
     #[serde(default)]
-    pub tools: Vec<String>,
-    #[serde(default)]
     pub limits: ResourceLimits,
-    #[serde(default)]
-    pub env: std::collections::HashMap<String, String>,
     /// Capability-based policy for the sandbox; `None` lets the engine
     /// inject its default (deny-by-default) policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -510,11 +506,6 @@ pub trait SandboxHandle: Send + Sync {
     /// at create time; a per-call `policy_override` on the command is
     /// unioned onto the bound policy by the backend (never a replace).
     async fn exec(&self, cmd: &ExecCommand) -> Result<ExecResult, AdapterError>;
-    /// Boundary contract (L2): Integrity — session tooling installed
-    /// inside the bound context (D2).
-    /// Install persistent tools/state in the session, if the backend has
-    /// any (no-op for per-exec confinement backends like guest sandlock).
-    async fn setup(&self, tools: &[String]) -> Result<(), AdapterError>;
     /// Boundary contract (L2): Availability — session resource reclamation
     /// (D3/D4). Tear down the session and release any backend resources.
     async fn destroy(&self) -> Result<(), AdapterError>;

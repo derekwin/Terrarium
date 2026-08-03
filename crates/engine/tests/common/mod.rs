@@ -552,18 +552,6 @@ impl SandboxHandle for MockSandboxHandle {
         })
     }
 
-    fn setup<'life0, 'life1, 'async_trait>(
-        &'life0 self,
-        _tools: &'life1 [String],
-    ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move { Ok(()) })
-    }
-
     fn destroy<'life0, 'async_trait>(
         &'life0 self,
     ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>

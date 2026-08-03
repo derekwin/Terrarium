@@ -192,9 +192,7 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
     };
     let spec = SandboxSpec {
         name: spec_name,
-        tools: Vec::new(),
         limits: ResourceLimits::default(),
-        env: Default::default(),
         policy: Some(effective),
     };
     let vm_arc = match mgr.get_handle(&vm_name) {

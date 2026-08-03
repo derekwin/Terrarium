@@ -146,9 +146,7 @@ mod default_sandbox_backend_tests {
         let backend = default_sandbox_adapter();
         let spec = adapter_traits::SandboxSpec {
             name: adapter_traits::VmName::new("sb-test").unwrap(),
-            tools: Vec::new(),
             limits: Default::default(),
-            env: Default::default(),
             policy: None,
         };
         let result = block_on_current_thread(backend.create(Arc::new(DeadHandle), &spec));

@@ -84,11 +84,6 @@ impl SandboxHandle for GuestSandlockHandle {
         self.vm.exec(&opts).await
     }
 
-    async fn setup(&self, _tools: &[String]) -> Result<(), AdapterError> {
-        // Guest sandlock confines per-exec; it needs no persistent setup.
-        Ok(())
-    }
-
     async fn destroy(&self) -> Result<(), AdapterError> {
         // Nothing to release: the guest-proxy applies rules per-run.
         Ok(())
@@ -242,9 +237,7 @@ mod tests {
         let vm: Arc<dyn VmHandle> = Arc::new(mock);
         let spec = SandboxSpec {
             name: VmName::new("session-vm").unwrap(),
-            tools: vec![],
             limits: ResourceLimits::default(),
-            env: Default::default(),
             policy: Some(bound_policy()),
         };
         let handle = GuestSandlockAdapter::new()
@@ -322,9 +315,7 @@ mod tests {
         let vm: Arc<dyn VmHandle> = Arc::new(MockVmHandle::new());
         let spec = SandboxSpec {
             name: VmName::new("session-vm").unwrap(),
-            tools: vec![],
             limits: ResourceLimits::default(),
-            env: Default::default(),
             // The engine injects its default before create; a bare spec here
             // must be rejected — the backend cannot confine without a policy.
             policy: None,
@@ -347,9 +338,7 @@ mod tests {
         });
         let spec = SandboxSpec {
             name: VmName::new("session-vm").unwrap(),
-            tools: vec![],
             limits: ResourceLimits::default(),
-            env: Default::default(),
             policy: Some(policy),
         };
         let err = match GuestSandlockAdapter::new().create(vm, &spec).await {
@@ -360,9 +349,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_and_destroy_are_noops() {
+    async fn destroy_is_noop() {
         let (handle, _) = bind_session().await;
-        handle.setup(&["python".into()]).await.unwrap();
         handle.destroy().await.unwrap();
     }
 }
