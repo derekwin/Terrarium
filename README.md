@@ -168,7 +168,12 @@ terra tool remove -n python312
 - ✅ High-level Sandbox / Pool / Template API, exception hierarchy, async support
 - ✅ Warm-pool-backed tenant sandboxes (claim on create, release on destroy); MCP session-scoped exec
 - ✅ Audit observability (per-policy tracing events; structured sandlock deny signal)
-- 🔲 Pool auto-scaling, snapshot fault tolerance, density benchmarks
+- 🔲 Snapshot fault tolerance, density benchmarks
+
+Deliberately **not planned**: pool auto-scaling. The warm pool is a fixed,
+operator-configured resource; manual `grow()` / `scale()` already cover
+capacity changes, and automatic scaling would add threshold policy and
+metrics-driven complexity without a proven demand.
 
 ## License
 
