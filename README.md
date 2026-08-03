@@ -168,9 +168,15 @@ terra tool remove -n python312
 - ✅ High-level Sandbox / Pool / Template API, exception hierarchy, async support
 - ✅ Warm-pool-backed tenant sandboxes (claim on create, release on destroy); MCP session-scoped exec
 - ✅ Audit observability (per-policy tracing events; structured sandlock deny signal)
-- 🔲 Snapshot fault tolerance
-- 🔲 Density benchmarks (harness ready in `sdk/python/tests/manual_density_bench.py`;
-  runs need a KVM host — see `docs/benchmarks.md`)
+- ✅ Density benchmarks (harness + first 12-tenant data in
+  `sdk/python/tests/manual_density_bench.py`; see `docs/benchmarks.md`)
+- 🔲 P1: fast sandbox reset (snapshot/restore for RL/episode recycle) + batch
+  lifecycle orchestration
+- 🔲 P2: audit API + policy/quota management; security verification loop
+  (escape tests, sandlock runtime verification on a KVM host)
+- 🔲 P3: multi-host orchestration
+
+Strategy and scenario focus: `docs/strategy.md`.
 
 Deliberately **not planned**: pool auto-scaling. The warm pool is a fixed,
 operator-configured resource; manual `grow()` / `scale()` already cover
