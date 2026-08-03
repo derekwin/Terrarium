@@ -167,7 +167,8 @@ terra tool remove -n python312
 - ✅ virtiofs layered filesystem, warm pool, NAT networking, layer build-by-doing
 - ✅ High-level Sandbox / Pool / Template API, exception hierarchy, async support
 - ✅ Warm-pool-backed tenant sandboxes (claim on create, release on destroy); MCP session-scoped exec
-- 🔲 Pool auto-scaling, snapshot fault tolerance, density benchmarks, observability
+- ✅ Audit observability (per-policy tracing events; structured sandlock deny signal)
+- 🔲 Pool auto-scaling, snapshot fault tolerance, density benchmarks
 
 ## License
 

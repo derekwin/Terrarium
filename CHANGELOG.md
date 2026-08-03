@@ -16,13 +16,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `terra_session_read` / `terra_session_write`; sessions auto-create/reuse on the
   shared `mcp` tenant.
 - SDK `Sandbox.pool_backed` property, `pool=` constructor arg, `--no-pool` CLI flag.
+- Background exec sessions end-to-end: SDK `Sandbox.exec(background=True)` returns
+  an engine-tracked `Session`; CLI `sandbox exec --detach` + `sandbox session
+  status|kill|ls`; MCP `terra_exec_background` / `terra_session_status` /
+  `terra_session_kill`; engine prunes terminal session records.
+- Capability-based `SandboxPolicy` (default deny, explicit grants) as the single
+  policy type across protocol / engine / guest-proxy / SDK, plus the
+  `SandboxAdapter` L2 contract (`create`/`exec`/`destroy`) with the guest-sandlock
+  default backend.
+- Audit observability: per-policy structured tracing events (`audit.exec` /
+  `audit.deny` / `audit.resource`) gated by `SandboxPolicy.audit`; VM `resize`
+  emits an always-on platform event.
+- Structured sandlock deny signal: guest-proxy classifies denials from a
+  supervisor-written fd (`SANDBOX_DENY_FD`) instead of sniffing stderr text, and
+  static fs grants are mirrored in the supervisor (`fsgrant` patch) so
+  default-policy fs denials are auditable.
+- Engine enforces the VM quota on sandbox limits at `sandbox_create` and on
+  per-call exec overrides; `resize` syncs the recorded quota.
+- Pool `grow(n)` adds n (delta) and `scale(target)` reaches an exact target with
+  atomic idle-slot `pool_shrink`.
+- Blocking execs run outside the global manager lock (concurrent daemon); VM
+  liveness reaping is restricted to state-changing commands.
 
 ### Fixed
 - `sandbox_create` resize no longer errors when the pool VM already matches the
   requested cpus/memory (CH rejects no-op resizes).
 - SDK VM-existence probe now indexes by tenant sandbox records, so a second
   `Sandbox()` on a pool-backed tenant no longer wrongly demands template/layers.
+- Sandbox ids widened to 12 hex with a collision guard; unified VM `unregister`
+  removes dangling pool / net / sandbox / session records atomically.
+- Deny audits no longer misfire when stderr happens to contain "denied"; the
+  reserved `SANDBOX_DENY_EXIT_CODE` is produced only for supervisor-reported
+  denials.
+- CPU shrink rejected with an explicit error (guest-side offlining absent);
+  memory shrink via virtio-mem stays supported.
+- Binary-safe `files.download` via a base64 channel.
+
+### Removed
+- Dead adapter surface: `VmCapabilities` / `capabilities()`, `pause` / `resume`,
+  `is_retryable`, `ExecOpts::with_policy`, `VmSpec.backend_config`; unused CH
+  HTTP client methods; unused protocol builders (`with_max_cpus` / `with_system`
+  / `with_upper`); write-only `SandboxSpec.tools` / `SandboxSpec.env` and the
+  never-called `SandboxHandle::setup`.
+- CLI reserved-but-meaningless flags (`sandbox create --disk/--backend/--name`,
+  `pool/net` names, `sandbox exec --follow`).
 
 ### Security
 - MCP commands are sandboxed (sandlock) by default; previously all MCP execs
   ran unsandboxed.
+- `sandbox_create` and every exec path validate the executed policy's limits
+  against the tenant VM's physical quota (`validate_with_vm`).
