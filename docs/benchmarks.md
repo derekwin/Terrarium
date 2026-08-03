@@ -1,11 +1,44 @@
 # Density Benchmarks
 
 > **Status: harness ready, numbers pending.** The benchmark script is
-> committed and import/compile-verified, but real measurements require a
-> KVM-capable host with guest assets (`terra setup <distro>`) — this
-> repository's CI and the current dev environment have no `/dev/kvm`.
-> Running it elsewhere is the remaining step; the script refuses to run
-> (exit 2) when KVM is absent rather than reporting fake numbers.
+> committed and import/compile-verified. First real measurements exist
+> (2026-08-03, below); they require a KVM-capable host with guest assets
+> (`terra setup <distro>`) and user/mount-namespace privileges for
+> virtiofsd. The script refuses to run (exit 2) when KVM is absent rather
+> than reporting fake numbers.
+
+## Results — 2026-08-03 (first real run)
+
+Host: 128-core x86-64 with nested KVM; Terrarium inside a **privileged
+Docker container** on that host (the containerized workspace blocks
+user/mount namespaces otherwise); guest assets rebuilt with the current
+guest-proxy. Raw JSON: `docs/benchmark-results-2026-08-03.json`.
+
+| Metric | Value |
+|---|---|
+| `cold_create_ms` (p50 / p95) | **803 / 876 ms** per new tenant VM (boot included) |
+| `per_vm_memory_mb` (4 tenants) | RSS **230.6 MB** total (~57.7/VM), Pss **206.0 MB** (~51.5/VM) |
+| `sandbox_in_tenant_ms` (p50) | **11.3 ms** — ~70× cheaper than a cold VM |
+| `warm_claim_ms` / `warm_exec_ms` | **627 ms** / 18.6 ms |
+| `exec_ms` (p50 / p95) | **7.7 / 17.6 ms** |
+| `execs_per_sec` (16 concurrent) | **239** |
+
+Reading: Pss < RSS by ~11% at 4 tenants — the shared-layer page-cache
+effect exists but is modest for the small base layer; it should grow with
+layer count and more VMs sharing the same layers. The 70× in-tenant
+sandbox cost vs cold boot is the tenant-first density model working.
+
+### Environment lessons (why the first runs failed)
+
+- The engine's virtiofsd supervisor needs `unshare -Urm`; Ubuntu's
+  `kernel.apparmor_restrict_unprivileged_userns=1` (or a container without
+  CAP_SYS_ADMIN) blocks it — run in a privileged container or on a host
+  with the sysctl set to 0 (the engine now reports this specifically).
+- Guest assets must be rebuilt with the **current** guest-proxy before
+  running: `terra setup <distro>` refreshes `layers/<system>/bin/guest-proxy`,
+  and initramfs rebuilds need `cpio` on the build host (a missing `cpio`
+  silently produced empty initramfs and a "vsock handshake rejected"
+  symptom).
 
 ## What is measured
 

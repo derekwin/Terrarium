@@ -71,7 +71,11 @@ impl SandboxAdapter for UnavailableSandboxAdapter {
 #[pyfunction]
 #[pyo3(signature = (socket_path, ch_binary=None, embedded=true))]
 fn start_daemon(socket_path: String, ch_binary: Option<String>, embedded: bool) -> PyResult<()> {
-    tracing_subscriber::fmt::init();
+    // `try_init` instead of `init`: the SDK can start a daemon more than
+    // once in a process (e.g. after a hung daemon times out), and the
+    // second `init()` panics with SetGlobalDefaultError. First caller wins;
+    // later ones keep the already-installed subscriber.
+    let _ = tracing_subscriber::fmt().try_init();
 
     let ch_bin = ch_binary.unwrap_or_else(|| "cloud-hypervisor".to_string());
     let adapter: Arc<dyn adapter_traits::VmAdapter> = Arc::new(ChAdapter::new(ch_bin));

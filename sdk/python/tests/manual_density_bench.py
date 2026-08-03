@@ -199,7 +199,12 @@ def cleanup(client: TerraClient, tenants: list[str]) -> None:
             client.tenant_destroy(tenant)
         except Exception:  # noqa: BLE001 - best-effort cleanup
             pass
-    for vm in client.vm_list().get("vms", []):
+    try:
+        vms = client.vm_list().get("vms", [])
+    except Exception as e:  # noqa: BLE001 - cleanup must never mask the result
+        print(f"cleanup: vm_list failed ({e}); pool VMs may linger", file=sys.stderr)
+        vms = []
+    for vm in vms:
         if vm.get("name", "").startswith("pool-"):
             try:
                 client.vm_destroy(vm["name"])
