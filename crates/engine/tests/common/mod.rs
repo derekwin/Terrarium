@@ -56,6 +56,7 @@ struct MockState {
     exec_stdout: String,
     exec_stderr: String,
     exec_exit_code: i32,
+    exec_failures: u32,
     fs_attached: bool,
     cpus: u8,
 }
@@ -89,6 +90,7 @@ impl MockVmHandle {
         exec_stdout: String,
         exec_stderr: String,
         exec_exit_code: i32,
+        exec_failures: u32,
         fs_attached: bool,
         exec_log: Arc<Mutex<Vec<ExecCall>>>,
         kill_log: Arc<Mutex<Vec<String>>>,
@@ -106,6 +108,7 @@ impl MockVmHandle {
                 exec_stdout,
                 exec_stderr,
                 exec_exit_code,
+                exec_failures,
                 fs_attached,
                 cpus,
             }),
@@ -175,7 +178,14 @@ impl VmHandle for MockVmHandle {
             if let (Some(gate), None) = (&self.blocking_exec_gate, &opts.exec_id) {
                 gate.notified().await;
             }
-            let s = self.inner.lock().unwrap();
+            let mut s = self.inner.lock().unwrap();
+            if s.exec_failures > 0 {
+                s.exec_failures -= 1;
+                drop(s);
+                return Err(AdapterError::internal(
+                    "vsock handshake rejected: guest agent still booting",
+                ));
+            }
             Ok(ExecResult {
                 stdout: s.exec_stdout.clone(),
                 stderr: s.exec_stderr.clone(),
@@ -303,6 +313,7 @@ pub struct MockVmAdapter {
     exec_stdout: String,
     exec_stderr: String,
     exec_exit_code: i32,
+    exec_failures: u32,
     fs_attached: bool,
     exec_log: Arc<Mutex<Vec<ExecCall>>>,
     kill_log: Arc<Mutex<Vec<String>>>,
@@ -326,6 +337,7 @@ impl MockVmAdapter {
             exec_stdout: String::new(),
             exec_stderr: String::new(),
             exec_exit_code: 0,
+            exec_failures: 0,
             fs_attached: false,
             exec_log: Arc::new(Mutex::new(Vec::new())),
             kill_log: Arc::new(Mutex::new(Vec::new())),
@@ -423,6 +435,14 @@ impl MockVmAdapter {
         self
     }
 
+    /// Make the first N execs fail with a vsock handshake error (guest
+    /// agent still booting), then succeed.
+    #[allow(dead_code)]
+    pub fn with_exec_failures(mut self, n: u32) -> Self {
+        self.exec_failures = n;
+        self
+    }
+
     /// Build a new handle from the current builder state (for advanced
     /// test scenarios that need a handle without going through `create`).
     pub fn build_handle(&self) -> MockVmHandle {
@@ -433,6 +453,7 @@ impl MockVmAdapter {
             self.exec_stdout.clone(),
             self.exec_stderr.clone(),
             self.exec_exit_code,
+            self.exec_failures,
             self.fs_attached,
             self.exec_log.clone(),
             self.kill_log.clone(),

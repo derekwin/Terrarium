@@ -208,7 +208,22 @@ pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Res
     // return an honest error, best-effort tear down the bound session, and
     // don't register a half-created sandbox.
     let mkdir = vec!["mkdir".to_string(), "-p".to_string(), workdir.clone()];
-    match mgr.exec(&vm_name, &mkdir, 30, false, None, None).await {
+    // The guest agent can still be booting right after CH reports ready —
+    // a slow layer (e.g. ubuntu) often needs a moment before the vsock
+    // listener is up. Retry the exec briefly on handshake/vsock failures
+    // (same pattern as attach_fs's agent-boot retry) so creation does not
+    // fail on a race.
+    let mut workdir_result = mgr.exec(&vm_name, &mkdir, 30, false, None, None).await;
+    for _ in 0..10 {
+        let retryable = matches!(&workdir_result, Err(e)
+            if e.to_string().contains("vsock") || e.to_string().contains("handshake"));
+        if !retryable {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        workdir_result = mgr.exec(&vm_name, &mkdir, 30, false, None, None).await;
+    }
+    match workdir_result {
         Ok(r) if r.exit_code == 0 => {}
         Ok(r) => {
             let _ = handle.destroy().await;

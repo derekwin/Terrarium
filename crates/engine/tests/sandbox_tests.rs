@@ -81,6 +81,32 @@ async fn test_sandbox_create() {
     assert_eq!(data["vm"], "tenant-research");
 }
 
+/// sandbox_create survives a briefly-unresponsive guest agent: the
+/// workdir mkdir exec retries on vsock/handshake failures (slow-layer
+/// boot race), so creation does not fail just because CH reported ready
+/// a moment before the guest listener was up.
+#[tokio::test]
+async fn test_sandbox_create_retries_agent_boot_race() {
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_exec_failures(2)
+        .with_exec("ok\n", "", 0);
+    let mut mgr = VmManager::new(Arc::new(adapter), "/tmp".into());
+
+    let resp = execute(
+        &mut mgr,
+        Command::create("unused", "/fake/vmlinux")
+            .with_command("sandbox_create")
+            .with_tenant("race"),
+    )
+    .await;
+    assert!(
+        resp.is_ok(),
+        "create must retry through transient handshake failures: {:?}",
+        resp
+    );
+}
+
 /// sandbox_create is idempotent at the VM level: a second create for the
 /// same tenant reuses the VM (no kernel needed, no duplicate-VM error) and
 /// allocates a fresh sandbox id.
