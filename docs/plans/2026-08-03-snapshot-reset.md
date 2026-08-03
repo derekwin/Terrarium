@@ -112,22 +112,25 @@ agent 可 exec）目标 **<300ms**，对照冷启动 ~850ms；episode 间状态�
 **已验证**：
 - `snapshot` 全链路可用：**82ms** 捕获完整状态（`config.json` +
   `memory-ranges` 268MB + `state.json`）；快照前自动 pause、之后保持
-  paused；paused 态 VM 可正常 destroy（验证通过）。
+  paused；paused 态 VM 可正常 destroy（验证通过）；**fs upper 状态随
+  快照捕获**（`{snapshot}/upper`）。
 - `restore` **无 fs 设备**的 VM（initramfs-agent / warm-pool 形态）
   **端到端验证通过**：restore-only 调用（CH v53 的 `vm-config` 组强制
   kernel，传任何 vm-config 参数都会让 CH 全新 boot——restore 必须是
   纯 `--api-socket --restore`），恢复后 guest agent 经 vsock 正常响应，
   **~200ms**（对照冷启动 ~850ms）。
-- 引擎 `restore` 命令 + 配置改写（快照 config.json 的 fs/vsock socket
-  改写为恢复 VM 自己的路径）+ VM 注册，**207ms**。
+- **layered VM（virtio-fs）restore 端到端验证通过**：restore 用快照的
+  upper 种子化新 overlay（virtiofsd 设备状态装载需要快照时的 upper
+  文件——缺失会报 "Failed to load state ... file not found"），恢复后
+  agent 正常响应；**快照 87ms / restore 208ms**。
+- **确定性回滚验证通过**：快照就绪态 → restore → 写脏数据 → 再 restore
+  → 脏数据消失、回到快照态（VM2 标记 `[episode1, dirty]` → VM3
+  `[episode1]`）。
 
-**被环境阻塞（诚实记录）**：layered VM（virtio-fs 挂载层）的 restore
-被阻塞——CH 恢复 virtio-fs 设备需要 vhost-user 设备状态交换；本环境
-rust-vmm virtiofsd 1.14 的状态装载要么报 "Failed to load state ... file
-not found"（新 overlay 缺少快照时的 upper 文件），要么挂起。**后续路径**：
-(a) 快照时把 fs upper 状态一并捕获、restore 用快照 upper 重建 overlay；
-(b) 换 qemu virtiofsd（参考 vhost-user 迁移实现）；(c) 无 fs 的 pool
-形态先落地（已可用）。
+**已解决**：layered VM 的 restore 通过"快照捕获 fs upper + restore 种子
+化新 overlay"跑通（见上）。**遗留**：(b) qemu virtiofsd 备选（参考
+vhost-user 迁移实现，当前 rust-vmm 1.14 可用）；upper 里的 socket/设备
+文件不复制（guest 重建），若 ready 态 upper 含关键 socket 需另行处理。
 
 ## 4. 明确不做（本轮）
 

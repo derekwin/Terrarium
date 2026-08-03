@@ -34,6 +34,10 @@ pub struct FsStack {
     pub socket: String,
     /// Working dir root for this VM (upper/work/merged).
     pub dir: String,
+    /// The overlay upperdir — the writable layer the guest's runtime
+    /// writes land in. Captured with a snapshot (P1 fast reset) so a
+    /// restore can seed a fresh overlay with the same upper state.
+    pub upper: String,
     /// Persistent upperdirs live outside `dir` and survive Drop.
     pub persistent: bool,
     /// True when composed inside a private namespace (non-root path).
@@ -165,6 +169,7 @@ pub async fn compose_fs(
         supervisor: child,
         socket,
         dir,
+        upper,
         persistent,
         in_namespace,
     })

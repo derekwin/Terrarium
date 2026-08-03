@@ -3,6 +3,7 @@
 //! Wires together fs (filesystem composition), process (CH spawning), and
 //! config to implement the full VmHandle contract.
 
+use std::path::Path;
 use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,6 +18,31 @@ use crate::fs::{compose_fs, teardown_fs, FsStack};
 use crate::process::{
     ch_args, ch_restore_args, retry_get_info, spawn_ch, tap_name, wait_for_socket,
 };
+
+/// Recursively copy a directory tree, preserving symlinks. Regular files
+/// and directories are copied; sockets/devices/fifos are skipped (they
+/// cannot be re-created, and the restored guest recreates them).
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            let target = std::fs::read_link(&from)?;
+            let _ = std::fs::remove_file(&to);
+            std::os::unix::fs::symlink(&target, &to)?;
+        } else if ft.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if ft.is_file() {
+            std::fs::copy(&from, &to)?;
+        } else {
+            tracing::warn!(path = %from.display(), "skipping non-regular upper entry");
+        }
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Public API — called from the adapter
@@ -124,6 +150,20 @@ impl ChVmHandle {
             Some(ref fs_spec) => Some(compose_fs(fs_spec, name.as_ref(), &config).await?),
             None => None,
         };
+        // Restore: seed the fresh overlay's upper from the snapshot's
+        // captured upper — the virtiofsd device-state reload needs the
+        // files the guest had written before the snapshot (verified:
+        // without them the state load fails with "file not found").
+        if let Some(snapshot) = restore {
+            let snap_upper = format!("{}/upper", snapshot.path);
+            if Path::new(&snap_upper).is_dir() {
+                if let Some(fs) = fs.as_ref() {
+                    copy_tree(Path::new(&snap_upper), Path::new(&fs.upper)).map_err(|e| {
+                        AdapterError::internal(format!("seed restore upper: {}", e))
+                    })?;
+                }
+            }
+        }
 
         // Networking: NAT bridge + per-VM tap (privileged; clear error).
         let tap = if spec.net {
@@ -362,6 +402,16 @@ impl VmHandle for ChVmHandle {
         if let Err(e) = result {
             let _ = self.client.vm_resume().await;
             return Err(AdapterError::internal(format!("vm.snapshot: {}", e)));
+        }
+        // Capture the fs upper alongside the CH snapshot — a restore
+        // seeds its fresh overlay from this (the guest is paused here, so
+        // the upper is quiescent).
+        if let Ok(fs) = self.fs.lock() {
+            if let Some(fs) = fs.as_ref() {
+                if let Err(e) = copy_tree(Path::new(&fs.upper), &Path::new(path).join("upper")) {
+                    return Err(AdapterError::internal(format!("capture fs upper: {}", e)));
+                }
+            }
         }
         Ok(Snapshot {
             path: path.to_string(),
