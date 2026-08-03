@@ -18,6 +18,7 @@ TAG="go/v0.8.5"
 PATCHES=(
     "$REPO/thirdparty/sandlock-v0.8.5-musl.patch"
     "$REPO/thirdparty/sandlock-v0.8.5-denyfd.patch"
+    "$REPO/thirdparty/sandlock-v0.8.5-fsgrant.patch"
 )
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/terrarium"

@@ -196,9 +196,14 @@ write_paths / net_allow）已移除，一律拒绝：
   guest-proxy 仅在收到记录**且** exec 非零退出时改写 exit code 为
   `SANDBOX_DENY_EXIT_CODE`，子进程 stderr 仅作为 `reason` 附带。覆盖边界
   （诚实声明）：seccomp-notify 可观测的拒绝（网络、动态 deny、COW、chroot
-  等）精确上报；静态 Landlock fs 拒绝由内核直接以 EACCES 返回给子进程，
-  supervisor 不可见——此类失败按普通非零退出呈现（不产生 `audit.deny`），
-  完整覆盖需要把静态 fs 规则也路由到 notify supervisor（后续工作）。
+  等）精确上报；静态 fs 授权（`fs_readable`/`fs_writable`）由
+  `sandlock-v0.8.5-fsgrant.patch` 在 supervisor 侧镜像——非 chroot 模式下，
+  open/openat/openat2 与 execve/execveat 在落入内核（Landlock）之前先按授权
+  判定，被拒即 `EACCES`（被 denyfd 通道记录），因此默认策略下 `cat /etc/passwd`
+  这类读拒绝现在会产生 `audit.deny`。Landlock 仍是内核兜底（本门只镜像其
+  判定、不放松）。**剩余不可观测面**：link/rename 等双路径 syscall 与
+  mkdir/unlink/truncate 等路径 syscall（未纳入 notify BPF 集）、以及 chroot
+  模式（chroot handler 自有语义）——此类失败仍按普通非零退出呈现。
 
 原"映射层保留协议兼容"的设计已取消——契约面即唯一实现，无兼容输入。
 

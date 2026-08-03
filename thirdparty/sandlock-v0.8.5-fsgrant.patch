@@ -1,0 +1,207 @@
+diff --git a/crates/sandlock-core/src/seccomp/notif.rs b/crates/sandlock-core/src/seccomp/notif.rs
+index de65115..f643c8c 100644
+--- a/crates/sandlock-core/src/seccomp/notif.rs
++++ b/crates/sandlock-core/src/seccomp/notif.rs
+@@ -486,6 +486,52 @@ fn deny_open_verdict(
+     if allowed { None } else { Some(libc::EACCES) }
+ }
+ 
++/// Static-grant mirror for fs observability.
++///
++/// When the sandbox confines the filesystem in non-chroot mode, this
++/// resolves the notification's path and returns `Some(EACCES)` when the
++/// access is outside every fs grant — the same decision Landlock would
++/// make at the kernel, surfaced here so the deny channel records it.
++/// Returns `None` to soft-fall through: decode/resolution failures are
++/// left to the kernel (its own re-read fails the same way), and the
++/// Continue-only call site guarantees dedicated handlers (procfs shims,
++/// COW, ...) win before this gate. Landlock remains the enforcement
++/// backstop — this gate only mirrors its verdict for observability.
++fn static_fs_grant_deny(
++    notif: &SeccompNotif,
++    policy: &NotifPolicy,
++    pfs: &super::state::PolicyFnState,
++    notif_fd: RawFd,
++) -> Option<i32> {
++    if policy.chroot_root.is_some()
++        || (policy.chroot_readable.is_empty() && policy.chroot_writable.is_empty())
++    {
++        // Chroot mode: the chroot handlers own fs enforcement. No fs
++        // policy to mirror: nothing to observe.
++        return None;
++    }
++    let nr = notif.data.nr as i64;
++    let flags = if nr == libc::SYS_openat || nr == arch::SYS_OPENAT2 {
++        match decode_open_args(notif, notif_fd) {
++            Some(a) => a.flags,
++            None => return None, // kernel's re-read fails the same way
++        }
++    } else {
++        0 // execve/execveat: read/execute access only
++    };
++    if (flags & libc::O_PATH as u64) != 0 {
++        return None; // O_PATH opens are not gated by Landlock
++    }
++    let path = resolve_path_for_notif(notif, notif_fd)?;
++    // Mirror Landlock's symlink resolution: judge the canonical target
++    // first; fall back to the lexical path when it has none yet (e.g.
++    // O_CREAT of a brand-new file).
++    if let Ok(real) = std::fs::canonicalize(&path) {
++        return deny_open_verdict(&real, flags, policy, pfs);
++    }
++    deny_open_verdict(std::path::Path::new(&path), flags, policy, pfs)
++}
++
+ /// open/openat/openat2 argument layout, normalized across the spellings.
+ struct OpenArgs {
+     dirfd: i64,
+@@ -2025,9 +2071,26 @@ async fn handle_notification(
+                 let is_openat_family = nr == libc::SYS_openat
+                     || nr == arch::SYS_OPENAT2
+                     || Some(nr) == arch::sys_open();
+-                if matches!(action, NotifAction::Continue) && is_openat_family && has_denied {
++                let is_exec_family = nr == libc::SYS_execve || nr == libc::SYS_execveat;
++                if matches!(action, NotifAction::Continue)
++                    && (is_openat_family || is_exec_family)
++                {
+                     let pfs = ctx.policy_fn.lock().await;
+-                    on_behalf_open_for_deny(&notif, policy, &pfs, fd)
++                    if has_denied && is_openat_family {
++                        on_behalf_open_for_deny(&notif, policy, &pfs, fd)
++                    } else if !has_denied {
++                        // Static-grant mirror (fs observability): deny —
++                        // and thus record on the deny channel — what
++                        // Landlock would deny: an open/exec outside every
++                        // fs grant. Only fires on syscalls that would
++                        // otherwise Continue to the kernel.
++                        match static_fs_grant_deny(&notif, policy, &pfs, fd) {
++                            Some(errno) => NotifAction::Errno(errno),
++                            None => action,
++                        }
++                    } else {
++                        action
++                    }
+                 } else {
+                     action
+                 }
+@@ -2920,4 +2983,120 @@ mod tests {
+         assert!(policy.allows("::ffff:10.1.2.3".parse().unwrap(), 443));
+         assert!(!policy.allows("::ffff:8.8.8.8".parse().unwrap(), 443));
+     }
++
++    // ---- static fs grant mirror ----
++
++    /// Minimal NotifPolicy carrying only the fs grants under test.
++    fn fs_policy(readable: &[&str], writable: &[&str]) -> NotifPolicy {
++        NotifPolicy {
++            max_memory_bytes: 0,
++            max_processes: 0,
++            has_memory_limit: false,
++            has_net_destination_policy: false,
++            has_bind_denylist: false,
++            has_unix_fs_gate: !readable.is_empty() || !writable.is_empty(),
++            has_random_seed: false,
++            has_time_start: false,
++            time_offset: 0,
++            num_cpus: None,
++            argv_safety_required: false,
++            port_remap: false,
++            cow_enabled: false,
++            chroot_root: None,
++            chroot_readable: readable.iter().map(Into::into).collect(),
++            chroot_writable: writable.iter().map(Into::into).collect(),
++            chroot_denied: Vec::new(),
++            chroot_mounts: Vec::new(),
++            chroot_mount_ro: Vec::new(),
++            deterministic_dirs: false,
++            virtual_hostname: None,
++            has_http_acl: false,
++            virtual_etc_hosts: String::new(),
++            ca_inject_paths: Vec::new(),
++            ca_inject_pem: None,
++        }
++    }
++
++    /// Read of a path outside every grant mirrors a Landlock denial.
++    #[test]
++    fn fs_grant_read_outside_grants_is_denied() {
++        let policy = fs_policy(&["/usr"], &["/tmp"]);
++        let pfs = crate::seccomp::state::PolicyFnState::new();
++        assert_eq!(
++            deny_open_verdict(std::path::Path::new("/etc/passwd"), libc::O_RDONLY as u64, &policy, &pfs),
++            Some(libc::EACCES)
++        );
++        assert_eq!(
++            deny_open_verdict(std::path::Path::new("/usr/bin/ls"), libc::O_RDONLY as u64, &policy, &pfs),
++            None
++        );
++    }
++
++    /// Write access requires a writable grant; a readable grant is not enough.
++    #[test]
++    fn fs_grant_write_requires_writable() {
++        let policy = fs_policy(&["/usr"], &["/tmp"]);
++        let pfs = crate::seccomp::state::PolicyFnState::new();
++        assert_eq!(
++            deny_open_verdict(std::path::Path::new("/usr/x"), libc::O_WRONLY as u64, &policy, &pfs),
++            Some(libc::EACCES)
++        );
++        assert_eq!(
++            deny_open_verdict(std::path::Path::new("/tmp/x"), libc::O_RDWR as u64, &policy, &pfs),
++            None
++        );
++    }
++
++    /// Reads are allowed on writable grants (the writable rule is
++    /// read-inclusive, matching `deny_open_verdict`'s existing semantics).
++    #[test]
++    fn fs_grant_read_allowed_on_writable() {
++        let policy = fs_policy(&[], &["/tmp"]);
++        let pfs = crate::seccomp::state::PolicyFnState::new();
++        assert_eq!(
++            deny_open_verdict(std::path::Path::new("/tmp/x"), libc::O_RDONLY as u64, &policy, &pfs),
++            None
++        );
++    }
++
++    /// Prefix matching is component-wise: an exact grant on `/dev/null`
++    /// covers it, but not the sibling `/dev/nullx`.
++    #[test]
++    fn fs_grant_sibling_prefix_is_not_covered() {
++        let policy = fs_policy(&["/dev/null"], &[]);
++        let pfs = crate::seccomp::state::PolicyFnState::new();
++        assert_eq!(
++            deny_open_verdict(std::path::Path::new("/dev/null"), libc::O_RDONLY as u64, &policy, &pfs),
++            None
++        );
++        assert_eq!(
++            deny_open_verdict(std::path::Path::new("/dev/nullx"), libc::O_RDONLY as u64, &policy, &pfs),
++            Some(libc::EACCES)
++        );
++    }
++
++    /// O_CREAT/O_TRUNC imply write intent even with O_RDONLY access mode.
++    #[test]
++    fn fs_grant_create_implies_write() {
++        let policy = fs_policy(&["/usr"], &["/tmp"]);
++        let pfs = crate::seccomp::state::PolicyFnState::new();
++        assert_eq!(
++            deny_open_verdict(
++                std::path::Path::new("/usr/new"),
++                libc::O_CREAT as u64,
++                &policy,
++                &pfs
++            ),
++            Some(libc::EACCES)
++        );
++        assert_eq!(
++            deny_open_verdict(
++                std::path::Path::new("/tmp/new"),
++                libc::O_CREAT as u64,
++                &policy,
++                &pfs
++            ),
++            None
++        );
++    }
+ }
