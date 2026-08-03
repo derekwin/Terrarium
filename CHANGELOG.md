@@ -41,6 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-VM RSS/Pss (shared-layer page-cache evidence), in-tenant sandbox cost,
   warm-pool claim/exec, exec latency and concurrent throughput. Real runs
   need a KVM host — methodology in `docs/benchmarks.md`.
+- Snapshot fast-reset (P1): `snapshot` captures a VM's memory + fs upper into
+  a directory (auto-pause, stays paused); `restore` creates a NEW VM from it
+  (restore-only CH invocation — CH v53 restore is unreachable through the
+  normal CLI) with the overlay upper seeded from the snapshot. Verified on
+  real KVM: ~200 ms restore vs ~850 ms cold boot, deterministic rollback.
+- Batch environment orchestration (`terra.batch.Batch`): restore N
+  environments from one snapshot, parallel `collect`, deterministic
+  `recycle`, host density `report`.
 
 ### Fixed
 - `sandbox_create` resize no longer errors when the pool VM already matches the

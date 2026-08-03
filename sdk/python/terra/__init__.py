@@ -30,6 +30,7 @@ from . import async_sandbox
 from .async_sandbox import AsyncSandbox
 from . import pool
 from .pool import Pool
+from .batch import Batch
 from .daemon import session
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "AsyncSandbox",
     "pool",
     "Pool",
+    "Batch",
     "create",
     "connect",
     "list_vms",

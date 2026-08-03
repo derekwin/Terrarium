@@ -170,8 +170,10 @@ terra tool remove -n python312
 - ✅ Audit observability (per-policy tracing events; structured sandlock deny signal)
 - ✅ Density benchmarks (harness + first 12-tenant data in
   `sdk/python/tests/manual_density_bench.py`; see `docs/benchmarks.md`)
-- 🔲 P1: fast sandbox reset (snapshot/restore for RL/episode recycle) + batch
-  lifecycle orchestration
+- ✅ P1: fast sandbox reset (snapshot/restore, verified ~200 ms on real KVM,
+  deterministic rollback) + batch lifecycle orchestration
+  (`terra.batch.Batch` — parallel restore/recycle/collect + density report;
+  engine VM-lifecycle lock serialization is a documented follow-up)
 - 🔲 P2: audit API + policy/quota management; security verification loop
   (escape tests, sandlock runtime verification on a KVM host)
 - 🔲 P3: multi-host orchestration
