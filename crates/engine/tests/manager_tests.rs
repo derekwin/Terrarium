@@ -22,7 +22,7 @@ use terrarium_engine::manager::{SandboxRecord, VmManager};
 fn test_spec(name: &str) -> VmSpec {
     VmSpec {
         name: VmName::new(name).unwrap(),
-        kernel: "/fake/vmlinux".into(),
+        kernel: Some("/fake/vmlinux".into()),
         cmdline: None,
         boot_vcpus: 1,
         max_vcpus: Some(4),

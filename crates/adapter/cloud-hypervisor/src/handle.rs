@@ -25,7 +25,19 @@ pub(crate) async fn spawn_vm(
     spec: &VmSpec,
     config: Arc<ChConfig>,
 ) -> Result<Box<dyn VmHandle>, AdapterError> {
-    ChVmHandle::spawn(spec, config)
+    ChVmHandle::launch(spec, config, None)
+        .await
+        .map(|h| Box::new(h) as Box<dyn VmHandle>)
+}
+
+/// Restore a CH VM from a snapshot (P1 fast reset) and return a
+/// trait-object [`VmHandle`].
+pub(crate) async fn restore_vm(
+    snapshot: &Snapshot,
+    spec: &VmSpec,
+    config: Arc<ChConfig>,
+) -> Result<Box<dyn VmHandle>, AdapterError> {
+    ChVmHandle::launch(spec, config, Some(snapshot))
         .await
         .map(|h| Box::new(h) as Box<dyn VmHandle>)
 }
@@ -49,7 +61,15 @@ struct ChVmHandle {
 }
 
 impl ChVmHandle {
-    pub(crate) async fn spawn(spec: &VmSpec, config: Arc<ChConfig>) -> Result<Self, AdapterError> {
+    /// Boot (`restore` = None) or restore-from-snapshot (`restore` = Some)
+    /// a CH VM. The host-side stack (layers, vsock, api socket, CH
+    /// subprocess) is built identically either way; only the guest payload
+    /// differs (kernel boot vs `--restore`).
+    pub(crate) async fn launch(
+        spec: &VmSpec,
+        config: Arc<ChConfig>,
+        restore: Option<&Snapshot>,
+    ) -> Result<Self, AdapterError> {
         let name = spec.name.clone();
         let socket = format!("/tmp/terra-{}.sock", name);
         let _ = std::fs::remove_file(&socket);
@@ -81,9 +101,24 @@ impl ChVmHandle {
             None
         };
 
-        let args = ch_args(spec, &socket, fs_socket, &vsock, tap.as_deref());
+        let restore_url = restore.map(|s| s.path.as_str());
+        let args = ch_args(
+            spec,
+            &socket,
+            fs_socket,
+            &vsock,
+            tap.as_deref(),
+            restore_url,
+            &config.snapshot_dir,
+        );
 
-        tracing::info!(name = %name, socket = %socket, layered = fs.is_some(), "Spawning CH VM");
+        tracing::info!(
+            name = %name,
+            socket = %socket,
+            layered = fs.is_some(),
+            restoring = restore.is_some(),
+            "Spawning CH VM"
+        );
 
         let log_dir = format!("{}/logs", config.fs_root);
         let mut child = spawn_ch(&args, &config.ch_binary, &log_dir, name.as_ref())?;
@@ -266,13 +301,29 @@ impl VmHandle for ChVmHandle {
         Ok(())
     }
 
-    async fn snapshot(&self) -> Result<Snapshot, AdapterError> {
-        let path = format!("/tmp/terra-snap-{}.bin", self.name);
+    async fn snapshot(&self, path: &str) -> Result<Snapshot, AdapterError> {
+        // CH writes the snapshot INTO a directory (memory + state files);
+        // ensure it exists before pausing/capturing.
+        std::fs::create_dir_all(path)
+            .map_err(|e| AdapterError::internal(format!("mkdir snapshot dir: {}", e)))?;
+        // CH only snapshots a paused VM. After capture the VM is LEFT
+        // PAUSED: resume-after-snapshot leaves the guest unresponsive in
+        // the CH builds we support, and the P1 reset flow (snapshot the
+        // ready state → destroy → restore) never needs the source VM to
+        // run again. On failure we resume so a failed snapshot does not
+        // strand a paused VM.
         self.client
-            .vm_snapshot(&path)
+            .vm_pause()
             .await
-            .map_err(|e| AdapterError::internal(format!("vm.snapshot: {}", e)))?;
-        Ok(Snapshot { path })
+            .map_err(|e| AdapterError::internal(format!("vm.pause: {}", e)))?;
+        let result = self.client.vm_snapshot(path).await;
+        if let Err(e) = result {
+            let _ = self.client.vm_resume().await;
+            return Err(AdapterError::internal(format!("vm.snapshot: {}", e)));
+        }
+        Ok(Snapshot {
+            path: path.to_string(),
+        })
     }
 
     async fn shutdown(&self) -> Result<(), AdapterError> {

@@ -133,6 +133,7 @@ mod default_sandbox_backend_tests {
             }
             async fn snapshot(
                 &self,
+                _path: &str,
             ) -> Result<adapter_traits::Snapshot, adapter_traits::AdapterError> {
                 unreachable!("create never touches the vm handle")
             }

@@ -22,8 +22,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use adapter_traits::{
-    AdapterError, ExecOpts, SandboxAdapter, SandboxPolicy, VmAdapter, VmHandle, VmName, VmPolicy,
-    VmSpec,
+    AdapterError, ExecOpts, SandboxAdapter, SandboxPolicy, Snapshot, VmAdapter, VmHandle, VmName,
+    VmPolicy, VmSpec,
 };
 
 /// Central VM registry for the controller.
@@ -121,6 +121,28 @@ impl VmManager {
         }
         let net = spec.net;
         let handle = self.adapter.create(&spec).await?;
+        if net {
+            self.net_vms.insert(name.to_string());
+        }
+        let policy = spec.to_policy();
+        self.vm_policies.insert(name.clone(), policy);
+        self.vms.insert(name, Arc::from(handle));
+        Ok(())
+    }
+
+    /// Create a VM whose guest state is restored from a snapshot (P1 fast
+    /// reset). Registers the VM exactly like [`Self::spawn`] — the engine
+    /// sees a normal registered VM; only the guest payload differs.
+    pub async fn restore(&mut self, snapshot: &Snapshot, spec: VmSpec) -> Result<(), AdapterError> {
+        let name = spec.name.clone();
+        if self.vms.contains_key(&name) {
+            return Err(AdapterError::internal(format!(
+                "VM '{}' already exists",
+                name
+            )));
+        }
+        let net = spec.net;
+        let handle = self.adapter.restore(snapshot, &spec).await?;
         if net {
             self.net_vms.insert(name.to_string());
         }

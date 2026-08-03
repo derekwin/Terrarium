@@ -11,7 +11,7 @@ mod fs;
 mod handle;
 mod process;
 
-use adapter_traits::{AdapterError, VmAdapter, VmHandle, VmSpec};
+use adapter_traits::{AdapterError, Snapshot, VmAdapter, VmHandle, VmSpec};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -41,5 +41,14 @@ impl VmAdapter for ChAdapter {
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, AdapterError> {
         spec.validate().map_err(AdapterError::invalid_argument)?;
         handle::spawn_vm(spec, self.config.clone()).await
+    }
+
+    async fn restore(
+        &self,
+        snapshot: &Snapshot,
+        spec: &VmSpec,
+    ) -> Result<Box<dyn VmHandle>, AdapterError> {
+        spec.validate().map_err(AdapterError::invalid_argument)?;
+        handle::restore_vm(snapshot, spec, self.config.clone()).await
     }
 }

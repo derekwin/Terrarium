@@ -173,7 +173,7 @@ mod tests {
             })
         }
 
-        async fn snapshot(&self) -> Result<Snapshot, AdapterError> {
+        async fn snapshot(&self, _path: &str) -> Result<Snapshot, AdapterError> {
             Err(AdapterError::not_supported("snapshot"))
         }
 

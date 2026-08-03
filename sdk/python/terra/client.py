@@ -364,6 +364,50 @@ class TerraClient:
         """Detach a previously attached layered filesystem."""
         return self._send({"command": "detach_fs", "name": name})
 
+    def vm_snapshot(self, name: str, snapshot_path: str | None = None) -> dict:
+        """Capture a VM at its current state (P1 fast-reset primitive).
+
+        Default path is ``{snapshot_dir}/terra-snap-<vm>`` — a DIRECTORY
+        that CH fills with the memory + state files. Restore later with
+        :meth:`vm_restore`.
+        """
+        cmd: dict = {"command": "snapshot", "name": name}
+        if snapshot_path:
+            cmd["snapshot_path"] = snapshot_path
+        return self._send(cmd)
+
+    def vm_restore(
+        self,
+        name: str,
+        snapshot_path: str,
+        *,
+        cpus: int | None = None,
+        memory_mb: int | None = None,
+        layers: list[str] | None = None,
+        kernel: str | None = None,
+        net: bool = False,
+    ) -> dict:
+        """Create a NEW VM whose guest state comes from a snapshot.
+
+        ``cpus``/``memory_mb`` must match what the snapshotted VM was
+        configured with (they are part of the restored guest state).
+        """
+        cmd: dict = {
+            "command": "restore",
+            "name": name,
+            "snapshot_path": snapshot_path,
+            "net": bool(net),
+        }
+        if cpus is not None:
+            cmd["cpus"] = cpus
+        if memory_mb is not None:
+            cmd["memory_mb"] = memory_mb
+        if layers:
+            cmd["layers"] = list(layers)
+        if kernel:
+            cmd["kernel"] = kernel
+        return self._send(cmd)
+
     def vm_exec(
         self, name: str, args: list[str], timeout_secs: int = 60, *,
         sandbox: bool = False,
@@ -512,4 +556,3 @@ class TerraClient:
         """
         tenant = tenant.removeprefix("tenant-")
         return self._send({"command": "tenant_destroy", "tenant": tenant})
-

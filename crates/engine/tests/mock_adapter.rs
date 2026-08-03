@@ -12,7 +12,7 @@ mod tests {
     fn test_spec() -> VmSpec {
         VmSpec {
             name: VmName::new("test-vm").unwrap(),
-            kernel: "/fake/vmlinux".into(),
+            kernel: Some("/fake/vmlinux".into()),
             cmdline: None,
             boot_vcpus: 1,
             max_vcpus: Some(4),
@@ -67,12 +67,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_snapshot_not_supported() {
+    async fn test_snapshot_records_path() {
         let adapter = MockVmAdapter::new();
         let spec = test_spec();
         let handle = adapter.create(&spec).await.unwrap();
 
-        assert!(handle.snapshot().await.is_err());
+        let snap = handle.snapshot("/tmp/test.bin").await.unwrap();
+        assert_eq!(snap.path, "/tmp/test.bin");
     }
 
     #[tokio::test]

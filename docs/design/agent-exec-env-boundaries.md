@@ -50,7 +50,8 @@ LLM 驱动的自主程序,循环为 观察 → 推理 → 行动。从使用中�
 - D1→`VmAdapter`(L1)/`SandboxAdapter`(L2)
 - D2→`exec`/`attach_fs`
 - D3→生命周期方法(创建/检查/销毁) + 会话状态持久(workdir 随 VM 存活;R1"可恢复"= 会话状态连续性,非 VM 级快照恢复);
-  snapshot = 平台容错扩展(非 agent 会话契约;Roadmap 项);restore/pause/resume = 无 agent 需求依据,已从契约移除(实现遗产纠偏)
+  snapshot = 平台扩展(非 agent 会话契约);restore = P1 快速重置原语(RL/episode 回收,见 docs/plans/2026-08-03-snapshot-reset.md);
+  pause/resume = 无 agent 需求依据,已从契约移除(实现遗产纠偏)
 - D4→`VmSpec` 配额 + `resize` + 回收
 - D5→`net` + `net_allow`
 - D6→(缺口)tracing→审计/度量

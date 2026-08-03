@@ -409,17 +409,18 @@ async fn test_pool_release() {
     assert!(resp.is_ok(), "pool_release should succeed: {:?}", resp);
 }
 
-/// snapshot command on an existing VM → error (mock doesn't support).
+/// snapshot command on an existing VM → default managed path
+/// ({snapshot_dir}/terra-snap-<vm>.bin).
 #[tokio::test]
 async fn test_snapshot() {
     let mut mgr = make_mgr();
     execute(&mut mgr, Command::create("snap-vm", "/fake/vmlinux")).await;
     let cmd = Command::new("snapshot").with_name("snap-vm");
     let resp = execute(&mut mgr, cmd).await;
-    assert!(!resp.is_ok());
+    assert!(resp.is_ok(), "snapshot should succeed: {:?}", resp);
     assert!(
-        resp.error.unwrap().contains("not supported"),
-        "snapshot should return not-supported error"
+        resp.data.unwrap()["snapshot_path"] == "/tmp/terra-snap-snap-vm",
+        "default snapshot path should be {{snapshot_dir}}/terra-snap-<vm> (a directory)"
     );
 }
 
@@ -690,19 +691,60 @@ async fn test_exec_explicit_blocking_mode() {
     );
 }
 
-/// Custom snapshot_path → explicit not-supported error (not silently ignored).
+/// Custom snapshot_path is honored (P1: named/managed snapshots).
 #[tokio::test]
-async fn test_snapshot_custom_path_rejected() {
+async fn test_snapshot_custom_path_honored() {
     let mut mgr = make_mgr();
     execute(&mut mgr, Command::create("snap-vm", "/fake/vmlinux")).await;
     let cmd = Command::new("snapshot")
         .with_name("snap-vm")
         .with_snapshot_path("/tmp/custom.snap");
     let resp = execute(&mut mgr, cmd).await;
+    assert!(
+        resp.is_ok(),
+        "custom snapshot_path should be honored: {:?}",
+        resp
+    );
+    assert!(
+        resp.data.unwrap()["snapshot_path"] == "/tmp/custom.snap",
+        "snapshot_path should round-trip"
+    );
+}
+
+/// restore creates a NEW VM registered under the given name (P1 fast
+/// reset): the engine sees a normal registered VM; the guest state comes
+/// from the snapshot.
+#[tokio::test]
+async fn test_restore_creates_registered_vm() {
+    let mut mgr = make_mgr();
+    let resp = execute(
+        &mut mgr,
+        Command::new("restore")
+            .with_name("restored-vm")
+            .with_snapshot_path("/tmp/terra-snap-env.bin")
+            .with_cpus(2)
+            .with_memory_mb(512),
+    )
+    .await;
+    assert!(resp.is_ok(), "restore should succeed: {:?}", resp);
+    let data = resp.data.unwrap();
+    assert_eq!(data["name"], "restored-vm");
+    assert_eq!(data["status"], "restored");
+
+    // The restored VM is registered and inspectable.
+    let info = execute(&mut mgr, Command::new("info").with_name("restored-vm")).await;
+    assert!(info.is_ok(), "restored VM should be registered: {:?}", info);
+}
+
+/// restore without snapshot_path → explicit error.
+#[tokio::test]
+async fn test_restore_requires_snapshot_path() {
+    let mut mgr = make_mgr();
+    let resp = execute(&mut mgr, Command::new("restore").with_name("restored-vm")).await;
     assert!(!resp.is_ok());
     assert!(
-        resp.error.unwrap().contains("not supported yet"),
-        "custom snapshot_path should be rejected"
+        resp.error.unwrap().contains("snapshot_path"),
+        "restore without snapshot_path must error"
     );
 }
 

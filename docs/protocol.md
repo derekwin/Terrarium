@@ -30,7 +30,8 @@ TCP + token 时，客户端先发送一行 token，再发送命令行。
 | `resize` | `name`, `cpus?`, `memory_bytes?` | 在线扩缩（至少一项，否则报错）。**CPU 缩容不支持**（guest 侧无 offlining，显式报错）；内存缩容支持（virtio-mem，guest 驱动处理 unplug） |
 | `shutdown` / `kill` | `name` | 停止并注销（数据保留） |
 | `destroy` | `name` | 停止并注销（同义，永不删数据） |
-| `snapshot` | `name` | 内存快照（实验性平台扩展，非 agent 会话契约；自定义 `snapshot_path` 暂不支持） |
+| `snapshot` | `name`, `snapshot_path?` | 内存快照（P1 快速重置原语——环境就绪态捕获；`snapshot_path` 为**目录**，CH 向其中写入内存+状态文件；默认 `{snapshot_dir}/terra-snap-<vm>`。快照前 VM 自动 pause，捕获后 resume） |
+| `restore` | `name`, `snapshot_path`, `cpus?`, `memory_mb?`, `layers?`, `upper?`, `net?` | 从快照创建**新 VM**（P1 快速重置）：主机侧栈全新构建，guest 状态来自快照；资源需与快照时一致。`resume=true` 直接继续 guest |
 
 ### 执行
 

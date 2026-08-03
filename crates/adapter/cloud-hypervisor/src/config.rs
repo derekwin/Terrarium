@@ -15,6 +15,10 @@ use crate::fs::FsConfig;
 /// passed wherever the filesystem composition layer expects [`FsConfig`].
 pub struct ChConfig {
     pub ch_binary: String,
+    /// Managed snapshot directory (P1 fast reset). CH writes snapshot
+    /// memory/state files into subdirectories of this root, and the
+    /// engine's `--landlock-rules` whitelist must cover it.
+    pub snapshot_dir: String,
     pub fs: FsConfig,
 }
 
@@ -26,6 +30,7 @@ impl ChConfig {
     /// | `TERRA_STATE_DIR` | `/tmp/terra-disks`       |
     /// | `TERRA_VIRTIOFSD` | `virtiofsd`              |
     /// | `TERRA_LAYER_DIR` | `/var/lib/terra/layers`  |
+    /// | `TERRA_SNAPSHOT_DIR` | `/tmp`               |
     pub fn from_env(ch_binary: impl Into<String>) -> Self {
         let fs_base = std::env::var("TERRA_STATE_DIR")
             .ok()
@@ -33,6 +38,10 @@ impl ChConfig {
             .unwrap_or_else(|| "/tmp/terra-disks".into());
         Self {
             ch_binary: ch_binary.into(),
+            snapshot_dir: std::env::var("TERRA_SNAPSHOT_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "/tmp".into()),
             fs: FsConfig {
                 // qemu's virtiofsd (apt) and rust-vmm's (cargo) share the CLI.
                 virtiofsd_binary: std::env::var("TERRA_VIRTIOFSD")

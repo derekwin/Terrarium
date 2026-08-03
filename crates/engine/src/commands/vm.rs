@@ -137,19 +137,14 @@ pub(crate) async fn cmd_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
             // Snapshot artifacts of this VM are garbage — snapshot is a
             // platform extension (not an agent contract) with no state
             // reload consumer yet. Best-effort cleanup.
-            // Path scheme: the CH adapter produces
-            // {snapshot_dir}/terra-snap-{name}.bin (its snapshot() forms
-            // /tmp/terra-snap-{name}.bin; snapshot_dir is "/tmp" in the
-            // daemon) and Cloud Hypervisor writes a sibling
-            // {snapshot_dir}/terra-snap-{name}.mem — cleanup must mirror
-            // both, so the .mem sibling never leaks.
-            for p in [
-                format!("{}/terra-snap-{}.bin", mgr.snapshot_dir(), name),
-                format!("{}/terra-snap-{}.mem", mgr.snapshot_dir(), name),
-            ] {
-                if std::fs::remove_file(&p).is_ok() {
-                    tracing::info!(path = %p, "removed snapshot artifact");
-                }
+            // Snapshot artifacts of this VM are garbage — snapshot is a
+            // platform extension (not an agent contract) with no state
+            // reload consumer yet. Best-effort cleanup: the managed
+            // snapshot directory {snapshot_dir}/terra-snap-{name} (CH
+            // writes the memory + state files inside).
+            let snap_dir = format!("{}/terra-snap-{}", mgr.snapshot_dir(), name);
+            if std::fs::remove_dir_all(&snap_dir).is_ok() {
+                tracing::info!(path = %snap_dir, "removed snapshot artifacts");
             }
             Response::ok_msg(&format!("VM '{}' destroyed", name))
         }

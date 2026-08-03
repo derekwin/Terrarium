@@ -530,6 +530,7 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "kill" => vm::cmd_kill(mgr, cmd).await,
         "destroy" => vm::cmd_destroy(mgr, cmd).await,
         "snapshot" => snapshot::cmd_snapshot(mgr, cmd).await,
+        "restore" => snapshot::cmd_restore(mgr, cmd).await,
         "attach_fs" => fs::cmd_attach_fs(mgr, cmd).await,
         "detach_fs" => fs::cmd_detach_fs(mgr, cmd).await,
         "exec" => exec::cmd_exec(mgr, cmd).await,
@@ -558,8 +559,21 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
 }
 
 pub(crate) fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
-    let name = cmd.name.as_ref().ok_or("Missing 'name' field")?;
     let kernel = cmd.kernel.as_ref().ok_or("Missing 'kernel' field")?;
+    build_spec_with_kernel(cmd, Some(kernel.clone()))
+}
+
+/// Build a VM spec from a command without requiring a kernel — the
+/// restore command's guest state comes from a snapshot.
+pub(crate) fn build_restore_spec(cmd: &Command) -> Result<VmSpec, String> {
+    // The kernel is not part of the restored guest state, but CH's CLI
+    // still requires a --kernel flag on restore — carry the caller's
+    // kernel path if provided (the SDK passes the default kernel).
+    build_spec_with_kernel(cmd, cmd.kernel.clone())
+}
+
+fn build_spec_with_kernel(cmd: &Command, kernel: Option<String>) -> Result<VmSpec, String> {
+    let name = cmd.name.as_ref().ok_or("Missing 'name' field")?;
 
     let vm_name = VmName::new(name.clone())?;
     let boot_vcpus = cmd.cpus.unwrap_or(2);

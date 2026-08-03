@@ -28,27 +28,44 @@ pub(crate) fn ch_args(
     fs_socket: Option<&str>,
     vsock: &str,
     tap: Option<&str>,
+    restore: Option<&str>,
+    snapshot_dir: &str,
 ) -> Vec<String> {
-    let mut args = vec![
-        "--api-socket".into(),
-        socket.into(),
-        "--kernel".into(),
-        spec.kernel.clone(),
-        "--cpus".into(),
-        format!(
-            "boot={},max={}",
-            spec.boot_vcpus,
-            spec.max_vcpus.unwrap_or(spec.boot_vcpus)
-        ),
-    ];
-    if let Some(ref c) = spec.cmdline {
-        args.push("--cmdline".into());
-        args.push(c.clone());
+    let mut args = vec!["--api-socket".into(), socket.into()];
+    match restore {
+        // Restore: the guest state (kernel + devices) comes from the
+        // snapshot; `resume=true` continues the guest immediately. CH's
+        // CLI still requires a --kernel flag even on restore (clap
+        // requirement; the restored guest does not boot from it).
+        Some(url) => {
+            if let Some(kernel) = &spec.kernel {
+                args.push("--kernel".into());
+                args.push(kernel.clone());
+            }
+            args.push("--restore".into());
+            args.push(format!("source_url={},resume=true", url));
+        }
+        None => {
+            if let Some(kernel) = &spec.kernel {
+                args.push("--kernel".into());
+                args.push(kernel.clone());
+            }
+            if let Some(ref c) = spec.cmdline {
+                args.push("--cmdline".into());
+                args.push(c.clone());
+            }
+            if let Some(ref i) = spec.initramfs {
+                args.push("--initramfs".into());
+                args.push(i.clone());
+            }
+        }
     }
-    if let Some(ref i) = spec.initramfs {
-        args.push("--initramfs".into());
-        args.push(i.clone());
-    }
+    args.push("--cpus".into());
+    args.push(format!(
+        "boot={},max={}",
+        spec.boot_vcpus,
+        spec.max_vcpus.unwrap_or(spec.boot_vcpus)
+    ));
     // vhost-user devices (virtiofs) require shared guest memory. Always
     // on: any VM may receive a hot-plugged fs later (warm pool), and
     // shared memory is also the DAX/zero-copy path — no downside.
@@ -103,6 +120,10 @@ pub(crate) fn ch_args(
     // Landlock confines the CH process to the paths explicitly given on
     // the command line (kernel/initramfs/api socket/fs socket) — anything
     // the VMM might be tricked into opening outside that set is denied.
+    // Snapshot destinations live under the managed snapshot_dir; without
+    // a rule there CH cannot write the memory/state files (EPERM).
+    args.push("--landlock-rules".into());
+    args.push(format!("path={},access=rw", snapshot_dir));
     args.push("--landlock".into());
     args
 }
@@ -176,7 +197,7 @@ mod tests {
     fn spec(max_memory_mb: Option<u64>) -> VmSpec {
         VmSpec {
             name: VmName::new("test".to_string()).unwrap(),
-            kernel: "/k".into(),
+            kernel: Some("/k".into()),
             cmdline: None,
             boot_vcpus: 1,
             max_vcpus: Some(4),
@@ -199,7 +220,7 @@ mod tests {
     #[test]
     fn balloon_fpr_always_present() {
         for max in [None, Some(4096)] {
-            let args = ch_args(&spec(max), "/s", None, "/v", None);
+            let args = ch_args(&spec(max), "/s", None, "/v", None, None, "/tmp/snaps");
             assert_eq!(
                 arg_after(&args, "--balloon"),
                 Some("size=0,free_page_reporting=on"),
@@ -212,12 +233,47 @@ mod tests {
     /// The memory arg keeps its existing shape with and without hotplug.
     #[test]
     fn memory_arg_shape() {
-        let args = ch_args(&spec(Some(4096)), "/s", None, "/v", None);
+        let args = ch_args(
+            &spec(Some(4096)),
+            "/s",
+            None,
+            "/v",
+            None,
+            None,
+            "/tmp/snaps",
+        );
         assert_eq!(
             arg_after(&args, "--memory"),
             Some("size=512M,hotplug_method=virtio-mem,hotplug_size=4G,shared=on")
         );
-        let args = ch_args(&spec(None), "/s", None, "/v", None);
+        let args = ch_args(&spec(None), "/s", None, "/v", None, None, "/tmp/snaps");
+        assert_eq!(arg_after(&args, "--memory"), Some("size=512M,shared=on"));
+    }
+
+    /// Restore mode (P1 fast reset) replaces the kernel payload with
+    /// `--restore` and keeps the host-side devices.
+    #[test]
+    fn restore_args_skip_kernel_and_add_restore() {
+        let args = ch_args(
+            &spec(None),
+            "/s",
+            Some("/fs"),
+            "/v",
+            None,
+            Some("file:///tmp/terra-snap-env.bin"),
+            "/tmp/snaps",
+        );
+        // CH's CLI requires --kernel even on restore (clap); the restored
+        // guest does not boot from it.
+        assert_eq!(arg_after(&args, "--kernel"), Some("/k"));
+        assert_eq!(
+            arg_after(&args, "--restore"),
+            Some("source_url=file:///tmp/terra-snap-env.bin,resume=true")
+        );
+        assert_eq!(
+            arg_after(&args, "--fs"),
+            Some("tag=rootfs,socket=/fs,num_queues=1")
+        );
         assert_eq!(arg_after(&args, "--memory"), Some("size=512M,shared=on"));
     }
 }

@@ -51,7 +51,7 @@ impl VmManager {
             let vm_name = VmName::new(name.clone()).map_err(AdapterError::invalid_argument)?;
             let spec = VmSpec {
                 name: vm_name,
-                kernel: kernel.to_string(),
+                kernel: Some(kernel.to_string()),
                 cmdline: None,
                 boot_vcpus: 1,
                 max_vcpus: Some(4),

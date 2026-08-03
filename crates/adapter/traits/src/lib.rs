@@ -121,8 +121,9 @@ impl<'de> Deserialize<'de> for VmName {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmSpec {
     pub name: VmName,
-    /// Path to kernel image (bzImage / vmlinux.bin).
-    pub kernel: String,
+    /// Path to kernel image (bzImage / vmlinux.bin). `None` for
+    /// restore-from-snapshot VMs (the guest state lives in the snapshot).
+    pub kernel: Option<String>,
     /// Kernel command line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cmdline: Option<String>,
@@ -341,7 +342,7 @@ impl VmSpec {
                 ));
             }
         }
-        if self.kernel.is_empty() {
+        if self.kernel.as_deref().is_some_and(|k| k.is_empty()) {
             return Err("kernel path must not be empty".into());
         }
         Ok(())
@@ -394,6 +395,17 @@ pub trait VmAdapter: Send + Sync {
     /// physical isolation boundary between tenants (D1); Availability — the
     /// create-time physical quota (D4).
     async fn create(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, AdapterError>;
+
+    /// Create a VM whose guest state comes from a snapshot instead of a
+    /// kernel boot (P1 fast reset — RL/episode recycle). The host-side
+    /// stack (layers, vsock, CH process) is built fresh from `spec`; only
+    /// the guest state is restored. The snapshot was taken from a VM with
+    /// matching `spec` resources (cpus/memory).
+    async fn restore(
+        &self,
+        snapshot: &Snapshot,
+        spec: &VmSpec,
+    ) -> Result<Box<dyn VmHandle>, AdapterError>;
 }
 
 #[async_trait]
@@ -454,10 +466,11 @@ pub trait VmHandle: Send + Sync {
         ))
     }
 
-    /// Take a VM snapshot. Platform fault-tolerance extension (not an
-    /// agent-session contract — see docs/design/agent-exec-env-boundaries.md
-    /// D3). Not supported by all backends.
-    async fn snapshot(&self) -> Result<Snapshot, AdapterError>;
+    /// Take a VM snapshot at *path* (the CH backend writes the state file
+    /// plus a sibling `.mem`). P1 fast-reset primitive: a snapshot of an
+    /// environment at a known-good state is the reset source for
+    /// RL/episode recycling. Not supported by all backends.
+    async fn snapshot(&self, path: &str) -> Result<Snapshot, AdapterError>;
 
     /// Boundary contract (L1): Availability — resource reclamation (D3/D4).
     async fn shutdown(&self) -> Result<(), AdapterError>;
@@ -899,7 +912,7 @@ mod policy_tests {
     fn vm_spec_to_policy_projects_quota_and_topology() {
         let spec = VmSpec {
             name: VmName::new("test-vm").unwrap(),
-            kernel: "/fake/vmlinux".into(),
+            kernel: Some("/fake/vmlinux".into()),
             cmdline: None,
             boot_vcpus: 2,
             max_vcpus: Some(4),
@@ -931,7 +944,7 @@ mod policy_tests {
     fn vm_spec_to_policy_defaults_no_net_ephemeral_upper() {
         let spec = VmSpec {
             name: VmName::new("test-vm").unwrap(),
-            kernel: "/fake/vmlinux".into(),
+            kernel: Some("/fake/vmlinux".into()),
             cmdline: None,
             boot_vcpus: 1,
             max_vcpus: None,
