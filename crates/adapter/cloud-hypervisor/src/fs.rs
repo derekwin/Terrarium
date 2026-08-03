@@ -150,12 +150,7 @@ pub async fn compose_fs(
             if let Some(mut e) = child.stderr.take() {
                 let _ = e.read_to_string(&mut err);
             }
-            return Err(format!(
-                "fs supervisor exited ({}) before virtiofsd was ready: {}",
-                status,
-                err.trim()
-            )
-            .into());
+            return Err(fs_supervisor_failure(&status, &err).into());
         }
         if Instant::now() > deadline {
             let _ = child.kill();
@@ -173,6 +168,27 @@ pub async fn compose_fs(
         persistent,
         in_namespace,
     })
+}
+
+/// Format an fs supervisor failure, appending an actionable hint when the
+/// supervisor died on the classic unprivileged user-namespace block: the
+/// `uid_map` write is denied with EPERM (Ubuntu's
+/// `kernel.apparmor_restrict_unprivileged_userns`, or a container
+/// seccomp/capability policy that forbids `unshare -Urm`).
+fn fs_supervisor_failure(status: &std::process::ExitStatus, stderr: &str) -> String {
+    let mut msg = format!(
+        "fs supervisor exited ({}) before virtiofsd was ready: {}",
+        status,
+        stderr.trim()
+    );
+    if stderr.contains("uid_map") && stderr.contains("Operation not permitted") {
+        msg.push_str(
+            " — user/mount namespaces are blocked in this environment: check \
+             kernel.apparmor_restrict_unprivileged_userns (needs to be 0) and that the \
+             container grants CAP_SYS_ADMIN and allows unshare (seccomp/AppArmor)",
+        );
+    }
+    msg
 }
 
 /// Tear down a composed fs stack: kill the supervisor (the overlayfs
@@ -194,5 +210,34 @@ pub fn teardown_fs(fs: &mut FsStack) {
         if let Err(e) = std::fs::remove_dir_all(&fs.dir) {
             tracing::warn!(dir = %fs.dir, error = %e, "fs work dir cleanup failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn userns_block_gets_an_actionable_hint() {
+        let msg = fs_supervisor_failure(
+            &std::process::ExitStatus::from_raw(1),
+            "unshare: write failed /proc/self/uid_map: Operation not permitted",
+        );
+        assert!(
+            msg.contains("apparmor_restrict_unprivileged_userns"),
+            "{msg}"
+        );
+        assert!(msg.contains("CAP_SYS_ADMIN"), "{msg}");
+    }
+
+    #[test]
+    fn unrelated_failure_stays_plain() {
+        let msg = fs_supervisor_failure(
+            &std::process::ExitStatus::from_raw(1),
+            "virtiofsd: failed to open socket: No such file or directory",
+        );
+        assert!(!msg.contains("apparmor"), "{msg}");
+        assert!(msg.contains("virtiofsd"), "{msg}");
     }
 }
