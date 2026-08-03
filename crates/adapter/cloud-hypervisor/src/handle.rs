@@ -14,7 +14,9 @@ use tokio::time::sleep;
 use crate::client::ChClient;
 use crate::config::ChConfig;
 use crate::fs::{compose_fs, teardown_fs, FsStack};
-use crate::process::{ch_args, retry_get_info, spawn_ch, tap_name, wait_for_socket};
+use crate::process::{
+    ch_args, ch_restore_args, retry_get_info, spawn_ch, tap_name, wait_for_socket,
+};
 
 // ---------------------------------------------------------------------------
 // Public API — called from the adapter
@@ -48,6 +50,9 @@ pub(crate) async fn restore_vm(
 
 struct ChVmHandle {
     name: VmName,
+    /// Host-side vsock socket the guest agent listens through; restored
+    /// VMs use the path written into the snapshot config (per-VM).
+    vsock_path: String,
     /// CH subprocess; behind a Mutex so `is_alive(&self)` can `try_wait`
     /// without exclusive `&mut` access (reap must work while background
     /// exec tasks hold a second handle Arc).
@@ -61,6 +66,37 @@ struct ChVmHandle {
 }
 
 impl ChVmHandle {
+    /// Rewrite the snapshot's `config.json` device sockets to this VM's
+    /// name-based paths, so a restore-only CH process reconnects the
+    /// virtio-fs / vsock devices to host sockets we actually provide.
+    /// The snapshot keeps these paths across restores (sequential P1
+    /// episodes); parallel restores of one snapshot need a per-restore
+    /// config copy (documented follow-up).
+    fn rewrite_snapshot_config(snapshot: &Snapshot, name: &str) -> Result<(), AdapterError> {
+        let cfg_path = format!("{}/config.json", snapshot.path);
+        let raw = std::fs::read_to_string(&cfg_path)
+            .map_err(|e| AdapterError::internal(format!("read snapshot config: {}", e)))?;
+        let mut cfg: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| AdapterError::internal(format!("parse snapshot config: {}", e)))?;
+        let fs_socket = format!("/tmp/terra-{}-fs.sock", name);
+        let vsock_socket = format!("/tmp/terra-{}-vsock.sock", name);
+        if let Some(fs) = cfg.get_mut("fs").and_then(|f| f.as_array_mut()) {
+            for entry in fs.iter_mut() {
+                if let Some(sock) = entry.get_mut("socket") {
+                    *sock = serde_json::json!(fs_socket);
+                }
+            }
+        }
+        if let Some(sock) = cfg.get_mut("vsock").and_then(|v| v.get_mut("socket")) {
+            *sock = serde_json::json!(vsock_socket);
+        }
+        let out = serde_json::to_string_pretty(&cfg)
+            .map_err(|e| AdapterError::internal(format!("serialize snapshot config: {}", e)))?;
+        std::fs::write(&cfg_path, out)
+            .map_err(|e| AdapterError::internal(format!("write snapshot config: {}", e)))?;
+        Ok(())
+    }
+
     /// Boot (`restore` = None) or restore-from-snapshot (`restore` = Some)
     /// a CH VM. The host-side stack (layers, vsock, api socket, CH
     /// subprocess) is built identically either way; only the guest payload
@@ -73,17 +109,21 @@ impl ChVmHandle {
         let name = spec.name.clone();
         let socket = format!("/tmp/terra-{}.sock", name);
         let _ = std::fs::remove_file(&socket);
+        let vsock = format!("/tmp/terra-{}-vsock.sock", name);
+        let _ = std::fs::remove_file(&vsock);
 
         // Compose the layered rootfs first — CH needs the virtiofsd
-        // socket at boot.
+        // socket at boot; restore reuses the same name-based path after
+        // the snapshot config is rewritten to point at it.
+        if let Some(snapshot) = restore {
+            Self::rewrite_snapshot_config(snapshot, name.as_ref())?;
+        }
+        let fs_socket = format!("/tmp/terra-{}-fs.sock", name);
+        let _ = std::fs::remove_file(&fs_socket);
         let fs = match spec.fs {
             Some(ref fs_spec) => Some(compose_fs(fs_spec, name.as_ref(), &config).await?),
             None => None,
         };
-        let fs_socket = fs.as_ref().map(|f| f.socket.as_str());
-
-        let vsock = format!("/tmp/terra-{}-vsock.sock", name);
-        let _ = std::fs::remove_file(&vsock);
 
         // Networking: NAT bridge + per-VM tap (privileged; clear error).
         let tap = if spec.net {
@@ -101,16 +141,17 @@ impl ChVmHandle {
             None
         };
 
-        let restore_url = restore.map(|s| s.path.as_str());
-        let args = ch_args(
-            spec,
-            &socket,
-            fs_socket,
-            &vsock,
-            tap.as_deref(),
-            restore_url,
-            &config.snapshot_dir,
-        );
+        let args = match restore {
+            Some(snapshot) => ch_restore_args(&socket, &format!("file://{}", snapshot.path)),
+            None => ch_args(
+                spec,
+                &socket,
+                fs.as_ref().map(|f| f.socket.as_str()),
+                &vsock,
+                tap.as_deref(),
+                &config.snapshot_dir,
+            ),
+        };
 
         tracing::info!(
             name = %name,
@@ -134,6 +175,7 @@ impl ChVmHandle {
 
         Ok(Self {
             name,
+            vsock_path: vsock,
             child: Mutex::new(child),
             client,
             fs: Mutex::new(fs),
@@ -353,7 +395,7 @@ impl ChVmHandle {
     /// socket (text handshake "CONNECT <port>", then line-JSON).
     async fn guest_cmd(&self, cmd: &serde_json::Value) -> Result<serde_json::Value, AdapterError> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let path = format!("/tmp/terra-{}-vsock.sock", self.name);
+        let path = &self.vsock_path;
         let stream = tokio::net::UnixStream::connect(&path)
             .await
             .map_err(|e| format!("connect guest vsock: {}", e))?;

@@ -28,37 +28,20 @@ pub(crate) fn ch_args(
     fs_socket: Option<&str>,
     vsock: &str,
     tap: Option<&str>,
-    restore: Option<&str>,
     snapshot_dir: &str,
 ) -> Vec<String> {
     let mut args = vec!["--api-socket".into(), socket.into()];
-    match restore {
-        // Restore: the guest state (kernel + devices) comes from the
-        // snapshot; `resume=true` continues the guest immediately. CH's
-        // CLI still requires a --kernel flag even on restore (clap
-        // requirement; the restored guest does not boot from it).
-        Some(url) => {
-            if let Some(kernel) = &spec.kernel {
-                args.push("--kernel".into());
-                args.push(kernel.clone());
-            }
-            args.push("--restore".into());
-            args.push(format!("source_url={},resume=true", url));
-        }
-        None => {
-            if let Some(kernel) = &spec.kernel {
-                args.push("--kernel".into());
-                args.push(kernel.clone());
-            }
-            if let Some(ref c) = spec.cmdline {
-                args.push("--cmdline".into());
-                args.push(c.clone());
-            }
-            if let Some(ref i) = spec.initramfs {
-                args.push("--initramfs".into());
-                args.push(i.clone());
-            }
-        }
+    if let Some(kernel) = &spec.kernel {
+        args.push("--kernel".into());
+        args.push(kernel.clone());
+    }
+    if let Some(ref c) = spec.cmdline {
+        args.push("--cmdline".into());
+        args.push(c.clone());
+    }
+    if let Some(ref i) = spec.initramfs {
+        args.push("--initramfs".into());
+        args.push(i.clone());
     }
     args.push("--cpus".into());
     args.push(format!(
@@ -126,6 +109,24 @@ pub(crate) fn ch_args(
     args.push(format!("path={},access=rw", snapshot_dir));
     args.push("--landlock".into());
     args
+}
+
+/// Restore-only CH invocation (P1 fast reset).
+///
+/// The restored VM's full config (cpus, memory, fs, vsock, serial, ...)
+/// comes from the snapshot's `config.json`. Passing ANY vm-config CLI
+/// option would force CH's clap to require a kernel payload and boot a
+/// fresh VM instead of restoring (CH v53: the vm-config arg group
+/// `.requires("vm-payload")`, and `VmBoot` wins the if/else-if over
+/// `VmRestore` whenever a payload is present). So the command line is
+/// ONLY the api socket + `--restore`.
+pub(crate) fn ch_restore_args(socket: &str, source_url: &str) -> Vec<String> {
+    vec![
+        "--api-socket".into(),
+        socket.into(),
+        "--restore".into(),
+        format!("source_url={},resume=true", source_url),
+    ]
 }
 
 /// Retry vm_info() up to 10 times with 500ms back-off.
@@ -220,7 +221,7 @@ mod tests {
     #[test]
     fn balloon_fpr_always_present() {
         for max in [None, Some(4096)] {
-            let args = ch_args(&spec(max), "/s", None, "/v", None, None, "/tmp/snaps");
+            let args = ch_args(&spec(max), "/s", None, "/v", None, "/tmp/snaps");
             assert_eq!(
                 arg_after(&args, "--balloon"),
                 Some("size=0,free_page_reporting=on"),
@@ -233,47 +234,35 @@ mod tests {
     /// The memory arg keeps its existing shape with and without hotplug.
     #[test]
     fn memory_arg_shape() {
-        let args = ch_args(
-            &spec(Some(4096)),
-            "/s",
-            None,
-            "/v",
-            None,
-            None,
-            "/tmp/snaps",
-        );
+        let args = ch_args(&spec(Some(4096)), "/s", None, "/v", None, "/tmp/snaps");
         assert_eq!(
             arg_after(&args, "--memory"),
             Some("size=512M,hotplug_method=virtio-mem,hotplug_size=4G,shared=on")
         );
-        let args = ch_args(&spec(None), "/s", None, "/v", None, None, "/tmp/snaps");
+        let args = ch_args(&spec(None), "/s", None, "/v", None, "/tmp/snaps");
         assert_eq!(arg_after(&args, "--memory"), Some("size=512M,shared=on"));
     }
 
-    /// Restore mode (P1 fast reset) replaces the kernel payload with
-    /// `--restore` and keeps the host-side devices.
+    /// Restore mode (P1 fast reset) is a restore-ONLY invocation: passing
+    /// any vm-config option would make CH boot fresh instead (CH v53 clap
+    /// quirk). The snapshot's config.json supplies everything else.
     #[test]
-    fn restore_args_skip_kernel_and_add_restore() {
-        let args = ch_args(
-            &spec(None),
-            "/s",
-            Some("/fs"),
-            "/v",
-            None,
-            Some("file:///tmp/terra-snap-env.bin"),
-            "/tmp/snaps",
-        );
-        // CH's CLI requires --kernel even on restore (clap); the restored
-        // guest does not boot from it.
-        assert_eq!(arg_after(&args, "--kernel"), Some("/k"));
+    fn restore_args_are_restore_only() {
+        let args = ch_restore_args("/s", "file:///tmp/terra-snap-env");
+        assert_eq!(arg_after(&args, "--api-socket"), Some("/s"));
         assert_eq!(
             arg_after(&args, "--restore"),
-            Some("source_url=file:///tmp/terra-snap-env.bin,resume=true")
+            Some("source_url=file:///tmp/terra-snap-env,resume=true")
         );
-        assert_eq!(
-            arg_after(&args, "--fs"),
-            Some("tag=rootfs,socket=/fs,num_queues=1")
-        );
-        assert_eq!(arg_after(&args, "--memory"), Some("size=512M,shared=on"));
+        for forbidden in [
+            "--kernel", "--cpus", "--memory", "--fs", "--vsock", "--serial",
+        ] {
+            assert_eq!(
+                arg_after(&args, forbidden),
+                None,
+                "restore args must not carry {}",
+                forbidden
+            );
+        }
     }
 }

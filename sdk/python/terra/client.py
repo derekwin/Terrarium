@@ -389,8 +389,9 @@ class TerraClient:
     ) -> dict:
         """Create a NEW VM whose guest state comes from a snapshot.
 
-        ``cpus``/``memory_mb`` must match what the snapshotted VM was
-        configured with (they are part of the restored guest state).
+        ``layers`` re-composes the host-side rootfs stack for the restored
+        VM. The guest's cpus/memory config comes from the snapshot itself
+        (``config.json``) — CH restore is a restore-only invocation.
         """
         cmd: dict = {
             "command": "restore",
