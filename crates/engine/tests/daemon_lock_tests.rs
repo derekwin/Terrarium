@@ -126,6 +126,107 @@ async fn test_second_command_served_during_blocking_exec() {
     let _ = std::fs::remove_file(&socket);
 }
 
+/// A VM lifecycle call (create) parked on the mock gate must not block a
+/// second command: the daemon resolves the spec under the lock, calls the
+/// adapter outside it, and registers afterwards (P1-2 batch scale).
+#[tokio::test]
+async fn test_second_command_served_during_create() {
+    let socket = format!("/tmp/terra-test-create-{}.sock", std::process::id());
+    let _ = std::fs::remove_file(&socket);
+
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let adapter = MockVmAdapter::new()
+        .with_state("Running")
+        .with_create_gate(gate.clone());
+
+    let sock = socket.clone();
+    let daemon = tokio::spawn(async move {
+        terrarium_engine::daemon::run(&sock, None, Arc::new(adapter), false).await
+    });
+    wait_for_socket(&socket).await;
+
+    // create parks on the gate, so it stays in flight.
+    let create_socket = socket.clone();
+    let create_task = tokio::spawn(async move {
+        roundtrip(
+            &create_socket,
+            r#"{"command":"create","name":"lc-vm","kernel":"/fake/vmlinux"}"#,
+        )
+        .await
+    });
+
+    // Let the create reach the adapter (gate park).
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // While the create is parked, a second command must be served
+    // immediately. Old code held the lock across the adapter call.
+    let resp = tokio::time::timeout(
+        Duration::from_secs(3),
+        roundtrip(&socket, r#"{"command":"list"}"#),
+    )
+    .await
+    .expect("second command must be served while a create is in flight");
+    assert_eq!(resp["status"], "ok", "list during in-flight create: {resp}");
+
+    // Release: create completes and registers the VM.
+    gate.notify_one();
+    let create_resp = tokio::time::timeout(Duration::from_secs(5), create_task)
+        .await
+        .expect("create should complete after gate release")
+        .expect("create task panicked");
+    assert_eq!(
+        create_resp["status"], "ok",
+        "create response: {create_resp}"
+    );
+    assert_eq!(create_resp["data"]["status"], "created");
+
+    daemon.abort();
+    let _ = std::fs::remove_file(&socket);
+}
+
+/// Two concurrent creates with the same name: exactly one wins; the loser
+/// gets the duplicate-name error and its orphan handle is dropped.
+#[tokio::test]
+async fn test_concurrent_same_name_create_one_wins() {
+    let socket = format!("/tmp/terra-test-dup-{}.sock", std::process::id());
+    let _ = std::fs::remove_file(&socket);
+
+    let adapter = MockVmAdapter::new().with_state("Running");
+    let sock = socket.clone();
+    let daemon = tokio::spawn(async move {
+        terrarium_engine::daemon::run(&sock, None, Arc::new(adapter), false).await
+    });
+    wait_for_socket(&socket).await;
+
+    let cmd = r#"{"command":"create","name":"dup-vm","kernel":"/fake/vmlinux"}"#;
+    let s1 = socket.clone();
+    let s2 = socket.clone();
+    let a = tokio::spawn(async move { roundtrip(&s1, cmd).await });
+    let b = tokio::spawn(async move { roundtrip(&s2, cmd).await });
+    let (ra, rb) = tokio::join!(a, b);
+    let ra = ra.expect("create task A panicked");
+    let rb = rb.expect("create task B panicked");
+    let ok_count = [&ra, &rb]
+        .into_iter()
+        .filter(|r| r["status"] == "ok")
+        .count();
+    assert_eq!(ok_count, 1, "exactly one concurrent same-name create wins");
+    let err = [&ra, &rb]
+        .into_iter()
+        .find(|r| r["status"] != "ok")
+        .expect("loser errors");
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("already exists"),
+        "loser error: {err}"
+    );
+
+    daemon.abort();
+    let _ = std::fs::remove_file(&socket);
+}
+
 /// M2 on the daemon's lock-free blocking path: `prepare_blocking_exec`
 /// validates the ACTUAL executed policy of a sandboxed blocking
 /// `sandbox_exec` against the tenant VM's quota before resolving the

@@ -325,6 +325,10 @@ pub struct MockVmAdapter {
     kill_log: Arc<Mutex<Vec<String>>>,
     exec_gate: Option<Arc<tokio::sync::Notify>>,
     blocking_exec_gate: Option<Arc<tokio::sync::Notify>>,
+    /// When set, `create` parks on this gate before returning — lets a
+    /// test hold a create in flight to prove the daemon serves other
+    /// commands while a VM lifecycle call is running lock-free.
+    create_gate: Option<Arc<tokio::sync::Notify>>,
     ping_count: Arc<Mutex<u32>>,
     ping_ready_after: u32,
     cpus: u8,
@@ -349,6 +353,7 @@ impl MockVmAdapter {
             kill_log: Arc::new(Mutex::new(Vec::new())),
             exec_gate: None,
             blocking_exec_gate: None,
+            create_gate: None,
             ping_count: Arc::new(Mutex::new(0)),
             ping_ready_after: 0,
             cpus: 1,
@@ -449,6 +454,13 @@ impl MockVmAdapter {
         self
     }
 
+    /// Park `create` on a gate (VM lifecycle concurrency tests).
+    #[allow(dead_code)]
+    pub fn with_create_gate(mut self, gate: Arc<tokio::sync::Notify>) -> Self {
+        self.create_gate = Some(gate);
+        self
+    }
+
     /// Build a new handle from the current builder state (for advanced
     /// test scenarios that need a handle without going through `create`).
     pub fn build_handle(&self) -> MockVmHandle {
@@ -490,7 +502,12 @@ impl VmAdapter for MockVmAdapter {
         'life1: 'async_trait,
         Self: 'async_trait,
     {
-        Box::pin(async move { Ok(Box::new(self.build_handle()) as Box<dyn VmHandle>) })
+        Box::pin(async move {
+            if let Some(gate) = &self.create_gate {
+                gate.notified().await;
+            }
+            Ok(Box::new(self.build_handle()) as Box<dyn VmHandle>)
+        })
     }
 
     fn restore<'life0, 'life1, 'life2, 'async_trait>(

@@ -173,7 +173,7 @@ terra tool remove -n python312
 - ✅ P1: fast sandbox reset (snapshot/restore, verified ~200 ms on real KVM,
   deterministic rollback) + batch lifecycle orchestration
   (`terra.batch.Batch` — parallel restore/recycle/collect + density report;
-  engine VM-lifecycle lock serialization is a documented follow-up)
+  VM lifecycle runs lock-free: 8 concurrent restores in 232 ms)
 - 🔲 P2: audit API + policy/quota management; security verification loop
   (escape tests, sandlock runtime verification on a KVM host)
 - 🔲 P3: multi-host orchestration

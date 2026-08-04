@@ -11,10 +11,10 @@ P1 fast-reset primitive — docs/plans/2026-08-03-snapshot-reset.md):
 ``collect`` runs a command in every environment in parallel;
 ``report`` returns a host density snapshot (count, per-VM RSS/Pss).
 
-Restore/destroy run concurrently client-side, but the engine currently
-serializes VM lifecycle commands on its manager lock, so large batches
-scale linearly today (the lock-free create/restore path is a documented
-follow-up — see the plan doc's follow-ups).
+Restore/destroy run concurrently client-side, and the daemon runs VM
+lifecycle (create/restore) lock-free: 8 concurrent restores measured at
+~230 ms on real KVM (vs ~210 ms each serialized before the lock-free
+path).
 """
 
 from __future__ import annotations

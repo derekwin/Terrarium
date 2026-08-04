@@ -18,8 +18,8 @@ use crate::audit;
 use crate::manager::VmManager;
 use crate::policy::default_sandbox_policy;
 use adapter_traits::{
-    AdapterError, ExecCommand, ExecOpts, ExecResult, SandboxHandle, SandboxPolicy, VmHandle,
-    VmName, VmSpec,
+    AdapterError, ExecCommand, ExecOpts, ExecResult, SandboxHandle, SandboxPolicy, Snapshot,
+    VmHandle, VmName, VmSpec,
 };
 pub(crate) use terrarium_protocol::{Command, Response};
 
@@ -326,6 +326,55 @@ pub(crate) struct PreparedBlockingExec {
     pub prepared: PreparedExec,
     pub policy: Option<SandboxPolicy>,
     pub audit_id: String,
+}
+
+/// A VM lifecycle command resolved under the manager lock for lock-free
+/// execution (P1-2 scale): the spec and the duplicate-name check happen
+/// here; the adapter call (compose + CH spawn, ~200ms) runs without the
+/// lock; the returned handle is registered afterwards.
+pub(crate) enum PreparedLifecycle {
+    Create(VmSpec),
+    Restore { snapshot: Snapshot, spec: VmSpec },
+}
+
+/// Resolve a `create` / `restore` command into a [`PreparedLifecycle`],
+/// replicating `cmd_create` / `cmd_restore`'s validation and error
+/// messages so the lock-free daemon path behaves identically to the
+/// shared `execute` path.
+pub(crate) fn prepare_lifecycle(
+    mgr: &VmManager,
+    cmd: &Command,
+) -> Result<PreparedLifecycle, Response> {
+    let (spec, snapshot) = match cmd.command.as_str() {
+        "create" => {
+            let spec = build_spec(cmd).map_err(Response::err)?;
+            if let Err(e) = spec.validate() {
+                return Err(Response::err(e));
+            }
+            (spec, None)
+        }
+        "restore" => {
+            let path = match cmd.snapshot_path.clone() {
+                Some(p) if !p.is_empty() => p,
+                _ => return Err(Response::err("Missing 'snapshot_path' field")),
+            };
+            let spec = build_restore_spec(cmd).map_err(Response::err)?;
+            if let Err(e) = spec.validate() {
+                return Err(Response::err(e));
+            }
+            (spec, Some(Snapshot { path }))
+        }
+        other => {
+            return Err(Response::err(format!("Unknown command: {}", other)));
+        }
+    };
+    if mgr.get(&spec.name.to_string()).is_some() {
+        return Err(Response::err(format!("VM '{}' already exists", spec.name)));
+    }
+    Ok(match snapshot {
+        Some(snapshot) => PreparedLifecycle::Restore { snapshot, spec },
+        None => PreparedLifecycle::Create(spec),
+    })
 }
 
 /// Resolve a blocking `exec` / `sandbox_exec` command to its handle and

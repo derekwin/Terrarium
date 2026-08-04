@@ -75,6 +75,37 @@ impl VmManager {
         }
     }
 
+    /// The adapter backing this manager (for lock-free lifecycle calls —
+    /// the daemon resolves the spec under the lock, calls the adapter
+    /// outside it, then registers the returned handle).
+    pub fn adapter(&self) -> Arc<dyn VmAdapter> {
+        self.adapter.clone()
+    }
+
+    /// Register a freshly created/restored VM handle. Errors when the name
+    /// is already taken — in that case *handle* is dropped, so the
+    /// backend's Drop tears down the orphan VM.
+    pub fn register_vm(
+        &mut self,
+        spec: &VmSpec,
+        handle: Box<dyn VmHandle>,
+    ) -> Result<(), AdapterError> {
+        let name = spec.name.clone();
+        if self.vms.contains_key(&name) {
+            return Err(AdapterError::internal(format!(
+                "VM '{}' already exists",
+                name
+            )));
+        }
+        if spec.net {
+            self.net_vms.insert(name.to_string());
+        }
+        let policy = spec.to_policy();
+        self.vm_policies.insert(name.clone(), policy);
+        self.vms.insert(name, Arc::from(handle));
+        Ok(())
+    }
+
     /// Override the L2 sandbox backend (tests inject a mock adapter).
     pub fn with_sandbox_adapter(mut self, sandbox_adapter: Box<dyn SandboxAdapter>) -> Self {
         self.sandbox_adapter = sandbox_adapter;
@@ -112,44 +143,28 @@ impl VmManager {
     /// Spawn a new VM from the given spec.
     /// Returns an error if a VM with the same name already exists.
     pub async fn spawn(&mut self, spec: VmSpec) -> Result<(), AdapterError> {
-        let name = spec.name.clone();
-        if self.vms.contains_key(&name) {
+        if self.vms.contains_key(&spec.name) {
             return Err(AdapterError::internal(format!(
                 "VM '{}' already exists",
-                name
+                spec.name
             )));
         }
-        let net = spec.net;
         let handle = self.adapter.create(&spec).await?;
-        if net {
-            self.net_vms.insert(name.to_string());
-        }
-        let policy = spec.to_policy();
-        self.vm_policies.insert(name.clone(), policy);
-        self.vms.insert(name, Arc::from(handle));
-        Ok(())
+        self.register_vm(&spec, handle)
     }
 
     /// Create a VM whose guest state is restored from a snapshot (P1 fast
     /// reset). Registers the VM exactly like [`Self::spawn`] — the engine
     /// sees a normal registered VM; only the guest payload differs.
     pub async fn restore(&mut self, snapshot: &Snapshot, spec: VmSpec) -> Result<(), AdapterError> {
-        let name = spec.name.clone();
-        if self.vms.contains_key(&name) {
+        if self.vms.contains_key(&spec.name) {
             return Err(AdapterError::internal(format!(
                 "VM '{}' already exists",
-                name
+                spec.name
             )));
         }
-        let net = spec.net;
         let handle = self.adapter.restore(snapshot, &spec).await?;
-        if net {
-            self.net_vms.insert(name.to_string());
-        }
-        let policy = spec.to_policy();
-        self.vm_policies.insert(name.clone(), policy);
-        self.vms.insert(name, Arc::from(handle));
-        Ok(())
+        self.register_vm(&spec, handle)
     }
 
     /// Execute a command inside a VM via its guest agent.

@@ -3,7 +3,7 @@
 //! Wires together fs (filesystem composition), process (CH spawning), and
 //! config to implement the full VmHandle contract.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -79,6 +79,9 @@ struct ChVmHandle {
     /// Host-side vsock socket the guest agent listens through; restored
     /// VMs use the path written into the snapshot config (per-VM).
     vsock_path: String,
+    /// Per-restore snapshot directory (config rewritten to this VM's
+    /// sockets); removed on Drop.
+    restore_dir: Option<PathBuf>,
     /// CH subprocess; behind a Mutex so `is_alive(&self)` can `try_wait`
     /// without exclusive `&mut` access (reap must work while background
     /// exec tasks hold a second handle Arc).
@@ -92,14 +95,34 @@ struct ChVmHandle {
 }
 
 impl ChVmHandle {
-    /// Rewrite the snapshot's `config.json` device sockets to this VM's
-    /// name-based paths, so a restore-only CH process reconnects the
-    /// virtio-fs / vsock devices to host sockets we actually provide.
-    /// The snapshot keeps these paths across restores (sequential P1
-    /// episodes); parallel restores of one snapshot need a per-restore
-    /// config copy (documented follow-up).
-    fn rewrite_snapshot_config(snapshot: &Snapshot, name: &str) -> Result<(), AdapterError> {
-        let cfg_path = format!("{}/config.json", snapshot.path);
+    /// Build a per-restore snapshot directory: copies `config.json` +
+    /// `state.json` and hardlinks `memory-ranges`, then rewrites the
+    /// copy's device sockets to this VM's name-based paths. Each restore
+    /// gets an isolated config, so parallel restores of one snapshot
+    /// cannot race on the shared `config.json`.
+    fn prepare_restore_dir(snapshot: &Snapshot, name: &str) -> Result<String, AdapterError> {
+        let restore_dir = format!("{}/restore-{}", snapshot.path, name);
+        let _ = std::fs::remove_dir_all(&restore_dir);
+        std::fs::create_dir_all(&restore_dir)
+            .map_err(|e| AdapterError::internal(format!("mkdir restore dir: {}", e)))?;
+        for f in ["config.json", "state.json"] {
+            std::fs::copy(
+                format!("{}/{}", snapshot.path, f),
+                format!("{}/{}", restore_dir, f),
+            )
+            .map_err(|e| AdapterError::internal(format!("copy snapshot {}: {}", f, e)))?;
+        }
+        // memory-ranges is the bulk (256MB+); hardlink it (same snapshot
+        // dir tree) so the per-restore dir is cheap.
+        let mem_src = format!("{}/memory-ranges", snapshot.path);
+        let mem_dst = format!("{}/memory-ranges", restore_dir);
+        if let Err(_e) = std::fs::hard_link(&mem_src, &mem_dst) {
+            std::fs::copy(&mem_src, &mem_dst).map_err(|e| {
+                AdapterError::internal(format!("copy snapshot memory-ranges: {}", e))
+            })?;
+        }
+
+        let cfg_path = format!("{}/config.json", restore_dir);
         let raw = std::fs::read_to_string(&cfg_path)
             .map_err(|e| AdapterError::internal(format!("read snapshot config: {}", e)))?;
         let mut cfg: serde_json::Value = serde_json::from_str(&raw)
@@ -120,7 +143,7 @@ impl ChVmHandle {
             .map_err(|e| AdapterError::internal(format!("serialize snapshot config: {}", e)))?;
         std::fs::write(&cfg_path, out)
             .map_err(|e| AdapterError::internal(format!("write snapshot config: {}", e)))?;
-        Ok(())
+        Ok(restore_dir)
     }
 
     /// Boot (`restore` = None) or restore-from-snapshot (`restore` = Some)
@@ -138,12 +161,14 @@ impl ChVmHandle {
         let vsock = format!("/tmp/terra-{}-vsock.sock", name);
         let _ = std::fs::remove_file(&vsock);
 
-        // Compose the layered rootfs first — CH needs the virtiofsd
-        // socket at boot; restore reuses the same name-based path after
-        // the snapshot config is rewritten to point at it.
-        if let Some(snapshot) = restore {
-            Self::rewrite_snapshot_config(snapshot, name.as_ref())?;
-        }
+        // Restore: build a per-restore snapshot dir (isolated config, so
+        // parallel restores of one snapshot don't race) and compose the
+        // layered rootfs on the name-based socket the rewritten config
+        // points at.
+        let restore_dir = match restore {
+            Some(snapshot) => Some(Self::prepare_restore_dir(snapshot, name.as_ref())?),
+            None => None,
+        };
         let fs_socket = format!("/tmp/terra-{}-fs.sock", name);
         let _ = std::fs::remove_file(&fs_socket);
         let fs = match spec.fs {
@@ -182,7 +207,10 @@ impl ChVmHandle {
         };
 
         let args = match restore {
-            Some(snapshot) => ch_restore_args(&socket, &format!("file://{}", snapshot.path)),
+            Some(_) => ch_restore_args(
+                &socket,
+                &format!("file://{}", restore_dir.as_deref().unwrap()),
+            ),
             None => ch_args(
                 spec,
                 &socket,
@@ -216,6 +244,7 @@ impl ChVmHandle {
         Ok(Self {
             name,
             vsock_path: vsock,
+            restore_dir: restore_dir.map(PathBuf::from),
             child: Mutex::new(child),
             client,
             fs: Mutex::new(fs),
@@ -497,6 +526,9 @@ impl Drop for ChVmHandle {
             // Killing the supervisor tears down the whole namespace:
             // virtiofsd dies and the overlayfs mount evaporates with it.
             teardown_fs(&mut fs);
+        }
+        if let Some(dir) = &self.restore_dir {
+            let _ = std::fs::remove_dir_all(dir);
         }
         // Remove the per-VM tap if networking was enabled (best-effort).
         let tap = format!("terra-{}", tap_name(self.name.as_ref()));

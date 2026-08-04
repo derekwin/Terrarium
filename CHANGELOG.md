@@ -48,7 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real KVM: ~200 ms restore vs ~850 ms cold boot, deterministic rollback.
 - Batch environment orchestration (`terra.batch.Batch`): restore N
   environments from one snapshot, parallel `collect`, deterministic
-  `recycle`, host density `report`.
+  `recycle`, host density `report`. VM lifecycle (create/restore) now runs
+  lock-free in the daemon (spec resolved under the lock, adapter call
+  outside, handle registered after) — 8 concurrent restores measured at
+  232 ms on real KVM, with per-restore snapshot config isolation so
+  parallel restores cannot race on the shared config.json.
 
 ### Fixed
 - `sandbox_create` resize no longer errors when the pool VM already matches the

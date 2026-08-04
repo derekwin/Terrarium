@@ -16,7 +16,8 @@ use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
 use crate::commands::{
-    execute, prepare_blocking_exec, prepared_exec_audited, Command, PreparedBlockingExec,
+    execute, prepare_blocking_exec, prepare_lifecycle, prepared_exec_audited, Command,
+    PreparedBlockingExec, PreparedLifecycle,
 };
 use crate::manager::VmManager;
 use terrarium_protocol::Response;
@@ -173,6 +174,53 @@ async fn dispatch(
     // state — read-only commands skip the O(n) `Arc::get_mut` scan.
     if REAP_COMMANDS.contains(&cmd.command.as_str()) {
         mgr.reap_dead();
+    }
+
+    // VM lifecycle (create/restore) is the other slow path: compose +
+    // CH spawn takes ~200ms. Resolve the spec under the lock, call the
+    // adapter outside it, then register the handle — so batch restores
+    // (P1-2) don't serialize on the manager lock.
+    if matches!(cmd.command.as_str(), "create" | "restore") {
+        match prepare_lifecycle(&mgr, &cmd) {
+            Ok(prepared) => {
+                let adapter = mgr.adapter();
+                drop(mgr);
+                let handle = match &prepared {
+                    PreparedLifecycle::Create(spec) => adapter.create(spec).await,
+                    PreparedLifecycle::Restore { snapshot, spec } => {
+                        adapter.restore(snapshot, spec).await
+                    }
+                };
+                let handle = match handle {
+                    Ok(h) => h,
+                    Err(e) => return (Response::err(e.to_string()), false),
+                };
+                let spec = match &prepared {
+                    PreparedLifecycle::Create(spec) => spec,
+                    PreparedLifecycle::Restore { spec, .. } => spec,
+                };
+                let mut mgr = manager.lock().await;
+                if let Err(e) = mgr.register_vm(spec, handle) {
+                    return (Response::err(e.to_string()), false);
+                }
+                let name = spec.name.to_string();
+                let pid = mgr.get(&name).map(|h| h.pid());
+                let resp = match prepared {
+                    PreparedLifecycle::Create(_) => Response::ok(serde_json::json!({
+                        "name": name,
+                        "status": "created",
+                        "pid": pid,
+                    })),
+                    PreparedLifecycle::Restore { .. } => Response::ok(serde_json::json!({
+                        "name": name,
+                        "status": "restored",
+                        "pid": pid,
+                    })),
+                };
+                return (resp, false);
+            }
+            Err(resp) => return (resp, false),
+        }
     }
 
     // Blocking exec is the one command that can run for up to its full
