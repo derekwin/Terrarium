@@ -78,6 +78,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layer baseline + dcache invalidation); `reset_vm` protocol command runs
   lock-free. Verified on real KVM: 32-env episode drops from 603 ms
   (snapshot recycle) to ~82 ms (7.4×), deterministic across episodes.
+- Environment-layer toolchain (P1/RL): `terra tool create --script` bakes
+  the environment READY state into a layer (builder VM → upper delta →
+  EROFS), which is exactly what makes the in-place reset correct — episode
+  writes live in the upper, ready-state lives in the layer.
+  `images/examples/rl-env.sh` is the reference RL example; the layer-backed
+  episode flow is verified by `sdk/python/tests/manual_envlayer.sh` (4 envs,
+  3 in-place resets: ready-state survives, episode writes cleared).
+- `restore` now applies the same implicit system-base stacking as `create`
+  (`apply_system_base`): restoring a snapshot whose layers were given as
+  `["rl-env"]` composes `["rl-env", "base"]` instead of producing a VM
+  without the distro rootfs.
+- Asset self-containment: the SDK now bundles the runtime libraries of its
+  extracted erofs tools — `libdeflate.so.0` for `mkfs.erofs` and
+  `libfuse.so.2` for `erofsfuse` — into the managed bin dir (with the bin
+  dir on `LD_LIBRARY_PATH`), so layer builds work on hosts without the
+  system packages; apt package lists are refreshed on first download miss.
   Snapshot restore remains the full-determinism path.
 
 ### Fixed

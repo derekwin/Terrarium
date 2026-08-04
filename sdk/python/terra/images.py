@@ -15,7 +15,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-from . import paths
+from . import assets, paths
 
 _ARTIFACTS = {
     "vmlinux.bin": "vmlinux.bin",
@@ -291,5 +291,9 @@ def build_layer(src_dir: str, name: str) -> Path:
     """Pack a directory into an EROFS layer image in the managed layers dir."""
     import terrarium_fs
 
+    # mkfs.erofs links against libdeflate.so.0; ensure the bundled tools
+    # (binary + runtime lib) are present and on the loader path so layer
+    # builds work on hosts without a system libdeflate0.
+    assets.ensure_erofs_tools()
     layers_dir = str(paths.layers_dir())
     return Path(terrarium_fs.build_erofs_layer(str(src_dir), name, layers_dir))

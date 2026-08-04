@@ -618,10 +618,16 @@ pub(crate) fn build_spec(cmd: &Command) -> Result<VmSpec, String> {
 /// Build a VM spec from a command without requiring a kernel — the
 /// restore command's guest state comes from a snapshot.
 pub(crate) fn build_restore_spec(cmd: &Command) -> Result<VmSpec, String> {
+    // Mirror cmd_create: the system base is implicit, so a caller that
+    // lists only tool layers (["rl-env"]) gets the same composed stack
+    // on restore as on create (["rl-env", "base"]). Without this,
+    // restore produced a rootfs missing the distro base.
+    let mut cmd = cmd.clone();
+    apply_system_base(&mut cmd);
     // The kernel is not part of the restored guest state, but CH's CLI
     // still requires a --kernel flag on restore — carry the caller's
     // kernel path if provided (the SDK passes the default kernel).
-    build_spec_with_kernel(cmd, cmd.kernel.clone())
+    build_spec_with_kernel(&cmd, cmd.kernel.clone())
 }
 
 fn build_spec_with_kernel(cmd: &Command, kernel: Option<String>) -> Result<VmSpec, String> {

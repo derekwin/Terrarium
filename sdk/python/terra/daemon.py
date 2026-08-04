@@ -80,6 +80,11 @@ def build_daemon_env(
     bin_dir = str(paths.bin_dir())
     if bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
         env["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+    # Bundled erofs tools (mkfs.erofs/erofsfuse) link against
+    # libdeflate.so.0, which assets extracts next to them. Keep the
+    # managed bin dir on the loader path so child processes can find it.
+    current_lp = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = bin_dir + (os.pathsep + current_lp if current_lp else "")
     return env
 
 
