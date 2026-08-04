@@ -139,7 +139,10 @@ terra tool remove -n python312
 Tool layers are also the RL environment-baseline mechanism: bake the
 environment's READY state into a layer (`images/examples/rl-env.sh`), then
 `Batch.reset_in_place()` clears only the episode upper — the ready state
-survives every reset (`sdk/python/tests/manual_envlayer.sh`).
+survives every reset. The minimal training loop is
+`sdk/python/examples/rl_episode_loop.py` (inject input → run the layer
+task → collect → reset_in_place); regression check in
+`sdk/python/tests/manual_envlayer.sh`.
 
 **MCP** — point your agent at the stdio server:
 

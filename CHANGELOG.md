@@ -101,6 +101,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   throughput 53 → 934 env-episodes/s. Reset is no longer the bottleneck
   (~55-60% of episode vs ~96% for recycle) — task execution now dominates.
   Raw data: `docs/benchmark-results-2026-08-04-envlayer-*.json`.
+- RL episode-loop example (`sdk/python/examples/rl_episode_loop.py`): the
+  minimal training-loop contract — layer task reads `/workdir/input.json`
+  (episode input), writes `/workdir/output.json`, echo result for
+  collection; `Batch.reset_in_place()` back to the layer baseline.
+  Verified on real KVM: 8 envs × 10 episodes, every episode's injected
+  input reflected in its collected result (deterministic data flow),
+  ~24 ms/episode steady-state.
   Snapshot restore remains the full-determinism path.
 
 ### Fixed

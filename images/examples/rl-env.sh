@@ -20,14 +20,22 @@ echo "baking RL environment ready-state into the layer"
 # episode reset (the reset clears the upper, never the layer).
 echo "ready" > /var/rl-ready
 
-# Task machinery lives in the layer too — the agent runs it each episode.
+# Task machinery lives in the layer too — the training loop runs it each
+# episode. Contract: read /workdir/input.json (optional), write the result
+# to /workdir/output.json, echo it to stdout (what the loop collects).
 mkdir -p /usr/local/bin
 cat > /usr/local/bin/rl-task <<'EOF'
 #!/bin/sh
-# Example RL task: computes over the episode, writes the result.
-i=0
-while [ $i -lt 100 ]; do i=$((i+1)); done
-echo "result-$i"
+# Example RL task: reads the episode input (if any), computes, writes the
+# result to /workdir/output.json and echoes it for collection.
+i=100
+if [ -f /workdir/input.json ]; then
+  n=$(sed -n 's/.*"x"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /workdir/input.json | head -1)
+  [ -n "$n" ] && i=$n
+fi
+j=0
+while [ $j -lt 100 ]; do j=$((j+1)); done
+echo "result-$i" | tee /workdir/output.json
 EOF
 chmod +x /usr/local/bin/rl-task
 

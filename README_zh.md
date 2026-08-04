@@ -136,8 +136,10 @@ terra tool remove -n python312
 
 工具层同时是 RL 环境基线的机制：把环境的就绪态烘焙进层
 （`images/examples/rl-env.sh`），`Batch.reset_in_place()` 只清理 episode
-写入的 upper——就绪态在每次重置后依然存活
-（`sdk/python/tests/manual_envlayer.sh`）。
+写入的 upper——就绪态在每次重置后依然存活。最小训练循环见
+`sdk/python/examples/rl_episode_loop.py`
+（注入输入 → 跑层内任务 → 收集结果 → reset_in_place），回归验证见
+`sdk/python/tests/manual_envlayer.sh`。
 
 **MCP**——将 agent 指向 stdio server：
 
