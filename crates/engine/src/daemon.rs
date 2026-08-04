@@ -16,8 +16,8 @@ use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
 use crate::commands::{
-    execute, prepare_blocking_exec, prepare_lifecycle, prepared_exec_audited, Command,
-    PreparedBlockingExec, PreparedLifecycle,
+    execute, prepare_blocking_exec, prepare_lifecycle, prepared_exec_audited, require_name,
+    Command, PreparedBlockingExec, PreparedLifecycle,
 };
 use crate::manager::VmManager;
 use terrarium_protocol::Response;
@@ -221,6 +221,52 @@ async fn dispatch(
             }
             Err(resp) => return (resp, false),
         }
+    }
+
+    // Teardown (destroy/shutdown/kill) is the other lifecycle slow path:
+    // CH shutdown + fs teardown take ~50-100ms. Unregister under the
+    // lock, run the teardown outside it — so a 64-env recycle does not
+    // serialize on the manager lock.
+    if matches!(cmd.command.as_str(), "destroy" | "shutdown" | "kill") {
+        let name = match require_name(&cmd) {
+            Ok(n) => n,
+            Err(resp) => return (resp, false),
+        };
+        let handle = match mgr.unregister(&name) {
+            Some(h) => h,
+            None => {
+                let err =
+                    adapter_traits::AdapterError::not_found(format!("VM '{}' not found", name))
+                        .to_string();
+                return (Response::err(err), false);
+            }
+        };
+        let snap_dir = format!("{}/terra-snap-{}", mgr.snapshot_dir(), name);
+        drop(mgr);
+        if cmd.command == "destroy" {
+            // Snapshot artifacts of this VM are garbage (best-effort).
+            let _ = std::fs::remove_dir_all(&snap_dir);
+        }
+        let msg = match cmd.command.as_str() {
+            "destroy" | "shutdown" => match handle.shutdown().await {
+                Ok(()) => format!(
+                    "VM '{}' {}",
+                    name,
+                    if cmd.command == "destroy" {
+                        "destroyed"
+                    } else {
+                        "shut down"
+                    }
+                ),
+                Err(e) => return (Response::err(e.to_string()), false),
+            },
+            "kill" => {
+                drop(handle); // the backend's Drop kills the process
+                format!("VM '{}' killed", name)
+            }
+            _ => unreachable!(),
+        };
+        return (Response::ok_msg(&msg), false);
     }
 
     // Blocking exec is the one command that can run for up to its full

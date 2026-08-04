@@ -1,0 +1,71 @@
+{
+  "snapshot_path": "/tmp/reset-bench-snap",
+  "snapshot_ms": 1123.8,
+  "sweeps": [
+    {
+      "size": 4,
+      "restore_ms": 225.1,
+      "per_vm_ms": 56.3,
+      "recycle_ms": 258.1,
+      "collect_ms": 7.7,
+      "execs_per_sec": 517.4,
+      "collect_ok": true,
+      "rss_mb": 248.8,
+      "pss_mb": 234.0,
+      "per_vm_rss_mb": 62.2,
+      "per_vm_pss_mb": 58.5
+    },
+    {
+      "size": 8,
+      "restore_ms": 214.4,
+      "per_vm_ms": 26.8,
+      "recycle_ms": 288.6,
+      "collect_ms": 8.7,
+      "execs_per_sec": 917.9,
+      "collect_ok": true,
+      "rss_mb": 497.6,
+      "pss_mb": 463.3,
+      "per_vm_rss_mb": 62.2,
+      "per_vm_pss_mb": 57.9
+    },
+    {
+      "size": 16,
+      "restore_ms": 231.4,
+      "per_vm_ms": 14.5,
+      "recycle_ms": 291.4,
+      "collect_ms": 20.8,
+      "execs_per_sec": 768.1,
+      "collect_ok": true,
+      "rss_mb": 994.9,
+      "pss_mb": 921.9,
+      "per_vm_rss_mb": 62.2,
+      "per_vm_pss_mb": 57.6
+    },
+    {
+      "size": 32,
+      "restore_ms": 265.9,
+      "per_vm_ms": 8.3,
+      "recycle_ms": 370.1,
+      "collect_ms": 15.5,
+      "execs_per_sec": 2068.7,
+      "collect_ok": true,
+      "rss_mb": 1990.6,
+      "pss_mb": 1839.0,
+      "per_vm_rss_mb": 62.2,
+      "per_vm_pss_mb": 57.5
+    },
+    {
+      "size": 64,
+      "restore_ms": 469.4,
+      "per_vm_ms": 7.3,
+      "recycle_ms": 643.6,
+      "collect_ms": 38.0,
+      "execs_per_sec": 1682.8,
+      "collect_ok": true,
+      "rss_mb": 3981.0,
+      "pss_mb": 3673.4,
+      "per_vm_rss_mb": 62.2,
+      "per_vm_pss_mb": 57.4
+    }
+  ]
+}

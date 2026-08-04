@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outside, handle registered after) — 8 concurrent restores measured at
   232 ms on real KVM, with per-restore snapshot config isolation so
   parallel restores cannot race on the shared config.json.
+- VM teardown (destroy/shutdown/kill) also runs lock-free (unregister
+  under the lock, CH shutdown outside): a 64-env batch recycle dropped
+  from 3487 ms to 644 ms. Reset-scaling benchmark
+  (`manual_reset_bench.py`): 4→64 envs restore in ~220-470 ms total,
+  per-VM memory constant at 62.7 MB.
 
 ### Fixed
 - `sandbox_create` resize no longer errors when the pool VM already matches the

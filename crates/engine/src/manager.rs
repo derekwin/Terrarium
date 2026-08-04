@@ -272,7 +272,7 @@ impl VmManager {
     /// on it (marked `terminated` — their VM is gone, so they can never
     /// complete; the completion task never overwrites a non-running
     /// status). Returns the removed handle when the VM was registered.
-    fn unregister(&mut self, name: &str) -> Option<Arc<dyn VmHandle>> {
+    pub(crate) fn unregister(&mut self, name: &str) -> Option<Arc<dyn VmHandle>> {
         let handle = self.vms.remove(name);
         self.vm_policies.remove(name);
         self.net_vms.remove(name);

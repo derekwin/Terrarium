@@ -56,6 +56,35 @@ failures); 16 concurrent execs are clean (~330-344 execs/s). The
 benchmark retries transient handshake failures (as real clients would)
 and defaults to 16 concurrent execs.
 
+## Fast-reset scaling — 2026-08-04 (snapshot concurrency)
+
+`sdk/python/tests/manual_reset_bench.py` restores N environments from ONE
+snapshot (P1 fast reset), measures restore/recycle wall time + parallel
+collect, and reports host memory. Raw:
+`docs/benchmark-results-2026-08-04-reset-scaling.json`.
+
+| size | restore (per-VM) | recycle | collect | per-VM RSS/Pss |
+|---|---|---|---|---|
+| 4 | 225 ms (56) | 258 ms | 8 ms (517/s) | 62.7 / 59.0 MB |
+| 8 | 214 ms (27) | 289 ms | 9 ms (918/s) | 62.7 / 58.4 MB |
+| 16 | 231 ms (14) | 291 ms | 21 ms (768/s) | 62.7 / 58.1 MB |
+| 32 | 266 ms (8) | 370 ms | 15 ms (2069/s) | 62.7 / 58.0 MB |
+| 64 | 469 ms (7) | **644 ms** | 38 ms (1683/s) | 62.7 / 57.9 MB |
+
+Reading:
+
+- **Restore is genuinely concurrent**: 4→32 environments all complete in
+  ~220-270 ms (per-VM latency drops 56→8 ms); 64 shows mild contention
+  (469 ms). Practical sweet spot ≈ 32 concurrent restores per snapshot.
+- **Memory is perfectly linear**: per-VM RSS constant at 62.7 MB from 4
+  to 64 environments (64 envs ≈ 4 GB); Pss drifts down slightly as
+  shared-layer pages amortize.
+- **Collect throughput scales with environment count**: ~500→2000+
+  parallel execs/sec.
+- Recycle (destroy + re-restore) was the bottleneck at 4→64
+  (3487 ms) until teardown (destroy/shutdown/kill) was moved outside the
+  manager lock — now 644 ms at 64 and near-linear in size.
+
 ### Environment lessons (why the first runs failed)
 
 - The engine's virtiofsd supervisor needs `unshare -Urm`; Ubuntu's
