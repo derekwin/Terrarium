@@ -63,6 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `audit_list` protocol command (`limit`/`event`/`sandbox_id` filters),
   SDK `TerraClient.audit_list`, CLI `terra audit ls`, and the MCP
   `terra_audit_list` tool.
+- Sandlock deny channel + fsgrant gate ACTIVATED in the guest images
+  (base/ubuntu layers now carry the fully patched sandlock): verified on
+  real KVM — a denied sandboxed read exits with the reserved code 200 and
+  produces an `audit.deny` event (reason carries stderr), while allowed
+  reads stay exit 0.
 
 ### Fixed
 - `sandbox_create` resize no longer errors when the pool VM already matches the

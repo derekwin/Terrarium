@@ -204,6 +204,11 @@ write_paths / net_allow）已移除，一律拒绝：
   判定、不放松）。**剩余不可观测面**：link/rename 等双路径 syscall 与
   mkdir/unlink/truncate 等路径 syscall（未纳入 notify BPF 集）、以及 chroot
   模式（chroot handler 自有语义）——此类失败仍按普通非零退出呈现。
+  **运行时验证（2026-08-04，真实 KVM）**：带全部补丁（musl+denyfd+
+  fsgrant）的 sandlock 已烘焙进 base/ubuntu 层；越权读取
+  （`cat /var/secret`）返回保留码 200 并产生 `audit.deny`（reason 带
+  stderr），允许的读取正常 exit 0 —— deny 通道与 fsgrant 门在运行系统
+  中激活。
 
 原"映射层保留协议兼容"的设计已取消——契约面即唯一实现，无兼容输入。
 
