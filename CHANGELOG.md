@@ -68,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real KVM — a denied sandboxed read exits with the reserved code 200 and
   produces an `audit.deny` event (reason carries stderr), while allowed
   reads stay exit 0.
+- RL episode-loop benchmark (`manual_episode_bench.py`): task injection →
+  parallel run → collect → snapshot recycle. Snapshot recycle dominates
+  (~94% of episode time); 32 envs sustain ~53 env-episodes/s with
+  deterministic resets. In-place guest reset identified as the next
+  ~10x lever.
 
 ### Fixed
 - `sandbox_create` resize no longer errors when the pool VM already matches the

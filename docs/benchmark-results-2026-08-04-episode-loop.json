@@ -1,0 +1,51 @@
+{
+  "snapshot": "/tmp/episode-bench-snap",
+  "episodes": 5,
+  "task": "inject",
+  "sizes": [
+    {
+      "size": 4,
+      "episode_mean_ms": 283.1,
+      "inject_mean_ms": 8.7,
+      "collect_mean_ms": 6.1,
+      "reset_mean_ms": 268.2,
+      "reset_share_pct": 94.8,
+      "episodes_per_min": 212.0,
+      "envs_per_sec": 14.1,
+      "all_ok": true
+    },
+    {
+      "size": 8,
+      "episode_mean_ms": 290.5,
+      "inject_mean_ms": 11.0,
+      "collect_mean_ms": 7.4,
+      "reset_mean_ms": 272.2,
+      "reset_share_pct": 93.7,
+      "episodes_per_min": 206.5,
+      "envs_per_sec": 27.5,
+      "all_ok": true
+    },
+    {
+      "size": 16,
+      "episode_mean_ms": 318.9,
+      "inject_mean_ms": 14.5,
+      "collect_mean_ms": 9.3,
+      "reset_mean_ms": 295.1,
+      "reset_share_pct": 92.5,
+      "episodes_per_min": 188.2,
+      "envs_per_sec": 50.2,
+      "all_ok": true
+    },
+    {
+      "size": 32,
+      "episode_mean_ms": 603.2,
+      "inject_mean_ms": 21.0,
+      "collect_mean_ms": 14.4,
+      "reset_mean_ms": 567.8,
+      "reset_share_pct": 94.1,
+      "episodes_per_min": 99.5,
+      "envs_per_sec": 53.1,
+      "all_ok": true
+    }
+  ]
+}

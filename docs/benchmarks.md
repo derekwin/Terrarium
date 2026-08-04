@@ -85,6 +85,33 @@ Reading:
   (3487 ms) until teardown (destroy/shutdown/kill) was moved outside the
   manager lock — now 644 ms at 64 and near-linear in size.
 
+## RL episode loop — 2026-08-04
+
+`sdk/python/tests/manual_episode_bench.py` models the primary-market
+cadence: task injection → parallel run → collect → snapshot recycle, for
+repeated episodes. Raw:
+`docs/benchmark-results-2026-08-04-episode-loop.json`.
+
+| size | inject | collect | reset | episode total | env-episodes/s |
+|---|---|---|---|---|---|
+| 4 | ~9 ms | ~6 ms | ~268 ms | ~283 ms | 14 |
+| 8 | ~11 ms | ~7 ms | ~272 ms | ~290 ms | 28 |
+| 16 | ~15 ms | ~9 ms | ~295 ms | ~319 ms | 50 |
+| 32 | ~21 ms | ~14 ms | ~568 ms | ~603 ms | 53 |
+
+Reading:
+
+- **The snapshot recycle IS the episode**: reset consumes ~94% of episode
+  time (268 ms at 4 envs → 568 ms at 32). The actual RL work (inject +
+  collect) is 10-40 ms.
+- Determinism holds across episodes (every episode's injected input is
+  read back correctly after a recycle).
+- **Next lever for RL economics**: an in-place guest reset (kill tasks,
+  wipe runtime state from a pristine copy, ~10-50 ms) would cut episode
+  cost ~10x vs snapshot recycle; snapshot restore remains the
+  correctness-guaranteed path. Trade-off documented in the strategy
+  follow-ups.
+
 ### Environment lessons (why the first runs failed)
 
 - The engine's virtiofsd supervisor needs `unshare -Urm`; Ubuntu's
