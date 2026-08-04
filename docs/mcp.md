@@ -30,7 +30,7 @@ Terrarium 的用户面工具。管理员操作（daemon 启停、镜像构建、
 协议细节：notification（无 `id`）不产生响应；日志只写 stderr，
 stdout 仅承载 JSON-RPC 消息。
 
-## 工具（20 个，全为用户面）
+## 工具（21 个，全为用户面）
 
 ### 会话式执行（推荐入口）
 
@@ -42,6 +42,7 @@ agent 面向**会话**而非 VM：`terra_exec` 在隔离的沙箱会话内执行
 | 工具 | 参数 | 说明 |
 |---|---|---|
 | `terra_exec` | `args` (array, 必填), `session?`, `sandboxed?` (默认 true), `cwd?`, `layers?` (仅首次创建会话), `timeout_secs?` | 在会话内执行命令。`session` 省略 → 共享 `"default"` 会话；不同会话名 = 隔离工作目录。`layers` 仅决定会话首次创建时的环境（默认 `["base"]`） |
+| `terra_audit_list` | `limit?`, `event?`, `sandbox_id?` | 查询引擎审计环形缓冲（P2 可观测性）：exec/deny/resource 事件，最新优先 |
 | `terra_exec_background` | `args` (array, 必填), `session?`, `layers?` (仅首次创建会话), `timeout_secs?` | 在会话内后台启动命令，不等待完成；立即返回 `{session_id, sandbox, status:"started"}`。轮询 `terra_session_status` 获取进度，`terra_session_kill` 终止 |
 | `terra_session_status` | `session_id` (必填) | 查询后台会话的引擎记录。`session_id` 是引擎会话 id（来自 `terra_exec_background` 响应），不是 MCP 会话名 |
 | `terra_session_kill` | `session_id` (必填) | 终止后台会话（guest 内 killpg），其工作目录一并移除 |

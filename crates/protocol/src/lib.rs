@@ -69,6 +69,13 @@ pub struct Command {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes: Option<u64>,
 
+    // audit_list: max records to return (default 100)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    // audit_list: filter by event kind ("exec" | "deny" | "resource")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+
     // pool_create: number of idle VMs to maintain
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_size: Option<u32>,
@@ -132,6 +139,8 @@ impl Command {
             max_memory_mb: None,
             snapshot_path: None,
             memory_bytes: None,
+            limit: None,
+            event: None,
             pool_size: None,
             timeout_secs: None,
             exec_mode: None,
@@ -278,6 +287,18 @@ impl Command {
     /// Builder: set snapshot path.
     pub fn with_snapshot_path(mut self, path: impl Into<String>) -> Self {
         self.snapshot_path = Some(path.into());
+        self
+    }
+
+    /// Builder: audit_list result limit.
+    pub fn with_limit(mut self, limit: u64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Builder: audit_list event filter ("exec" | "deny" | "resource").
+    pub fn with_event(mut self, event: &str) -> Self {
+        self.event = Some(event.into());
         self
     }
 }

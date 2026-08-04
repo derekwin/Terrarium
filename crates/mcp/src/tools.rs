@@ -131,6 +131,15 @@ pub fn tools_list() -> Vec<serde_json::Value> {
             ],
         ),
         tool(
+            "terra_audit_list",
+            "Query the engine's audit ring buffer (P2 observability): exec/deny/resource events, newest first.",
+            vec![
+                ("limit", "number", "Max records (default 100, max 1000)"),
+                ("event", "string", "Filter: exec | deny | resource"),
+                ("sandbox_id", "string", "Filter by sandbox id or VM name"),
+            ],
+        ),
+        tool(
             "terra_exec_background",
             "Start a command in the sandbox session without waiting; returns {\"session_id\",\"sandbox\",\"status\":\"started\"} — poll terra_session_status, stop with terra_session_kill.",
             vec![
@@ -318,6 +327,19 @@ pub fn call_tool(name: &str, args: &serde_json::Value, sessions: &mut SessionReg
             send_to_engine(&Command::new("destroy").with_name(name))
         }
         "terra_exec" => terra_exec(args, sessions),
+        "terra_audit_list" => {
+            let mut c = Command::new("audit_list");
+            if let Some(limit) = args.get("limit").and_then(|a| a.as_u64()) {
+                c = c.with_limit(limit);
+            }
+            if let Some(event) = args.get("event").and_then(|a| a.as_str()) {
+                c = c.with_event(event);
+            }
+            if let Some(id) = args.get("sandbox_id").and_then(|a| a.as_str()) {
+                c = c.with_id(id);
+            }
+            send_to_engine(&c)
+        }
         "terra_exec_background" => terra_exec_background(args, sessions, &send_to_engine),
         "terra_session_status" => terra_session_status(args, &send_to_engine),
         "terra_session_kill" => terra_session_kill(args, &send_to_engine),

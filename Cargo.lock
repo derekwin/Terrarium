@@ -88,6 +88,7 @@ dependencies = [
  "adapter-traits",
  "async-trait",
  "pyo3",
+ "serde",
  "serde_json",
  "terrarium-network",
  "terrarium-protocol",

@@ -58,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from 3487 ms to 644 ms. Reset-scaling benchmark
   (`manual_reset_bench.py`): 4→64 envs restore in ~220-470 ms total,
   per-VM memory constant at 62.7 MB.
+- Audit observability productized (P2): the engine keeps a bounded
+  in-memory audit ring buffer alongside the tracing stream, queryable via
+  the `audit_list` protocol command (`limit`/`event`/`sandbox_id` filters),
+  SDK `TerraClient.audit_list`, CLI `terra audit ls`, and the MCP
+  `terra_audit_list` tool.
 
 ### Fixed
 - `sandbox_create` resize no longer errors when the pool VM already matches the

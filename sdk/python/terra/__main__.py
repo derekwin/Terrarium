@@ -979,6 +979,30 @@ def cmd_vm_restore(args) -> int:
         return _err(msg)
 
 
+def cmd_audit_ls(args) -> int:
+    """Query the engine's audit ring buffer."""
+    c = _client(args)
+    try:
+        resp = c.audit_list(limit=args.limit, event=args.event, sandbox_id=args.id)
+    except TerraError as e:
+        return _err(str(e))
+    records = resp.get("audit", [])
+    if args.raw:
+        return _output(resp, args)
+    for r in records:
+        line = f"{r.get('event')} {r.get('sandbox_id')}"
+        if r.get("args"):
+            line += f" {' '.join(r['args'])}"
+        if r.get("exit_code") is not None:
+            line += f" exit={r['exit_code']}"
+        if r.get("reason"):
+            line += f" reason={r['reason']}"
+        if r.get("kind"):
+            line += f" kind={r['kind']}"
+        print(line)
+    return EXIT_OK
+
+
 def _simple_vm(method: str):
     """Factory for simple single-arg VM operations."""
 
@@ -1625,6 +1649,16 @@ Common workflows:
         sp = vms.add_parser(act, help=f"{act} a VM")
         sp.add_argument("name", help="VM name")
         sp.set_defaults(f=_simple_vm(method))
+
+    # ── audit ────────────────────────────────────────────────────────
+    audit = sub.add_parser("audit", help="audit observability (P2)")
+    audits = audit.add_subparsers(dest="action", required=True)
+    sp = audits.add_parser("ls", help="query the audit ring buffer")
+    sp.add_argument("--limit", type=int, help="max records (default 100)")
+    sp.add_argument("--event", choices=["exec", "deny", "resource"], help="event kind filter")
+    sp.add_argument("--id", help="sandbox id / vm name filter")
+    sp.add_argument("--raw", action="store_true", help="print raw JSON")
+    sp.set_defaults(f=cmd_audit_ls)
 
     # ── pool ────────────────────────────────────────────────────────
     pool = sub.add_parser("pool", help="warm pool operations")

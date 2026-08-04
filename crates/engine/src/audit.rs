@@ -1,6 +1,7 @@
-//! Audit events (D-phase, R6) — structured tracing output gated by the
-//! per-policy AuditSpec. No protocol surface; the log stream is the
-//! audit channel.
+//! Audit events (D-phase, R6; productized in P2) — structured tracing
+//! output gated by the per-policy AuditSpec, plus a bounded in-engine
+//! ring buffer so the daemon can answer `audit_list` queries without a
+//! log aggregator.
 //!
 //! Event model (consumers aggregate from the log stream):
 //! - `audit.exec` — a sandboxed exec completed (exit_code + duration).
@@ -12,6 +13,70 @@
 //! - `audit.resource` — resource declarations / adjustments (sandbox limits
 //!   at create; VM resize as an always-on platform event).
 use adapter_traits::{AdapterError, ExecResult, SandboxPolicy, SANDBOX_DENY_EXIT_CODE};
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
+
+/// One in-engine audit record — the same event the tracing stream emits,
+/// kept for query (`audit_list`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct AuditRecord {
+    pub ts_ms: u64,
+    pub event: String,
+    /// Audit subject: the engine sandbox id, or the VM name for
+    /// VM-level platform events (e.g. resize).
+    pub sandbox_id: String,
+    pub args: Vec<String>,
+    pub exit_code: Option<i32>,
+    pub duration_ms: Option<u64>,
+    pub reason: Option<String>,
+    pub kind: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// Bounded ring buffer capacity (drop oldest when full).
+const AUDIT_CAPACITY: usize = 10_000;
+
+fn store() -> &'static Mutex<VecDeque<AuditRecord>> {
+    static LOG: OnceLock<Mutex<VecDeque<AuditRecord>>> = OnceLock::new();
+    LOG.get_or_init(|| Mutex::new(VecDeque::with_capacity(AUDIT_CAPACITY)))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn push(record: AuditRecord) {
+    let mut log = store().lock().unwrap_or_else(|e| e.into_inner());
+    if log.len() >= AUDIT_CAPACITY {
+        log.pop_front();
+    }
+    log.push_back(record);
+}
+
+/// Query the ring buffer (newest first), optionally filtered.
+pub(crate) fn audit_list(
+    limit: usize,
+    event: Option<&str>,
+    sandbox_id: Option<&str>,
+) -> Vec<AuditRecord> {
+    let log = store().lock().unwrap_or_else(|e| e.into_inner());
+    log.iter()
+        .rev()
+        .filter(|r| event.map_or(true, |e| r.event == e))
+        .filter(|r| sandbox_id.map_or(true, |s| r.sandbox_id == s))
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+/// Clear the ring buffer (tests / operator reset).
+#[allow(dead_code)] // used by tests; operator reset reserved for the audit API
+pub(crate) fn audit_clear() {
+    store().lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
 
 /// `audit.exec` — a sandbox exec completed, with its exit code and
 /// wall-clock duration. Gated by `policy.audit.exec`; `None` policy emits
@@ -25,6 +90,17 @@ pub(crate) fn audit_exec(
 ) {
     if policy.map(|p| p.audit.exec).unwrap_or(false) {
         tracing::info!(audit = "exec", sandbox_id = sandbox, args = ?args, exit_code = exit_code, duration_ms = duration_ms, "sandbox exec audited");
+        push(AuditRecord {
+            ts_ms: now_ms(),
+            event: "exec".into(),
+            sandbox_id: sandbox.to_string(),
+            args: args.to_vec(),
+            exit_code: Some(exit_code),
+            duration_ms: Some(duration_ms),
+            reason: None,
+            kind: None,
+            detail: None,
+        });
     }
 }
 
@@ -38,6 +114,17 @@ pub(crate) fn audit_deny(
 ) {
     if policy.map(|p| p.audit.deny).unwrap_or(false) {
         tracing::warn!(audit = "deny", sandbox_id = sandbox, args = ?args, reason = reason, "sandbox exec denied by policy");
+        push(AuditRecord {
+            ts_ms: now_ms(),
+            event: "deny".into(),
+            sandbox_id: sandbox.to_string(),
+            args: args.to_vec(),
+            exit_code: Some(SANDBOX_DENY_EXIT_CODE),
+            duration_ms: None,
+            reason: Some(reason.to_string()),
+            kind: None,
+            detail: None,
+        });
     }
 }
 
@@ -57,6 +144,17 @@ pub(crate) fn audit_resource(
             detail = detail,
             "sandbox resource audit"
         );
+        push(AuditRecord {
+            ts_ms: now_ms(),
+            event: "resource".into(),
+            sandbox_id: sandbox.to_string(),
+            args: Vec::new(),
+            exit_code: None,
+            duration_ms: None,
+            reason: None,
+            kind: Some(kind.to_string()),
+            detail: Some(detail.to_string()),
+        });
     }
 }
 
@@ -104,6 +202,17 @@ pub(crate) fn audit_vm_resize(vm: &str, cpus: Option<u32>, memory_bytes: Option<
         memory_bytes = memory_bytes,
         "vm resize audited"
     );
+    push(AuditRecord {
+        ts_ms: now_ms(),
+        event: "resource".into(),
+        sandbox_id: vm.to_string(),
+        args: Vec::new(),
+        exit_code: None,
+        duration_ms: None,
+        reason: None,
+        kind: Some("vm_resize".into()),
+        detail: Some(format!("cpus={:?} memory_bytes={:?}", cpus, memory_bytes)),
+    });
 }
 
 #[cfg(test)]
@@ -429,5 +538,33 @@ mod tests {
             );
         });
         assert!(recorded(&sub).is_empty(), "both flags false → nothing");
+    }
+
+    /// The in-engine ring buffer (P2 audit_list) records gated events and
+    /// supports filtering; audit_clear resets it.
+    #[test]
+    fn audit_list_queries_the_ring_buffer() {
+        audit_clear();
+        let policy = audited_policy();
+        audit_exec(Some(&policy), "sb-1", &["echo".into()], 0, 5);
+        audit_deny(Some(&policy), "sb-1", &["cat".into()], "denied");
+
+        let all = audit_list(100, None, Some("sb-1"));
+        assert_eq!(all.len(), 2, "both records are stored");
+        assert_eq!(all[0].event, "deny", "newest first");
+        assert_eq!(all[0].reason.as_deref(), Some("denied"));
+        assert_eq!(all[1].event, "exec");
+        assert_eq!(all[1].exit_code, Some(0));
+        assert_eq!(all[1].duration_ms, Some(5));
+
+        let execs = audit_list(100, Some("exec"), Some("sb-1"));
+        assert_eq!(execs.len(), 1);
+        assert_eq!(execs[0].event, "exec");
+
+        let other = audit_list(100, None, Some("sb-other"));
+        assert!(other.is_empty(), "sandbox filter applies");
+
+        audit_clear();
+        assert!(audit_list(100, None, Some("sb-1")).is_empty());
     }
 }

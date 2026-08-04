@@ -409,6 +409,28 @@ class TerraClient:
             cmd["kernel"] = kernel
         return self._send(cmd)
 
+    def audit_list(
+        self,
+        *,
+        limit: int | None = None,
+        event: str | None = None,
+        sandbox_id: str | None = None,
+    ) -> dict:
+        """Query the engine's bounded audit ring buffer (P2 observability).
+
+        Returns ``{audit: [{ts_ms, event, sandbox_id, args, exit_code,
+        duration_ms, reason, kind, detail}], count}`` — newest first.
+        ``event`` filters to ``"exec" | "deny" | "resource"``.
+        """
+        cmd: dict = {"command": "audit_list"}
+        if limit is not None:
+            cmd["limit"] = limit
+        if event is not None:
+            cmd["event"] = event
+        if sandbox_id is not None:
+            cmd["id"] = sandbox_id
+        return self._send(cmd)
+
     def vm_exec(
         self, name: str, args: list[str], timeout_secs: int = 60, *,
         sandbox: bool = False,

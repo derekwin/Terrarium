@@ -3,6 +3,7 @@
 //! Each function takes a `&mut VmManager` and a typed command payload,
 //! executes it, and returns a serializable response.
 
+mod audit_cmd;
 mod exec;
 mod fs;
 mod network;
@@ -580,6 +581,7 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "destroy" => vm::cmd_destroy(mgr, cmd).await,
         "snapshot" => snapshot::cmd_snapshot(mgr, cmd).await,
         "restore" => snapshot::cmd_restore(mgr, cmd).await,
+        "audit_list" => audit_cmd::cmd_audit_list(&cmd),
         "attach_fs" => fs::cmd_attach_fs(mgr, cmd).await,
         "detach_fs" => fs::cmd_detach_fs(mgr, cmd).await,
         "exec" => exec::cmd_exec(mgr, cmd).await,

@@ -32,6 +32,7 @@ TCP + token 时，客户端先发送一行 token，再发送命令行。
 | `destroy` | `name` | 停止并注销（同义，永不删数据） |
 | `snapshot` | `name`, `snapshot_path?` | 内存快照（P1 快速重置原语——环境就绪态捕获；`snapshot_path` 为**目录**，CH 向其中写入内存+状态文件；默认 `{snapshot_dir}/terra-snap-<vm>`。快照前 VM 自动 pause，捕获后 resume） |
 | `restore` | `name`, `snapshot_path`, `cpus?`, `memory_mb?`, `layers?`, `upper?`, `net?` | 从快照创建**新 VM**（P1 快速重置）：主机侧栈全新构建，guest 状态来自快照；资源需与快照时一致。`resume=true` 直接继续 guest |
+| `audit_list` | `limit?`, `event?`, `id?` | 查询引擎的有界审计环形缓冲（P2 可观测性）：`{audit: [{ts_ms, event, sandbox_id, args, exit_code, duration_ms, reason, kind, detail}], count}`，最新优先；`event` ∈ `exec`/`deny`/`resource`，`id` 按 sandbox/vm 过滤 |
 
 ### 执行
 
