@@ -59,6 +59,32 @@ pub fn tools_list() -> Vec<serde_json::Value> {
             vec![("name", "string", "VM name")],
         ),
         tool(
+            "terra_vm_snapshot",
+            "Capture a VM at its current state into a snapshot directory (P1 fast reset). The VM is paused after capture.",
+            vec![
+                ("name", "string", "VM name"),
+                (
+                    "snapshot_path",
+                    "string",
+                    "Snapshot directory (optional; default {snapshot_dir}/terra-snap-<vm>)",
+                ),
+            ],
+        ),
+        tool(
+            "terra_vm_restore",
+            "Create a NEW VM whose guest state comes from a snapshot directory (P1 fast reset, ~200ms vs ~850ms cold boot).",
+            vec![
+                ("name", "string", "New VM name"),
+                ("snapshot_path", "string", "Snapshot directory from terra_vm_snapshot"),
+                (
+                    "layers",
+                    "array",
+                    "Layer names for the host-side rootfs stack (optional)",
+                ),
+                ("net", "boolean", "Attach NAT networking (optional)"),
+            ],
+        ),
+        tool(
             "terra_vm_shutdown",
             "Gracefully shut down a VM (disks are kept).",
             vec![("name", "string", "VM name")],
@@ -263,6 +289,29 @@ pub fn call_tool(name: &str, args: &serde_json::Value, sessions: &mut SessionReg
                 c = c.with_memory_bytes(v);
             }
             send_to_engine(&c)
+        }
+        "terra_vm_snapshot" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            let path = args.get("snapshot_path").and_then(|a| a.as_str());
+            send_to_engine(&vm_snapshot_cmd(name, path))
+        }
+        "terra_vm_restore" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            let path = args
+                .get("snapshot_path")
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
+            let layers: Vec<String> = args
+                .get("layers")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let net = args.get("net").and_then(|a| a.as_bool()).unwrap_or(false);
+            send_to_engine(&vm_restore_cmd(name, path, &layers, net))
         }
         "terra_vm_destroy" => {
             let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
@@ -628,6 +677,29 @@ fn error_json(msg: &str) -> String {
     serde_json::json!({"status": "error", "error": msg}).to_string()
 }
 
+/// Build the `snapshot` command (P1 fast reset) from MCP args.
+fn vm_snapshot_cmd(name: &str, snapshot_path: Option<&str>) -> Command {
+    let mut c = Command::new("snapshot").with_name(name);
+    if let Some(p) = snapshot_path {
+        c = c.with_snapshot_path(p);
+    }
+    c
+}
+
+/// Build the `restore` command (P1 fast reset) from MCP args.
+fn vm_restore_cmd(name: &str, snapshot_path: &str, layers: &[String], net: bool) -> Command {
+    let mut c = Command::new("restore")
+        .with_name(name)
+        .with_snapshot_path(snapshot_path);
+    if !layers.is_empty() {
+        c = c.with_layers(layers.to_vec());
+    }
+    if net {
+        c = c.with_net(true);
+    }
+    c
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,6 +971,29 @@ mod tests {
             vec!["session_status:".to_string(), "session_kill:".to_string(),],
             "status/kill are sent directly with no session registry involvement"
         );
+    }
+
+    /// snapshot / restore (P1 fast reset) build the exact engine commands.
+    #[test]
+    fn vm_snapshot_and_restore_build_exact_commands() {
+        let snap = vm_snapshot_cmd("vm1", Some("/tmp/terra-snap-vm1"));
+        assert_eq!(snap.command, "snapshot");
+        assert_eq!(snap.name.as_deref(), Some("vm1"));
+        assert_eq!(snap.snapshot_path.as_deref(), Some("/tmp/terra-snap-vm1"));
+
+        let default_snap = vm_snapshot_cmd("vm1", None);
+        assert!(default_snap.snapshot_path.is_none());
+
+        let rs = vm_restore_cmd("vm2", "/tmp/terra-snap-vm1", &["base".into()], true);
+        assert_eq!(rs.command, "restore");
+        assert_eq!(rs.name.as_deref(), Some("vm2"));
+        assert_eq!(rs.snapshot_path.as_deref(), Some("/tmp/terra-snap-vm1"));
+        assert_eq!(rs.layers, vec!["base".to_string()]);
+        assert!(rs.net);
+
+        let bare = vm_restore_cmd("vm3", "/tmp/s", &[], false);
+        assert!(bare.layers.is_empty());
+        assert!(!bare.net);
     }
 
     #[test]

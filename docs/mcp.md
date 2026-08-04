@@ -30,7 +30,7 @@ Terrarium 的用户面工具。管理员操作（daemon 启停、镜像构建、
 协议细节：notification（无 `id`）不产生响应；日志只写 stderr，
 stdout 仅承载 JSON-RPC 消息。
 
-## 工具（18 个，全为用户面）
+## 工具（20 个，全为用户面）
 
 ### 会话式执行（推荐入口）
 
@@ -62,6 +62,8 @@ agent 面向**会话**而非 VM：`terra_exec` 在隔离的沙箱会话内执行
 | `terra_vm_shutdown` | `name` | 停止并注销 |
 | `terra_vm_kill` | `name` | 强制停止并注销 |
 | `terra_vm_destroy` | `name` | 停止并注销 |
+| `terra_vm_snapshot` | `name`, `snapshot_path?` | 捕获 VM 当前状态到快照目录（P1 快速重置；捕获后 VM 保持暂停） |
+| `terra_vm_restore` | `name`, `snapshot_path`, `layers?`, `net?` | 从快照目录创建**新 VM**（P1 快速重置，~200ms 对照冷启动 ~850ms） |
 
 ### 池与文件系统（高级/管理面）
 

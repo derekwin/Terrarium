@@ -469,6 +469,8 @@ terra vm ls
 terra vm info <name>
 terra vm exec <name> [--timeout SEC] -- COMMAND...
 terra vm resize <name> --cpus N --memory-bytes B
+terra vm snapshot <name> [--path DIR]           # P1 快速重置：捕获就绪态（捕获后暂停）
+terra vm restore <name> --snapshot DIR [--layers L1,L2]
 terra vm attach <name> --layers L1,L2   # 替代旧 attach-fs
 terra vm detach <name>                  # 替代旧 detach-fs
 terra vm shutdown|kill|destroy <name>

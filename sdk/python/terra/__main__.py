@@ -952,6 +952,33 @@ def cmd_vm_resize(args) -> int:
         return _err(msg)
 
 
+def cmd_vm_snapshot(args) -> int:
+    """Capture a VM state for fast reset (P1)."""
+    c = _client(args)
+    try:
+        return _output(c.vm_snapshot(args.name, args.path), args)
+    except TerraError as e:
+        msg = str(e)
+        if "not found" in msg.lower():
+            return _err(msg, exit_code=EXIT_NOTFOUND)
+        return _err(msg)
+
+
+def cmd_vm_restore(args) -> int:
+    """Create a NEW VM from a snapshot (P1 fast reset)."""
+    c = _client(args)
+    try:
+        return _output(
+            c.vm_restore(args.name, args.snapshot, layers=args.layers, net=args.net),
+            args,
+        )
+    except TerraError as e:
+        msg = str(e)
+        if "not found" in msg.lower():
+            return _err(msg, exit_code=EXIT_NOTFOUND)
+        return _err(msg)
+
+
 def _simple_vm(method: str):
     """Factory for simple single-arg VM operations."""
 
@@ -1558,6 +1585,18 @@ Common workflows:
     sp.add_argument("--cpus", type=int, help="new vCPU count")
     sp.add_argument("--memory-bytes", type=int, help="new memory in bytes")
     sp.set_defaults(f=cmd_vm_resize)
+
+    sp = vms.add_parser("snapshot", help="capture a VM state for fast reset (P1)")
+    sp.add_argument("name", help="VM name")
+    sp.add_argument("--path", help="snapshot directory (default: {snapshot_dir}/terra-snap-<vm>)")
+    sp.set_defaults(f=cmd_vm_snapshot)
+
+    sp = vms.add_parser("restore", help="create a VM from a snapshot (P1 fast reset)")
+    sp.add_argument("name", help="new VM name")
+    sp.add_argument("--snapshot", required=True, help="snapshot directory (from terra vm snapshot)")
+    sp.add_argument("--layers", nargs="*", default=[], help="layer names (comma-separated)")
+    sp.add_argument("--net", action="store_true", help="attach NAT networking")
+    sp.set_defaults(f=cmd_vm_restore)
 
     sp = vms.add_parser("attach", help="hot-plug layers to a running VM")
     sp.add_argument("name", help="VM name")

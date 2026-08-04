@@ -64,7 +64,7 @@ terrarium/
 │   ├── protocol/             # Shared Command / Response types (single source of truth)
 │   ├── guest-proxy/          # In-guest agent: vsock relay, exec, mount, umount
 │   ├── network/              # Tap / NAT / dnsmasq DHCP, tc QoS
-│   └── mcp/                  # MCP server (stdio JSON-RPC, 18 user-facing tools)
+│   └── mcp/                  # MCP server (stdio JSON-RPC, 20 user-facing tools)
 ├── sdk/python/               # Python SDK (terra package: Sandbox, Pool, Template, client, daemon, assets, images)
 ├── images/                   # Guest kernel / rootfs / initramfs build scripts and examples
 └── docs/                     # Protocol, SDK, MCP docs and design ADRs
