@@ -129,6 +129,32 @@ after every reset). Snapshot restore remains the full-determinism path
 (restores upper state too); in-place reset is the layer-baseline fast
 path for high-throughput training.
 
+### Layer-baseline episode (rl-env layer + layer task) — 2026-08-04
+
+With the environment-layer toolchain landed (`terra tool create --script`
+bakes the READY state into a layer — `images/examples/rl-env.sh`), the
+episode bench runs the LAYER-provided task (`/usr/local/bin/rl-task`)
+instead of a shell loop, against the layer-backed ready state:
+`manual_episode_bench.py --layers rl-env --task rltask`. Raw:
+`docs/benchmark-results-2026-08-04-envlayer-{recycle,inplace}.json`.
+
+| size | recycle episode | in-place episode | speedup |
+|---|---|---|---|
+| 8 | 290 ms | 19 ms | 15× |
+| 16 | 317 ms | 24 ms | 13× |
+| 32 | 604 ms | **34 ms** | **17.6×** |
+
+Reading:
+
+- End-to-end episode (layer task + parallel run + collect + reset) at 32
+  envs: 604 → 34 ms — **934 env-episodes/s vs 53** with snapshot recycle.
+- Reset share drops from ~96% (recycle) to ~55-60% (in-place): the reset
+  is no longer the bottleneck — task execution (collect) now dominates.
+- The layer baseline is what makes this correct: ready-state
+  (`/var/rl-ready`, task binaries) lives in the layer and survives every
+  in-place reset; episode writes (`/workdir`, `/tmp`) are cleared
+  deterministically across all 5 episodes and all sizes.
+
 ### Environment lessons (why the first runs failed)
 
 - The engine's virtiofsd supervisor needs `unshare -Urm`; Ubuntu's

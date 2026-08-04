@@ -94,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `libfuse.so.2` for `erofsfuse` — into the managed bin dir (with the bin
   dir on `LD_LIBRARY_PATH`), so layer builds work on hosts without the
   system packages; apt package lists are refreshed on first download miss.
+- Layer-baseline episode benchmark: `manual_episode_bench.py --task rltask`
+  runs the LAYER-provided task (`/usr/local/bin/rl-task`) against the
+  layer-backed ready state. Real KVM, 32 envs: end-to-end episode drops
+  from 604 ms (snapshot recycle) to **34 ms** (in-place reset, 17.6×);
+  throughput 53 → 934 env-episodes/s. Reset is no longer the bottleneck
+  (~55-60% of episode vs ~96% for recycle) — task execution now dominates.
+  Raw data: `docs/benchmark-results-2026-08-04-envlayer-*.json`.
   Snapshot restore remains the full-determinism path.
 
 ### Fixed

@@ -48,7 +48,7 @@ def main() -> int:
     ap.add_argument("--sizes", default="4,8,16", help="comma-separated batch sizes")
     ap.add_argument("--episodes", type=int, default=5, help="episodes per size")
     ap.add_argument("--layers", default="base")
-    ap.add_argument("--task", default="inject", help="task mode: inject | compute")
+    ap.add_argument("--task", default="inject", help="task mode: inject | compute | rltask")
     ap.add_argument("--reset-mode", default="snapshot", choices=["snapshot", "inplace"])
     ap.add_argument("--out", default=None, help="write JSON to FILE")
     args = ap.parse_args()
@@ -63,7 +63,10 @@ def main() -> int:
     snap = args.snapshot
     if snap is None:
         snap = "/tmp/episode-bench-snap"
-        build_ready_snapshot(snap, layers)
+        if not os.path.isdir(snap):
+            build_ready_snapshot(snap, layers)
+        else:
+            print(f"reusing existing snapshot {snap}", flush=True)
 
     results: dict[str, Any] = {"snapshot": snap, "episodes": args.episodes, "task": args.task, "sizes": []}
     for n in sizes:
@@ -83,7 +86,7 @@ def main() -> int:
                     res = envs.collect(["sh", "-c", "cat /tmp/task.in"], timeout_secs=30)
                     collect = (time.perf_counter() - t0) * 1000
                     ok = all(v.strip() == f"ep-{ep}" for v in res.values())
-                else:
+                elif args.task == "compute":
                     # compute task: bounded loop + result marker
                     t0 = time.perf_counter()
                     res = envs.collect(
@@ -93,6 +96,12 @@ def main() -> int:
                     collect = (time.perf_counter() - t0) * 1000
                     inject = 0.0
                     ok = all(v.strip() == "200" for v in res.values())
+                else:  # rltask: run the layer-provided task binary
+                    t0 = time.perf_counter()
+                    res = envs.collect(["/usr/local/bin/rl-task"], timeout_secs=30)
+                    collect = (time.perf_counter() - t0) * 1000
+                    inject = 0.0
+                    ok = all(v.strip() == "result-100" for v in res.values())
                 t0 = time.perf_counter()
                 if args.reset_mode == "inplace":
                     envs.reset_in_place()
