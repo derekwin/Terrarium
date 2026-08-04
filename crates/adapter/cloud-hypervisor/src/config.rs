@@ -31,6 +31,7 @@ impl ChConfig {
     /// | `TERRA_VIRTIOFSD` | `virtiofsd`              |
     /// | `TERRA_LAYER_DIR` | `/var/lib/terra/layers`  |
     /// | `TERRA_SNAPSHOT_DIR` | `/tmp`               |
+    /// | `TERRA_VIRTIOFSD_CACHE` | `always`           |
     pub fn from_env(ch_binary: impl Into<String>) -> Self {
         let fs_base = std::env::var("TERRA_STATE_DIR")
             .ok()
@@ -48,6 +49,14 @@ impl ChConfig {
                     .ok()
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "virtiofsd".into()),
+                // Tuneable; `always` is the default (max caching). The
+                // in-place episode reset is guest-side (the guest removes
+                // its own files through virtiofsd), so caching mode does
+                // not affect reset correctness.
+                virtiofsd_cache: std::env::var("TERRA_VIRTIOFSD_CACHE")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "always".into()),
                 layer_dir: std::env::var("TERRA_LAYER_DIR")
                     .ok()
                     .filter(|s| !s.is_empty())

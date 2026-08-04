@@ -72,6 +72,19 @@ pub fn kill(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// SIGKILL every registered exec process group (in-place episode reset)
+/// and clear the registry. Returns how many groups were killed.
+pub fn kill_all() -> usize {
+    let mut reg = registry().lock().unwrap();
+    let count = reg.len();
+    for (_, pid) in reg.drain() {
+        // SAFETY: pids were captured from Command::spawn() children
+        // spawned with process_group(0), so -pid addresses their group.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +140,16 @@ mod tests {
     fn kill_unknown_id_is_session_not_found() {
         let err = kill("test-reg-no-such-id").unwrap_err();
         assert_eq!(err, "session not found");
+    }
+
+    /// kill_all drains the registry (fake pids make killpg a harmless
+    /// ESRCH no-op) and reports how many groups were targeted.
+    #[test]
+    fn kill_all_drains_registry() {
+        register("a", 1 << 20).unwrap();
+        register("b", 1 << 21).unwrap();
+        assert_eq!(kill_all(), 2);
+        assert_eq!(kill("a"), Err("session not found".to_string()));
+        assert_eq!(kill_all(), 0);
     }
 }

@@ -107,10 +107,27 @@ Reading:
 - Determinism holds across episodes (every episode's injected input is
   read back correctly after a recycle).
 - **Next lever for RL economics**: an in-place guest reset (kill tasks,
-  wipe runtime state from a pristine copy, ~10-50 ms) would cut episode
-  cost ~10x vs snapshot recycle; snapshot restore remains the
-  correctness-guaranteed path. Trade-off documented in the strategy
-  follow-ups.
+  wipe runtime state from a pristine copy) — IMPLEMENTED and measured.
+
+### In-place reset vs snapshot recycle — 2026-08-04
+
+The in-place reset keeps each env VM running: the guest kills its episode
+processes and clears the episode-writable runtime dirs (/workdir, /tmp,
+/run) back to the LAYER baseline (env ready-state must live in a layer;
+episode writes go to the upper). `manual_episode_bench.py --reset-mode
+inplace`. Raw: `docs/benchmark-results-2026-08-04-episode-inplace.json`.
+
+| size | snapshot episode | in-place episode | speedup |
+|---|---|---|---|
+| 4 | 283 ms | ~38 ms | 7.4× |
+| 8 | 290 ms | ~40 ms | 7.2× |
+| 16 | 319 ms | ~55 ms | 5.8× |
+| 32 | 603 ms | **~82 ms** | 7.4× |
+
+Determinism holds across episodes (injected inputs read back correctly
+after every reset). Snapshot restore remains the full-determinism path
+(restores upper state too); in-place reset is the layer-baseline fast
+path for high-throughput training.
 
 ### Environment lessons (why the first runs failed)
 

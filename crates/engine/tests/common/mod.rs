@@ -271,6 +271,16 @@ impl VmHandle for MockVmHandle {
         })
     }
 
+    fn reset_fs<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { Ok(()) })
+    }
+
     fn shutdown<'life0, 'async_trait>(
         &'life0 self,
     ) -> Pin<Box<dyn Future<Output = Result<(), AdapterError>> + Send + 'async_trait>>

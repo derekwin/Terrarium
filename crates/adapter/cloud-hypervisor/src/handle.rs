@@ -14,35 +14,10 @@ use tokio::time::sleep;
 
 use crate::client::ChClient;
 use crate::config::ChConfig;
-use crate::fs::{compose_fs, teardown_fs, FsStack};
+use crate::fs::{compose_fs, copy_tree, teardown_fs, FsStack};
 use crate::process::{
     ch_args, ch_restore_args, retry_get_info, spawn_ch, tap_name, wait_for_socket,
 };
-
-/// Recursively copy a directory tree, preserving symlinks. Regular files
-/// and directories are copied; sockets/devices/fifos are skipped (they
-/// cannot be re-created, and the restored guest recreates them).
-fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        let ft = entry.file_type()?;
-        if ft.is_symlink() {
-            let target = std::fs::read_link(&from)?;
-            let _ = std::fs::remove_file(&to);
-            std::os::unix::fs::symlink(&target, &to)?;
-        } else if ft.is_dir() {
-            copy_tree(&from, &to)?;
-        } else if ft.is_file() {
-            std::fs::copy(&from, &to)?;
-        } else {
-            tracing::warn!(path = %from.display(), "skipping non-regular upper entry");
-        }
-    }
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Public API — called from the adapter
@@ -445,6 +420,21 @@ impl VmHandle for ChVmHandle {
         Ok(Snapshot {
             path: path.to_string(),
         })
+    }
+
+    async fn reset_fs(&self) -> Result<(), AdapterError> {
+        // Guest side: kill episode process groups + clear the
+        // episode-writable runtime dirs back to the layer baseline.
+        let resp = self
+            .guest_cmd(&serde_json::json!({"command": "reset"}))
+            .await?;
+        if resp.get("status").and_then(|s| s.as_str()) != Some("ok") {
+            return Err(AdapterError::internal(format!(
+                "guest reset failed: {}",
+                resp
+            )));
+        }
+        Ok(())
     }
 
     async fn shutdown(&self) -> Result<(), AdapterError> {

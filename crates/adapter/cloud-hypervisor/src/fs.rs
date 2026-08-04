@@ -4,6 +4,7 @@
 
 use adapter_traits::{AdapterError, FsSpec, UpperPolicy};
 use std::collections::HashSet;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,6 +20,10 @@ use tokio::time::{sleep, Instant};
 pub struct FsConfig {
     pub layer_dir: String,
     pub virtiofsd_binary: String,
+    /// virtiofsd cache mode (`always` | `auto` | `none`). `auto` is the
+    /// default so in-place episode reset (host-side upper replacement)
+    /// is visible to the guest — `always` keeps stale dentries.
+    pub virtiofsd_cache: String,
     pub fs_root: String,
     /// EROFS layer images already mounted (shared across VMs; layers are
     /// immutable, mounts live for the daemon's lifetime).
@@ -99,8 +104,15 @@ pub async fn compose_fs(
     let mut child = if in_namespace {
         let script = format!(
             "set -e; mount -t overlay overlay -o lowerdir={},upperdir={},workdir={} {}; \
-             exec {} --socket-path={} --shared-dir={} --sandbox=none --cache=always",
-            lowerdir, upper, work, merged, config.virtiofsd_binary, socket, merged
+             exec {} --socket-path={} --shared-dir={} --sandbox=none --cache={}",
+            lowerdir,
+            upper,
+            work,
+            merged,
+            config.virtiofsd_binary,
+            socket,
+            merged,
+            config.virtiofsd_cache
         );
         Command::new("unshare")
             .args(["-Urm", "bash", "-c", &script])
@@ -133,7 +145,7 @@ pub async fn compose_fs(
                 &format!("--socket-path={}", socket),
                 &format!("--shared-dir={}", merged),
                 "--sandbox=none",
-                "--cache=always",
+                &format!("--cache={}", config.virtiofsd_cache),
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -216,6 +228,31 @@ pub fn teardown_fs(fs: &mut FsStack) {
             tracing::warn!(dir = %fs.dir, error = %e, "fs work dir cleanup failed");
         }
     }
+}
+
+/// Recursively copy a directory tree, preserving symlinks. Regular files
+/// and directories are copied; sockets/devices/fifos are skipped (they
+/// cannot be re-created, and the restored guest recreates them).
+pub(crate) fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            let target = std::fs::read_link(&from)?;
+            let _ = std::fs::remove_file(&to);
+            std::os::unix::fs::symlink(&target, &to)?;
+        } else if ft.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if ft.is_file() {
+            std::fs::copy(&from, &to)?;
+        } else {
+            tracing::warn!(path = %from.display(), "skipping non-regular upper entry");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

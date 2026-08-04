@@ -62,3 +62,19 @@ pub(crate) async fn cmd_restore(mgr: &mut VmManager, cmd: Command) -> Response {
         Err(e) => Response::err(e.to_string()),
     }
 }
+
+/// {"command":"reset_vm","name":<vm>}
+///
+/// In-place episode reset (P1/RL fast path): the VM keeps running — the
+/// guest kills its episode processes and clears the episode-writable
+/// runtime dirs back to the layer baseline.
+pub(crate) async fn cmd_reset_vm(mgr: &VmManager, cmd: Command) -> Response {
+    let (vm, name) = match super::get_vm(mgr, &cmd) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match vm.reset_fs().await {
+        Ok(()) => Response::ok(serde_json::json!({"name": name, "status": "reset"})),
+        Err(e) => Response::err(e.to_string()),
+    }
+}

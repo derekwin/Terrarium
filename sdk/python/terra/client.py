@@ -409,6 +409,15 @@ class TerraClient:
             cmd["kernel"] = kernel
         return self._send(cmd)
 
+    def vm_reset(self, name: str) -> dict:
+        """In-place episode reset (P1/RL fast path).
+
+        The VM keeps running: the guest kills its episode processes and
+        clears the episode-writable runtime dirs (/workdir, /tmp, /run)
+        back to the LAYER baseline. Far cheaper than destroy + restore.
+        """
+        return self._send({"command": "reset_vm", "name": name})
+
     def audit_list(
         self,
         *,

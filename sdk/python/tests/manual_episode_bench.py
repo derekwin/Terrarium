@@ -49,6 +49,7 @@ def main() -> int:
     ap.add_argument("--episodes", type=int, default=5, help="episodes per size")
     ap.add_argument("--layers", default="base")
     ap.add_argument("--task", default="inject", help="task mode: inject | compute")
+    ap.add_argument("--reset-mode", default="snapshot", choices=["snapshot", "inplace"])
     ap.add_argument("--out", default=None, help="write JSON to FILE")
     args = ap.parse_args()
 
@@ -76,10 +77,10 @@ def main() -> int:
                 t0 = time.perf_counter()
                 if args.task == "inject":
                     # task injection: write the episode's input into each env
-                    envs.exec(["sh", "-c", f"echo ep-{ep} > /var/task.in"])
+                    envs.exec(["sh", "-c", f"echo ep-{ep} > /tmp/task.in"])
                     inject = (time.perf_counter() - t0) * 1000
                     t0 = time.perf_counter()
-                    res = envs.collect(["sh", "-c", "cat /var/task.in"], timeout_secs=30)
+                    res = envs.collect(["sh", "-c", "cat /tmp/task.in"], timeout_secs=30)
                     collect = (time.perf_counter() - t0) * 1000
                     ok = all(v.strip() == f"ep-{ep}" for v in res.values())
                 else:
@@ -93,7 +94,10 @@ def main() -> int:
                     inject = 0.0
                     ok = all(v.strip() == "200" for v in res.values())
                 t0 = time.perf_counter()
-                envs.recycle()
+                if args.reset_mode == "inplace":
+                    envs.reset_in_place()
+                else:
+                    envs.recycle()
                 reset = (time.perf_counter() - t0) * 1000
 
                 episode = inject + collect + reset

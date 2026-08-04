@@ -472,6 +472,20 @@ pub trait VmHandle: Send + Sync {
     /// RL/episode recycling. Not supported by all backends.
     async fn snapshot(&self, path: &str) -> Result<Snapshot, AdapterError>;
 
+    /// In-place episode reset (P1/RL fast path): the guest kills its
+    /// episode processes and clears the episode-writable runtime dirs
+    /// (/workdir, /tmp, /run) back to the LAYER baseline; the VM keeps
+    /// running. Env ready-state must live in a layer (episode writes go
+    /// to the upper), which is how RL environments should be built.
+    /// Far cheaper than destroy + restore; snapshot restore remains the
+    /// full-determinism path (includes upper state). Default: not
+    /// supported.
+    async fn reset_fs(&self) -> Result<(), AdapterError> {
+        Err(AdapterError::not_supported(
+            "reset_fs not supported by this backend",
+        ))
+    }
+
     /// Boundary contract (L1): Availability — resource reclamation (D3/D4).
     async fn shutdown(&self) -> Result<(), AdapterError>;
     fn pid(&self) -> u32;

@@ -87,6 +87,15 @@ class Batch:
         self.destroy()
         self._restore_all()
 
+    def reset_in_place(self) -> None:
+        """Fast episode reset (P1/RL): each env stays running — the guest
+        kills its episode processes and clears the episode-writable
+        runtime dirs back to the LAYER baseline. ~10x cheaper than
+        recycle; env ready-state must live in a layer (episode writes go
+        to the upper)."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self._workers) as ex:
+            list(ex.map(self._client.vm_reset, self._names))
+
     def destroy(self) -> None:
         with concurrent.futures.ThreadPoolExecutor(max_workers=self._workers) as ex:
             list(ex.map(self._client.vm_destroy, self._names))

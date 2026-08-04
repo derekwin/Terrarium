@@ -100,6 +100,7 @@ fn handle<S: Read + Write>(mut stream: S) {
     match command {
         "exec" => exec_cmd(&mut stream, &cmd),
         "kill" => kill_cmd(&mut stream, &cmd),
+        "reset" => reset_cmd(&mut stream),
         "mount" => mount_cmd(&mut stream, &cmd, false),
         "umount" => mount_cmd(&mut stream, &cmd, true),
         "ping" => {
@@ -177,6 +178,27 @@ fn kill_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
             let _ = writeln!(stream, "{}", resp);
         }
     }
+}
+
+/// {"command":"reset"}
+/// In-place episode reset (P1/RL fast path): SIGKILL every registered
+/// exec process group and clear the guest's runtime tmpfs (/tmp, /run).
+/// The host restores the overlay upper from the snapshot separately —
+/// this command only handles the guest-side (processes + tmpfs) state.
+fn reset_cmd<S: Read + Write>(stream: &mut S) {
+    let killed = registry::kill_all();
+    let _ = std::process::Command::new("sh")
+        .args(["-c", "rm -rf /workdir/* /tmp/* /run/* 2>/dev/null"])
+        .status();
+    // Invalidate the guest's dentry/inode cache: the host replaces the
+    // overlay upper during an in-place reset, and a cached dentry would
+    // otherwise keep showing removed files (virtiofsd cache=always/auto
+    // does not invalidate on host-side overlay changes).
+    let _ = std::process::Command::new("sh")
+        .args(["-c", "sync; echo 2 > /proc/sys/vm/drop_caches 2>/dev/null"])
+        .status();
+    let resp = serde_json::json!({"status": "ok", "killed": killed});
+    let _ = writeln!(stream, "{}", resp);
 }
 
 fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {

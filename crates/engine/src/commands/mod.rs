@@ -581,6 +581,7 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "destroy" => vm::cmd_destroy(mgr, cmd).await,
         "snapshot" => snapshot::cmd_snapshot(mgr, cmd).await,
         "restore" => snapshot::cmd_restore(mgr, cmd).await,
+        "reset_vm" => snapshot::cmd_reset_vm(mgr, cmd).await,
         "audit_list" => audit_cmd::cmd_audit_list(&cmd),
         "attach_fs" => fs::cmd_attach_fs(mgr, cmd).await,
         "detach_fs" => fs::cmd_detach_fs(mgr, cmd).await,

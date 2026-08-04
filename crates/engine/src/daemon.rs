@@ -269,6 +269,35 @@ async fn dispatch(
         return (Response::ok_msg(&msg), false);
     }
 
+    // In-place episode reset is a guest vsock round-trip (~10-20ms) —
+    // resolve the handle under the lock and run it outside, so a 32-env
+    // batch reset does not serialize on the manager lock.
+    if cmd.command == "reset_vm" {
+        let name = match require_name(&cmd) {
+            Ok(n) => n,
+            Err(resp) => return (resp, false),
+        };
+        let handle = match mgr.get_handle(&name) {
+            Some(h) => h,
+            None => {
+                let err =
+                    adapter_traits::AdapterError::not_found(format!("VM '{}' not found", name))
+                        .to_string();
+                return (Response::err(err), false);
+            }
+        };
+        drop(mgr);
+        match handle.reset_fs().await {
+            Ok(()) => {
+                return (
+                    Response::ok(serde_json::json!({"name": name, "status": "reset"})),
+                    false,
+                )
+            }
+            Err(e) => return (Response::err(e.to_string()), false),
+        }
+    }
+
     // Blocking exec is the one command that can run for up to its full
     // timeout (3600s). Resolve everything under the lock — handle Arc +
     // ExecOpts — then drop the lock before awaiting `handle.exec`, so a

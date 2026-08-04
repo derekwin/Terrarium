@@ -73,6 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (~94% of episode time); 32 envs sustain ~53 env-episodes/s with
   deterministic resets. In-place guest reset identified as the next
   ~10x lever.
+- In-place episode reset (P1/RL fast path): guest-proxy `reset` command
+  (kill episode process groups + clear /workdir,/tmp,/run back to the
+  layer baseline + dcache invalidation); `reset_vm` protocol command runs
+  lock-free. Verified on real KVM: 32-env episode drops from 603 ms
+  (snapshot recycle) to ~82 ms (7.4×), deterministic across episodes.
+  Snapshot restore remains the full-determinism path.
 
 ### Fixed
 - `sandbox_create` resize no longer errors when the pool VM already matches the
