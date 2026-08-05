@@ -118,3 +118,6 @@ initramfs 注入 `terra-mcp` 环境。示例默认任务（写 fib.py 并验证�
 这一模式让任何支持 MCP 的 agent 框架（Claude SDK / LangGraph / Codex
 CLI 等）都能复用 Terrarium 沙箱；框架差异只在于把 MCP 工具列表映射为
 各自的 tool schema，沙箱侧接口完全一致。
+
+完整上手步骤、代码结构剖析与常见问题见
+[真实 Agent 应用教程](tutorial-real-agent.md)。
