@@ -155,6 +155,13 @@ The batch run extends this to 5 flask instances across versions
 2.0/2.1/2.3 — all pass (`sdk/python/tests/manual_swebench_batch.py`,
 raw results in `docs/benchmark-results-2026-08-05-swebench-batch.json`).
 
+**Agent CI** — isolated verification of agent-written code, dogfooded on
+this repo: `sdk/python/examples/ci_verify.py` restores a pristine
+snapshot, copies the repo into the per-VM workspace, applies the agent's
+patch and runs the test suite. The `ci-terra` layer bakes repo + test
+toolchain (baseline suite verified at build time). Demo: good patch
+passes (42 passed), broken patch rejected (1 failed), ~1.5s per check.
+
 **MCP** — point your agent at the stdio server:
 
 ```json

@@ -1,0 +1,33 @@
+diff --git a/sdk/python/terra/client.py b/sdk/python/terra/client.py
+index bafb4e6..f06423d 100644
+--- a/sdk/python/terra/client.py
++++ b/sdk/python/terra/client.py
+@@ -11,6 +11,12 @@ import socket
+ from .exceptions import TerraError
+ 
+ 
++def _greeting() -> str:
++    """Agent-friendly greeting."""
++    assert False, "agent broke the build"
++    return "hello from an agent patch"
++
++
+ _POLICY_KEYS = {"capabilities", "limits", "default", "audit", "version"}
+ _CAPABILITY_TYPES = {"File", "Network", "Device"}
+ _FILE_ACCESS = {"Read", "ReadWrite", "Execute"}
+diff --git a/sdk/python/tests/test_client_protocol.py b/sdk/python/tests/test_client_protocol.py
+index 611e34f..7baea52 100644
+--- a/sdk/python/tests/test_client_protocol.py
++++ b/sdk/python/tests/test_client_protocol.py
+@@ -6,6 +6,11 @@ import pytest
+ from terra.client import TerraClient
+ 
+ 
++def test_agent_patch_greeting():
++    from terra.client import _greeting
++    assert _greeting() == "hello from an agent patch"
++
++
+ @pytest.fixture
+ def client():
+     c = TerraClient()

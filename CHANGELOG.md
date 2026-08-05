@@ -142,6 +142,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   traverse under /etc /usr /var /opt /srv /home before packing the
   upperdir (root-owned 0600 files like debconf's passwords.dat also
   broke the non-root erofs pack).
+- Agent-CI isolated verification (dogfooding): `ci_verify.py` runs an
+  agent's patch in an isolated layer-backed environment — pristine
+  snapshot -> copy repo into the per-VM workspace -> git apply the
+  patch -> run the test command -> verdict. The `ci-terra` layer bakes
+  this repo + SDK test toolchain with a build-time self-check (baseline
+  suite passes). Demo: a good patch PASSES (42 passed), a bad patch is
+  REJECTED (1 failed), ~1.5s per verification; reset_in_place() returns
+  the environment to the pristine baseline between submissions.
+  `terra tool create` packing now opens the whole rootfs (minus /root)
+  for the non-root erofs pack instead of a fixed directory list.
 - RL episode-loop example (`sdk/python/examples/rl_episode_loop.py`): the
   minimal training-loop contract — layer task reads `/workdir/input.json`
   (episode input), writes `/workdir/output.json`, echo result for

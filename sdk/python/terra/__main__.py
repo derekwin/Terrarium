@@ -835,7 +835,7 @@ def _build_tool_layer(args, system: str, kernel: str) -> int:
         # caches and open up any other 0700 dirs (e.g. /etc/ssl/private
         # from ca-certificates) so the delta is packable by the invoking
         # (non-root) user.
-        ["sh", "-c", "rm -rf /tmp/* /run/* /var/log/* /var/cache/apt/* /var/lib/apt/lists/* /etc/resolv.conf 2>/dev/null; find /etc /usr /var /opt /srv /home -xdev \\( -type d ! -perm -o+x -o -type f ! -perm -o+r \\) -exec chmod o+rX {} + 2>/dev/null; sync"],
+        ["sh", "-c", "rm -rf /tmp/* /run/* /var/log/* /var/cache/apt/* /var/lib/apt/lists/* /etc/resolv.conf 2>/dev/null; find / -xdev \\( -path /root -prune -o -exec chmod a+rX {} + \\) 2>/dev/null; sync"],
         timeout_secs=180,
     )
 

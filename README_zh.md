@@ -151,6 +151,12 @@ terra tool remove -n python312
 （`sdk/python/tests/manual_swebench_batch.py`，原始结果在
 `docs/benchmark-results-2026-08-05-swebench-batch.json`）。
 
+**Agent CI**——agent 产出代码的隔离验证，在本仓库 dogfooding：
+`sdk/python/examples/ci_verify.py` 从原始快照恢复、把 repo 复制进
+每 VM 工作区、应用 agent 的 patch 并跑测试套件。`ci-terra` 层烘焙
+repo + 测试工具链（构建时验证基线套件）。演示：好 patch 通过
+（42 passed），坏 patch 被拒（1 failed），每次验证约 1.5s。
+
 **MCP**——将 agent 指向 stdio server：
 
 ```json
