@@ -200,10 +200,10 @@ passes (42 passed), broken patch rejected (1 failed), ~1.5s per check.
   deterministic rollback) + batch lifecycle orchestration
   (`terra.batch.Batch` — parallel restore/recycle/collect + density report;
   VM lifecycle runs lock-free: 8 concurrent restores in 232 ms)
-- 🟡 P2: security verification loop started — real-KVM escape/deny suite
-  (`docs/security-verification.md`), default-deny networking fixed; process
-  limits (sandlock -P) not enforced yet. Audit persistence + policy/quota
-  management still open.
+- 🟡 P2: security verification loop — real-KVM escape/deny suite
+  (`docs/security-verification.md`), default-deny networking, L2 tenant
+  isolation (ebtables) all done; process limits (sandlock -P) not enforced
+  yet. Audit persistence + policy/quota management still open.
 - 🔲 P3: multi-host orchestration
 
 Strategy and scenario focus: `docs/strategy.md`.

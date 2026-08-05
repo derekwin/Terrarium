@@ -23,9 +23,25 @@ pytest sdk/python/tests/test_security_isolation.py -v
 | 跨沙箱 | A 读/写 B 的 workdir（同 VM 内） | 拒 |
 | 网络 | 默认策略出网 | 拒（"Permission denied"） |
 | 网络 | 显式 `Network{Outbound}` 白名单 | 精确放行；未授权目标拒 |
+| 租户网络 | 跨租户 VM 二层互访 | 拒（ebtables 隔离规则） |
+| 租户网络 | 出网/网关/路由（正例） | 正常 |
 | 审计 | deny 事件进入 `audit_list` | 记录 |
 
-结果：**10 passed, 1 xfailed**。
+结果：**12 passed, 1 xfailed**。
+
+## 租户间网络隔离
+
+所有 VM 共享 `terra0` 桥与一个子网（DHCP/路由简单），但桥的默认语义是
+二层互通——租户 VM 可以互 ping/扫描。`crates/network` 增加一条 ebtables
+规则（`net up` 时幂等安装，`net down` 移除）：
+
+```
+ebtables -A FORWARD -i terra-+ -o terra-+ -j DROP
+```
+
+任意两个 VM tap 端口（`terra-*` 前缀）之间的帧直接丢弃；VM↔宿主网关
+（`-o terra0` 不匹配）与 DHCP/ARP 广播不受影响。跨租户 VM 因此互相不可达
+（ARP 都解析不到），同时各租户出网、DHCP、网关路由保持正常。
 
 ## 本次修复：默认拒绝网络
 

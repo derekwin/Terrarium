@@ -159,6 +159,46 @@ class TestNetworkIsolation:
 
 
 @pytest.mark.e2e
+class TestTenantNetworkIsolation:
+    """Two tenants on one host must not reach each other at L2.
+
+    The ebtables isolation rule drops frames between VM tap ports, so a
+    tenant cannot ARP/connect to a sibling VM even though they share the
+    bridge and subnet. The positive control (same host, outbound LAN)
+    guards against breaking DHCP/routing in the process.
+    """
+
+    LAN_HOST = "10.102.0.254"
+
+    def _vm_ip(self, sb) -> str:
+        r = sb.exec("ip addr show eth0", sandboxed=False)
+        assert r.exit_code == 0, f"cannot read eth0: {r}"
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                return line.split()[1].split("/")[0]
+        raise AssertionError(f"no inet on eth0: {r.stdout!r}")
+
+    def test_sibling_tenant_unreachable(self):
+        with _sandbox(network=True) as a, _sandbox(network=True) as b:
+            b_ip = self._vm_ip(b)
+            # Sibling tenant: must NOT be reachable (ARP dies at the
+            # bridge isolation rule → unreachable/timeout, never HTTP).
+            r = a.exec(f"timeout 5 wget -q -O /dev/null http://{b_ip}:80/", sandboxed=False)
+            assert r.exit_code != 0, f"sibling tenant reachable: {r}"
+            assert "404" not in r.stderr, f"sibling tenant served HTTP: {r}"
+
+    def test_outbound_lan_still_works(self):
+        """Positive control: isolation must not break NAT/DHCP/routing."""
+        with _sandbox(network=True) as a:
+            r = a.exec(
+                f"timeout 5 wget -q -O /dev/null http://{self.LAN_HOST}:80/",
+                sandboxed=False,
+            )
+            assert "404" in r.stderr, f"outbound LAN should answer HTTP, got {r}"
+
+
+@pytest.mark.e2e
 class TestAudit:
     """Denials leave a structured audit trail."""
 

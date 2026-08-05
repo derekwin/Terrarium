@@ -41,6 +41,46 @@ fn run_iptables(args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+fn run_ebtables(args: &[&str]) -> Result<(), String> {
+    let output = Command::new("ebtables")
+        .args(args)
+        .output()
+        .map_err(|e| format!("ebtables command failed: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ebtables {}: {} (need CAP_NET_ADMIN — run the daemon as root)",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Tenant isolation at L2: no frame may pass between two VM tap ports.
+///
+/// All VMs share one bridge (terra0) and one subnet for DHCP/routing
+/// simplicity, which on a plain bridge means VMs can reach each other's
+/// MACs directly. A single ebtables rule drops any frame forwarded
+/// between two `terra-*` ports, so tenants are mutually unreachable
+/// while VM↔host traffic (gateway, DHCP/ARP to the bridge port) keeps
+/// working. The `+` suffix is ebtables' interface-prefix wildcard.
+pub fn ensure_vm_isolation() -> Result<(), String> {
+    let check = [
+        "-C", "FORWARD", "-i", "terra-+", "-o", "terra-+", "-j", "DROP",
+    ];
+    let exists = Command::new("ebtables")
+        .args(check)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !exists {
+        run_ebtables(&[
+            "-A", "FORWARD", "-i", "terra-+", "-o", "terra-+", "-j", "DROP",
+        ])?;
+    }
+    Ok(())
+}
+
 /// Ensure the NAT bridge + forwarding rules exist (idempotent).
 /// Requires CAP_NET_ADMIN.
 pub fn ensure_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), String> {
@@ -121,6 +161,9 @@ pub fn ensure_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), 
     }
     // DHCP for guests: dnsmasq bound to the bridge (idempotent).
     ensure_dhcp(bridge, gateway)?;
+
+    // Tenant L2 isolation (drop frames between VM tap ports).
+    ensure_vm_isolation()?;
 
     tracing::info!(%bridge, %gateway, "NAT bridge ready");
     Ok(())
@@ -232,6 +275,10 @@ pub fn stop_dhcp(bridge: &str) {
 /// Caller must guarantee no VM is using the bridge anymore.
 pub fn teardown_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), String> {
     stop_dhcp(bridge);
+    // Best-effort: remove the tenant-isolation rule if present.
+    let _ = run_ebtables(&[
+        "-D", "FORWARD", "-i", "terra-+", "-o", "terra-+", "-j", "DROP",
+    ]);
     let _ = run_iptables(&[
         "-t",
         "nat",
