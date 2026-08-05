@@ -130,6 +130,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (bare `mkfs.erofs` only resolves via PATH); `terra tool create` purges
   apt caches before packing the upperdir (root-owned 0700 dirs broke the
   erofs pack for the invoking non-root user).
+- Batch SWE-bench verification (`manual_swebench_batch.py`): 5 flask
+  instances (4160/4169/4544/4935/5014, versions 2.0/2.1/2.3) all pass —
+  per-instance layer build with build-time bug-reproduction check,
+  snapshot, 2 parallel envs, baseline FTP fails -> gold patch -> FTP +
+  touched test files pass -> reset restores the baseline. Raw:
+  `docs/benchmark-results-2026-08-05-swebench-batch.json`. flask-4992 is
+  excluded (needs py3.11+ tomllib; environment requirement, not a
+  Terrarium failure).
+- `terra tool create` packing: open up anything others can't read or
+  traverse under /etc /usr /var /opt /srv /home before packing the
+  upperdir (root-owned 0600 files like debconf's passwords.dat also
+  broke the non-root erofs pack).
 - RL episode-loop example (`sdk/python/examples/rl_episode_loop.py`): the
   minimal training-loop contract — layer task reads `/workdir/input.json`
   (episode input), writes `/workdir/output.json`, echo result for

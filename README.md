@@ -151,6 +151,9 @@ returns every environment to the layer baseline. Proven end-to-end on a
 real SWE-bench instance (`pallets__flask-4160`): bug reproduces at
 baseline in 4 parallel envs, the fix turns the suite green (33 passed),
 reset restores the broken baseline (`sdk/python/tests/manual_swebench.sh`).
+The batch run extends this to 5 flask instances across versions
+2.0/2.1/2.3 — all pass (`sdk/python/tests/manual_swebench_batch.py`,
+raw results in `docs/benchmark-results-2026-08-05-swebench-batch.json`).
 
 **MCP** — point your agent at the stdio server:
 

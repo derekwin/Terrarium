@@ -146,7 +146,10 @@ terra tool remove -n python312
 就地重置把每个环境恢复到层基线。已在一个真实 SWE-bench 实例
 （`pallets__flask-4160`）上端到端验证：4 个并行环境基线复现 bug，修复后
 套件全绿（33 passed），重置后恢复有 bug 的基线
-（`sdk/python/tests/manual_swebench.sh`）。
+（`sdk/python/tests/manual_swebench.sh`）。批量扩展到 5 个 flask 实例
+（覆盖 2.0/2.1/2.3），全部通过
+（`sdk/python/tests/manual_swebench_batch.py`，原始结果在
+`docs/benchmark-results-2026-08-05-swebench-batch.json`）。
 
 **MCP**——将 agent 指向 stdio server：
 
