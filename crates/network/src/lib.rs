@@ -99,6 +99,26 @@ pub fn ensure_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), 
             "MASQUERADE",
         ])?;
     }
+    // Forwarding for the bridge subnet. Some hosts (e.g. running docker)
+    // set the FORWARD policy to DROP — without explicit ACCEPT rules the
+    // guest's outbound packets die at the bridge.
+    for args in [
+        ["-i", bridge, "-j", "ACCEPT"],
+        ["-o", bridge, "-j", "ACCEPT"],
+    ] {
+        let mut check = vec!["-C", "FORWARD"];
+        check.extend_from_slice(&args);
+        let exists = Command::new("iptables")
+            .args(&check)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !exists {
+            let mut add = vec!["-A", "FORWARD"];
+            add.extend_from_slice(&args);
+            run_iptables(&add)?;
+        }
+    }
     // DHCP for guests: dnsmasq bound to the bridge (idempotent).
     ensure_dhcp(bridge, gateway)?;
 
@@ -135,7 +155,11 @@ pub fn ensure_dhcp(bridge: &str, gateway: &str) -> Result<(), String> {
             "--bind-interfaces",
             "--except-interface=lo",
             &format!("--dhcp-range={},12h", dhcp_range_of(gateway)),
-            "--dhcp-option=option:dns-server,8.8.8.8,223.5.5.5",
+            // Point guests at dnsmasq itself (the NAT gateway), which
+            // forwards to the host's resolver. Hardcoding public DNS
+            // (8.8.8.8) breaks on hosts where outbound DNS is blocked or
+            // an internal resolver is required.
+            &format!("--dhcp-option=option:dns-server,{}", gateway),
         ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

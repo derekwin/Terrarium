@@ -37,6 +37,22 @@ fi
 cp "$GP" "$DEST/bin/guest-proxy"
 chmod +x "$DEST/bin/guest-proxy"
 
+# minimal ubuntu-base ships no iproute2/dhclient; bundle a static busybox
+# (ip + udhcpc applets) and its DHCP script so guests get networking.
+mkdir -p "$DEST/usr/bin" "$DEST/usr/share/udhcpc"
+if [ ! -x "$DEST/usr/bin/busybox" ]; then
+    echo "busybox: downloading busybox-static (network needed once)"
+    TMPB=$(mktemp -d)
+    (cd "$TMPB" && apt download busybox-static >/dev/null 2>&1 && dpkg -x busybox-static*.deb x)
+    cp "$TMPB/x/usr/bin/busybox" "$DEST/usr/bin/busybox"
+    chmod +x "$DEST/usr/bin/busybox"
+    rm -rf "$TMPB"
+fi
+ln -sf busybox "$DEST/usr/bin/ip"
+ln -sf busybox "$DEST/usr/bin/udhcpc"
+cp "$(dirname "$0")/rootfs/udhcpc-default.script" "$DEST/usr/share/udhcpc/default.script"
+chmod +x "$DEST/usr/share/udhcpc/default.script"
+
 cp "$(dirname "$0")/rootfs/init-ubuntu" "$DEST/init"
 chmod +x "$DEST/init"
 

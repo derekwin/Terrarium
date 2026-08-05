@@ -101,6 +101,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   throughput 53 → 934 env-episodes/s. Reset is no longer the bottleneck
   (~55-60% of episode vs ~96% for recycle) — task execution now dominates.
   Raw data: `docs/benchmark-results-2026-08-04-envlayer-*.json`.
+- SWE-bench agent-execution proof (pallets__flask-4160, Decimal JSON
+  encoding): a real SWE-bench instance runs end-to-end on Terrarium —
+  repo + pinned toolchain + tests baked into an EROFS layer
+  (`terra tool create --script`), 4 parallel envs restored from one
+  snapshot, the target test FAILS at baseline in every env, the agent's
+  fix turns the suite green (33 passed), and `reset_in_place()` restores
+  the broken baseline. See `sdk/python/tests/manual_swebench.sh`.
+  Verified on the host (sudo daemon), 2026-08-05.
+- Guest networking fixes that made ubuntu-layer VMs usable on hosts with
+  an internal resolver and docker: dnsmasq now hands out the NAT gateway
+  (10.200.0.1) as DNS instead of hardcoded public resolvers; the NAT
+  bridge adds explicit FORWARD ACCEPT rules (docker sets FORWARD DROP);
+  the ubuntu layer bundles a static busybox (ip/udhcpc) with a bounded
+  background DHCP, and mounts devpts (apt needs it).
+- Host-side guest-command timeout (`guest_cmd`): handshake/response reads
+  are bounded (10s handshake, cmd timeout + 15s response) so a booting or
+  absent guest agent fails fast and callers retry instead of hanging the
+  daemon forever.
+- SDK client `_send` socket timeout scales with the command's declared
+  `timeout_secs` (default 180s for lifecycle commands) — long execs were
+  previously killed at a fixed 30s.
+- Layer remount fix: when a rebuilt `.erofs` image invalidates a shared
+  mount (mtime change), the stale registration is dropped so the new
+  image is actually mounted — previously the mountpoint came back empty
+  and the layer silently vanished from VMs.
+- `find_mkfs_erofs` prefers the managed `~/.local/share/terra/bin` path
+  (bare `mkfs.erofs` only resolves via PATH); `terra tool create` purges
+  apt caches before packing the upperdir (root-owned 0700 dirs broke the
+  erofs pack for the invoking non-root user).
 - RL episode-loop example (`sdk/python/examples/rl_episode_loop.py`): the
   minimal training-loop contract — layer task reads `/workdir/input.json`
   (episode input), writes `/workdir/output.json`, echo result for

@@ -225,7 +225,17 @@ class TerraClient:
     def _send(self, cmd: dict) -> dict:
         """Send a JSON command and return the parsed response data."""
         sock = self._connect()
-        sock.settimeout(30)
+        # The daemon writes the response only when the command finishes,
+        # and an exec can legitimately run for minutes (timeout_secs up to
+        # 3600). Scale the socket read timeout to the command's declared
+        # budget plus headroom instead of a fixed 30s that kills long
+        # execs mid-flight.
+        # VM lifecycle commands (sandbox_create etc.) include guest boot
+        # + agent readiness, which can exceed 30s on large layers — give
+        # commands without an explicit budget a generous default.
+        declared = cmd.get("timeout_secs")
+        sock_timeout = 180 if not declared else min(int(declared) + 30, 3700)
+        sock.settimeout(sock_timeout)
         try:
             if self.token:
                 sock.sendall((self.token + "\n").encode())

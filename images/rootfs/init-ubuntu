@@ -5,15 +5,23 @@ mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs devtmpfs /dev
 mount -t tmpfs tmpfs /tmp
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
 
-# Network (if a virtio-net device is present)
+# Network (if a virtio-net device is present). ubuntu-base ships no
+# DHCP client, so the layer bundles busybox (ip + udhcpc applets +
+# default.script); use udhcpc when present, dhclient as a fallback.
 ip link set lo up 2>/dev/null
 if ip link show eth0 2>/dev/null; then
     ip link set eth0 up
-    if command -v dhclient >/dev/null; then
+    if command -v udhcpc >/dev/null; then
+        # Background DHCP: the guest agent (vsock) must not wait on the
+        # network. Build/agent scripts wait for an IPv4 address instead.
+        udhcpc -i eth0 -q -n -t 5 -s /usr/share/udhcpc/default.script 2>/dev/null &
+    elif command -v dhclient >/dev/null; then
         dhclient -v eth0 2>/dev/null &
     fi
-    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    echo "nameserver 10.200.0.1" > /etc/resolv.conf
 fi
 
 # Guest agent (host exec channel)

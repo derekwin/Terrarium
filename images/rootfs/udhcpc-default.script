@@ -1,0 +1,20 @@
+#!/bin/sh
+# busybox udhcpc default.script — configure the interface from DHCP.
+RESOLV_CONF=/etc/resolv.conf
+
+case "$1" in
+    deconfig)
+        ip addr flush dev "$interface" 2>/dev/null
+        ip route flush dev "$interface" 2>/dev/null
+        ;;
+    bound|renew)
+        ip addr add "$ip/${mask:-24}" dev "$interface" 2>/dev/null || \
+        ip addr replace "$ip/${mask:-24}" dev "$interface" 2>/dev/null || true
+        [ -n "$router" ] && ip route add default via "$router" dev "$interface" 2>/dev/null
+        : > "$RESOLV_CONF"
+        for ns in $dns; do
+            echo "nameserver $ns" >> "$RESOLV_CONF"
+        done
+        ;;
+esac
+exit 0

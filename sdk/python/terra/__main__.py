@@ -830,7 +830,10 @@ def _build_tool_layer(args, system: str, kernel: str) -> int:
     # 3) cleanup runtime noise
     client.vm_exec(
         builder,
-        ["sh", "-c", "rm -rf /tmp/* /run/* /var/log/* /etc/resolv.conf 2>/dev/null; sync"],
+        # apt leaves root-owned 0700 dirs (/var/cache/apt/archives/partial)
+        # that break the read-only erofs pack of the upperdir — purge
+        # caches so the delta is packable by the invoking (non-root) user.
+        ["sh", "-c", "rm -rf /tmp/* /run/* /var/log/* /var/cache/apt/* /var/lib/apt/lists/* /etc/resolv.conf 2>/dev/null; sync"],
         timeout_secs=30,
     )
 

@@ -464,19 +464,34 @@ impl ChVmHandle {
     /// socket (text handshake "CONNECT <port>", then line-JSON).
     async fn guest_cmd(&self, cmd: &serde_json::Value) -> Result<serde_json::Value, AdapterError> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::time::{timeout, Duration};
         let path = &self.vsock_path;
-        let stream = tokio::net::UnixStream::connect(&path)
+
+        // Host-side bound on the whole round-trip. The guest command runs
+        // up to its own `timeout_secs`; give it headroom for scheduling.
+        let cmd_timeout_secs = cmd
+            .get("timeout_secs")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(60);
+        let total = Duration::from_secs(cmd_timeout_secs.saturating_add(15));
+
+        // Handshake has a short fixed budget so a booting/absent guest
+        // agent fails fast (callers retry on vsock/handshake errors)
+        // instead of hanging the daemon forever.
+        let connect = Duration::from_secs(10);
+        let stream = timeout(connect, tokio::net::UnixStream::connect(&path))
             .await
+            .map_err(|_| format!("vsock connect timeout: guest agent not ready"))?
             .map_err(|e| format!("connect guest vsock: {}", e))?;
         let (reader, mut writer) = stream.into_split();
-        writer
-            .write_all(b"CONNECT 1024\n")
+        timeout(connect, writer.write_all(b"CONNECT 1024\n"))
             .await
+            .map_err(|_| "vsock CONNECT timeout: guest agent not ready".to_string())?
             .map_err(|e| format!("vsock CONNECT: {}", e))?;
         let mut lines = BufReader::new(reader).lines();
-        let handshake = lines
-            .next_line()
+        let handshake = timeout(connect, lines.next_line())
             .await
+            .map_err(|_| "vsock handshake timeout: guest agent not ready".to_string())?
             .map_err(|e| format!("vsock handshake: {}", e))?
             .unwrap_or_default();
         if !handshake.starts_with("OK") {
@@ -489,9 +504,14 @@ impl ChVmHandle {
             .write_all(payload.as_bytes())
             .await
             .map_err(|e| format!("vsock write: {}", e))?;
-        let resp = lines
-            .next_line()
+        let resp = timeout(total, lines.next_line())
             .await
+            .map_err(|_| {
+                format!(
+                    "guest command timed out after {}s (guest-proxy did not respond)",
+                    cmd_timeout_secs.saturating_add(15)
+                )
+            })?
             .map_err(|e| format!("vsock read: {}", e))?
             .unwrap_or_default();
         serde_json::from_str(&resp).map_err(|e| {

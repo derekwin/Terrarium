@@ -141,6 +141,13 @@ terra tool remove -n python312
 （注入输入 → 跑层内任务 → 收集结果 → reset_in_place），回归验证见
 `sdk/python/tests/manual_envlayer.sh`。
 
+**Agent 执行**——同一套层工具链服务 agent 场景：repo + 工具链 + 测试
+烘焙进层，从同一快照恢复 N 个 agent 环境，每个 agent 编辑自己的工作区，
+就地重置把每个环境恢复到层基线。已在一个真实 SWE-bench 实例
+（`pallets__flask-4160`）上端到端验证：4 个并行环境基线复现 bug，修复后
+套件全绿（33 passed），重置后恢复有 bug 的基线
+（`sdk/python/tests/manual_swebench.sh`）。
+
 **MCP**——将 agent 指向 stdio server：
 
 ```json

@@ -144,6 +144,14 @@ survives every reset. The minimal training loop is
 task → collect → reset_in_place); regression check in
 `sdk/python/tests/manual_envlayer.sh`.
 
+**Agent execution** — the same layer toolchain serves the agent use case:
+repo + toolchain + tests baked into a layer, N agent environments restored
+from one snapshot, each agent edits its workspace, and the in-place reset
+returns every environment to the layer baseline. Proven end-to-end on a
+real SWE-bench instance (`pallets__flask-4160`): bug reproduces at
+baseline in 4 parallel envs, the fix turns the suite green (33 passed),
+reset restores the broken baseline (`sdk/python/tests/manual_swebench.sh`).
+
 **MCP** — point your agent at the stdio server:
 
 ```json

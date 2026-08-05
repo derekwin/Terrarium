@@ -71,9 +71,10 @@ pub fn resolve_layer(config: &LayerConfig, name: &str) -> Result<String, Adapter
         .mounted_layers
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if set.contains(name) {
-        return Ok(mnt);
-    }
+    // A rebuilt image above already unmounted the stale mount; drop the
+    // cached registration so we actually mount the new image instead of
+    // returning the now-empty mountpoint.
+    set.remove(name);
     std::fs::create_dir_all(&mnt).map_err(|e| format!("mkdir {}: {}", mnt, e))?;
     erofs::mount_erofs(&image, &mnt)?;
     let _ = std::fs::write(&sidecar, &mtime);
@@ -212,11 +213,11 @@ fn find_mkfs_erofs() -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
             for c in [
-                "mkfs.erofs".to_string(),
                 format!(
                     "{}/.local/share/terra/bin/mkfs.erofs",
                     std::env::var("HOME").unwrap_or_default()
                 ),
+                "mkfs.erofs".to_string(),
                 "/usr/bin/mkfs.erofs".to_string(),
             ] {
                 if std::path::Path::new(&c).exists() || c == "mkfs.erofs" {
