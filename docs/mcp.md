@@ -95,3 +95,26 @@ terra_session_kill(session_id="sess-…")               # 终止并清理工作�
 ```
 
 平台侧清理会话租户：`terra sandbox destroy-tenant mcp`。
+
+## 真实 agent 应用示例
+
+`sdk/python/examples/agent_terra.py` 是一个可运行的 agent 应用：LLM（OpenAI
+兼容 function calling，示例用 deepseek）通过 MCP 客户端连接 `terra-mcp`，
+把 `terra_*` 工具暴露给模型，agent 自主决策并在沙箱内执行任务。agent
+本身没有宿主文件系统/shell 访问权——所有命令都经 `terra_exec` /
+`terra_session_*` 在隔离 VM 会话中执行（默认 sandlock 约束）。
+
+```bash
+export DEEPSEEK_API_KEY=... TERRA_SOCKET=/tmp/terra.sock \
+       TERRA_HOME=/home/liujinyao/.local/share/terra
+/tmp/terrarium-venv/bin/python sdk/python/examples/agent_terra.py
+```
+
+首次冷启动会话时，脚本自动从 `$TERRA_HOME/images/` 解析 kernel 与
+initramfs 注入 `terra-mcp` 环境。示例默认任务（写 fib.py 并验证第 40 个
+斐波那契数）已在真实运行中通过：agent 8 步自主完成——发现 `/home` 无写
+权限、改用会话 workdir、写文件、运行、验证输出 `102334155`。
+
+这一模式让任何支持 MCP 的 agent 框架（Claude SDK / LangGraph / Codex
+CLI 等）都能复用 Terrarium 沙箱；框架差异只在于把 MCP 工具列表映射为
+各自的 tool schema，沙箱侧接口完全一致。
