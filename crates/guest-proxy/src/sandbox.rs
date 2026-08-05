@@ -138,6 +138,19 @@ pub fn wrap_for_sandbox(
         }
     }
 
+    // Default-deny networking: sandlock only supervises the network when
+    // net rules are present, and a missing rule list means "allow all".
+    // The policy model's default is deny, so a sandboxed exec with no
+    // explicit Network::Outbound grants must get an all-deny net policy
+    // (--net-deny is mutually exclusive with --net-allow, so this only
+    // runs when no allow rules were emitted above).
+    if !argv.iter().any(|a| a == "--net-allow") {
+        argv.push("--net-deny".into());
+        argv.push("0.0.0.0/0".into());
+        argv.push("--net-deny".into());
+        argv.push("::/0".into());
+    }
+
     // The session workdir is a dynamic grant — it travels via the exec
     // `work_dir` field, never as a static capability.
     if exists(work_dir) {
@@ -453,6 +466,10 @@ mod tests {
                 "/dev/null",
                 "-r",
                 "/dev/urandom",
+                "--net-deny",
+                "0.0.0.0/0",
+                "--net-deny",
+                "::/0",
                 "-w",
                 "/workdir",
                 "--",
@@ -603,12 +620,37 @@ mod tests {
         assert_eq!(argv[b - 1], "--net-allow");
     }
 
-    /// No network capabilities → no --net-allow flags.
+    /// No network capabilities → no --net-allow flags, and an all-deny
+    /// net policy is injected (default-deny semantics: sandlock only
+    /// supervises networking when rules are present, so without rules it
+    /// would otherwise mean "allow all").
     #[test]
-    fn no_network_caps_means_no_net_allow_flags() {
+    fn no_network_caps_means_default_deny_net() {
         let argv =
             wrap_for_sandbox(&args(), "/workdir", Some(&default_policy()), |_| true).unwrap();
         assert!(!argv.iter().any(|a| a == "--net-allow"));
+        assert!(argv.iter().any(|a| a == "--net-deny"));
+        assert!(argv.iter().any(|a| a == "0.0.0.0/0"));
+        assert!(argv.iter().any(|a| a == "::/0"));
+    }
+
+    /// Explicit Network::Outbound grants suppress the all-deny injection
+    /// (--net-deny is mutually exclusive with --net-allow in sandlock).
+    #[test]
+    fn explicit_network_capability_suppresses_default_deny() {
+        let policy = SandboxPolicy {
+            capabilities: vec![Capability::Network {
+                endpoint: Endpoint {
+                    host: "api.openai.com".into(),
+                    port: Some(443),
+                },
+                direction: Direction::Outbound,
+            }],
+            ..default_policy()
+        };
+        let argv = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap();
+        assert!(argv.iter().any(|a| a == "--net-allow"));
+        assert!(!argv.iter().any(|a| a == "--net-deny"));
     }
 
     /// memory_mb → "-m <n>M"; procs → "-P <n>", both before "--".
@@ -714,6 +756,10 @@ mod tests {
             vec![
                 "/usr/bin/sandlock",
                 "run",
+                "--net-deny",
+                "0.0.0.0/0",
+                "--net-deny",
+                "::/0",
                 "-w",
                 "/workdir/session-1",
                 "--",

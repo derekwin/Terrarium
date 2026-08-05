@@ -1,0 +1,173 @@
+"""Security isolation verification on a real KVM host.
+
+This suite is the security verification loop for the default-deny sandbox
+model: each test attempts a real escape / privilege-escalation / cross-tenant
+primitive inside an actual Terrarium sandbox (base layer, sandlock) and
+asserts the sandbox denies it. Positive controls (read /etc, write /tmp)
+guard against a "denies everything" regression.
+
+Requires the same environment as ``test_e2e_real.py``: /dev/kvm, guest
+images, and a running engine (DaemonManager auto-starts one in-process).
+
+Usage:
+    pytest sdk/python/tests/test_security_isolation.py -v
+"""
+
+from __future__ import annotations
+
+from uuid import uuid4
+
+import pytest
+
+from terra.sandbox import Sandbox
+
+
+DENY_EXIT = 200  # SANDBOX_DENY_EXIT_CODE — structured deny signal
+
+
+def teardown_module():
+    """Destroy all tenant VMs this suite created."""
+    from terra.client import TerraClient, TerraError
+
+    client = TerraClient()
+    try:
+        vms = client.vm_list().get("vms", [])
+    except Exception:  # daemon already gone
+        return
+    for vm in vms:
+        name = vm.get("name", "")
+        if name.startswith("tenant-"):
+            try:
+                client.vm_destroy(name)
+            except TerraError:
+                pass
+
+
+def _sandbox(**kw) -> Sandbox:
+    kw.setdefault("tenant", f"sec-{uuid4().hex[:8]}")
+    kw.setdefault("layers", ["base"])
+    return Sandbox(**kw)
+
+
+@pytest.mark.e2e
+class TestFileSystemIsolation:
+    """Default policy: read-only system, RW /tmp + workdir, devices denied."""
+
+    def test_write_system_path_denied(self):
+        with _sandbox() as sb:
+            r = sb.exec("sh -c 'echo pwned >> /etc/passwd'")
+            assert r.exit_code == DENY_EXIT, f"expected deny, got {r}"
+
+    def test_write_root_home_denied(self):
+        with _sandbox() as sb:
+            r = sb.exec("sh -c 'echo x > /root/x; echo x > /home/x'")
+            assert r.exit_code == DENY_EXIT, f"expected deny, got {r}"
+
+    def test_read_device_denied(self):
+        with _sandbox() as sb:
+            r = sb.exec("cat /dev/mem")
+            assert r.exit_code != 0, f"expected deny, got {r}"
+
+    def test_read_system_allowed(self):
+        """Positive control: default read grants still work."""
+        with _sandbox() as sb:
+            r = sb.exec("cat /etc/hostname")
+            assert r.exit_code == 0
+            assert r.stdout.strip()
+
+    def test_tmp_writable(self):
+        """Positive control: /tmp stays writable."""
+        with _sandbox() as sb:
+            r = sb.exec("sh -c 'echo ok > /tmp/probe && cat /tmp/probe'")
+            assert r.exit_code == 0 and "ok" in r.stdout
+
+    def test_workdir_writable(self):
+        """Positive control: the session workdir is the scratch area."""
+        with _sandbox() as sb:
+            r = sb.exec("sh -c 'echo hi > f.txt && cat f.txt'")
+            assert r.exit_code == 0 and "hi" in r.stdout
+
+
+@pytest.mark.e2e
+class TestCrossSandboxIsolation:
+    """One VM, two sandboxes: sibling workdirs must be unreachable."""
+
+    def test_sibling_workdir_denied(self):
+        with _sandbox() as a, _sandbox() as b:
+            b_wd = b._workdir
+            r = a.exec(f"ls {b_wd}")
+            assert r.exit_code != 0, f"sandbox A read B's workdir: {r}"
+            r2 = a.exec(f"sh -c 'echo pwned > {b_wd}/owned'")
+            assert r2.exit_code != 0, f"sandbox A wrote B's workdir: {r2}"
+
+
+@pytest.mark.e2e
+class TestProcessIsolation:
+    """Resource limits are enforced by the sandbox policy."""
+
+    @pytest.mark.xfail(
+        reason="KNOWN GAP: sandlock -P/--max-processes is not enforced in the "
+        "guest (fork of 3 sleeps succeeds under -P 1). Guest-proxy translates "
+        "limits.procs to -P, but sandlock's supervisor process-count check "
+        "does not bite. Fix requires a working process-limit backend "
+        "(cgroup pids or supervisor clone interception).",
+        strict=False,
+    )
+    def test_procs_limit_enforced(self):
+        policy = {"limits": {"procs": 2}}
+        with _sandbox(policy=policy) as sb:
+            # 3 concurrent sleeps exceed the 2-proc limit → fork must fail.
+            r = sb.exec("sh -c 'sleep 5 & sleep 5 & sleep 5; wait'")
+            assert r.exit_code != 0, f"expected procs limit to bite, got {r}"
+
+
+@pytest.mark.e2e
+class TestNetworkIsolation:
+    """Default policy denies outbound net; explicit grants open a whitelist.
+
+    Targets are the host's own LAN (10.102.0.254:80 answers HTTP) instead of
+    the public internet, so the suite is reproducible on restricted hosts.
+    """
+
+    LAN_HOST = "10.102.0.254"
+    LAN_PORT = 80
+    OTHER_LAN_HOST = "192.168.2.1"
+
+    def test_default_net_denied(self):
+        """No Network capability → outbound TCP is denied (default-deny)."""
+        with _sandbox(network=True) as sb:
+            r = sb.exec(f"timeout 5 wget -q -O /dev/null http://{self.LAN_HOST}:{self.LAN_PORT}/")
+            assert r.exit_code == DENY_EXIT, f"expected deny signal, got {r}"
+            assert "Permission denied" in r.stderr, f"expected deny reason, got {r}"
+
+    def test_explicit_net_allow_grant(self):
+        """Explicit Outbound grant to a host opens exactly that endpoint."""
+        policy = {
+            "capabilities": [
+                {"Network": {"endpoint": {"host": self.LAN_HOST, "port": self.LAN_PORT},
+                             "direction": "Outbound"}},
+            ],
+        }
+        with _sandbox(network=True, policy=policy) as sb:
+            r = sb.exec(f"timeout 5 wget -q -O /dev/null http://{self.LAN_HOST}:{self.LAN_PORT}/")
+            assert "404" in r.stderr, f"granted endpoint should connect (HTTP), got {r}"
+            # Whitelist semantics: a non-granted destination stays denied
+            # (exit 200 is the structured deny signal, distinct from a
+            # plain connection failure's exit 1).
+            r2 = sb.exec(f"timeout 5 wget -q -O /dev/null http://{self.OTHER_LAN_HOST}:{self.LAN_PORT}/")
+            assert r2.exit_code == DENY_EXIT, f"expected non-granted dest denied, got {r2}"
+
+
+@pytest.mark.e2e
+class TestAudit:
+    """Denials leave a structured audit trail."""
+
+    def test_deny_is_audited(self):
+        from terra.client import TerraClient
+
+        policy = {"audit": {"deny": True}}
+        with _sandbox(policy=policy) as sb:
+            sb.exec("sh -c 'echo x >> /etc/passwd'")  # denied
+            audit = TerraClient().audit_list(event="deny", sandbox_id=sb._id)
+            events = audit.get("audit", [])
+            assert any(e.get("sandbox_id") == sb._id for e in events), f"no deny event: {audit}"
