@@ -203,8 +203,8 @@ passes (42 passed), broken patch rejected (1 failed), ~1.5s per check.
 - 🟡 P2: security verification loop — real-KVM escape/deny suite
   (`docs/security-verification.md`), default-deny networking, L2 tenant
   isolation (ebtables), audit JSONL persistence (`terra audit ls
-  --history`), e2e gate (`sdk/python/tests/run_e2e.sh`) all done;
-  process limits (sandlock -P) not enforced yet. Policy/quota
+  --history`), process limits (sandlock -P, incl. busybox fork(2) bypass
+  fix), e2e gate (`sdk/python/tests/run_e2e.sh`) all done; policy/quota
   management still open.
 - 🔲 P3: multi-host orchestration
 

@@ -105,20 +105,20 @@ class TestCrossSandboxIsolation:
 class TestProcessIsolation:
     """Resource limits are enforced by the sandbox policy."""
 
-    @pytest.mark.xfail(
-        reason="KNOWN GAP: sandlock -P/--max-processes is not enforced in the "
-        "guest (fork of 3 sleeps succeeds under -P 1). Guest-proxy translates "
-        "limits.procs to -P, but sandlock's supervisor process-count check "
-        "does not bite. Fix requires a working process-limit backend "
-        "(cgroup pids or supervisor clone interception).",
-        strict=False,
-    )
     def test_procs_limit_enforced(self):
         policy = {"limits": {"procs": 2}}
         with _sandbox(policy=policy) as sb:
             # 3 concurrent sleeps exceed the 2-proc limit → fork must fail.
             r = sb.exec("sh -c 'sleep 5 & sleep 5 & sleep 5; wait'")
-            assert r.exit_code != 0, f"expected procs limit to bite, got {r}"
+            assert r.exit_code == DENY_EXIT, f"expected procs limit to bite, got {r}"
+            assert "Resource temporarily unavailable" in r.stderr, f"expected EAGAIN, got {r}"
+
+    def test_procs_within_limit_ok(self):
+        """Positive control: a single process stays within the limit."""
+        policy = {"limits": {"procs": 2}}
+        with _sandbox(policy=policy) as sb:
+            r = sb.exec("sh -c 'sleep 1; echo done'")
+            assert r.exit_code == 0 and "done" in r.stdout, f"got {r}"
 
 
 @pytest.mark.e2e

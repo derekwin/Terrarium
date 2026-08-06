@@ -1,0 +1,48 @@
+diff --git a/crates/sandlock-core/src/resolved.rs b/crates/sandlock-core/src/resolved.rs
+index 78d0c08..41e879b 100644
+--- a/crates/sandlock-core/src/resolved.rs
++++ b/crates/sandlock-core/src/resolved.rs
+@@ -45,6 +45,7 @@ pub(crate) struct SandboxFeatures {
+     pub(crate) port_remap: bool,
+     pub(crate) http_acl: bool,
+     pub(crate) argv_safety_required: bool,
++    pub(crate) process_limit: bool,
+     pub(crate) sysv_ipc_allowed: bool,
+     pub(crate) udp_or_icmp_allowed: bool,
+     pub(crate) net_deny: bool,
+@@ -83,6 +84,10 @@ impl SandboxFeatures {
+             port_remap: sandbox.port_remap,
+             http_acl,
+             argv_safety_required: sandbox.policy_fn.is_some() || exec_handler,
++            // max_processes == 64 is the "unset" sentinel (SandboxBuilder
++            // default); a real limit must intercept bare fork(2), which
++            // busybox ash uses for background jobs.
++            process_limit: sandbox.max_processes != 64,
+             sysv_ipc_allowed: sandbox.allows_sysv_ipc(),
+             udp_or_icmp_allowed: sandbox
+                 .net_allow
+diff --git a/crates/sandlock-core/src/seccomp_plan.rs b/crates/sandlock-core/src/seccomp_plan.rs
+index 8ffaaa2..b7b4fe2 100644
+--- a/crates/sandlock-core/src/seccomp_plan.rs
++++ b/crates/sandlock-core/src/seccomp_plan.rs
+@@ -284,13 +284,13 @@ pub(crate) fn notif_syscalls_resolved(resolved: &ResolvedSandbox) -> Vec<u32> {
+     let mut nrs = SyscallList::with(BASE_NOTIF_SYSCALLS);
+     nrs.push_optional(arch::sys_vfork());
+ 
+-    // Bare fork(2) carries none of the namespace/process-limit risk of
+-    // clone/clone3 and was historically left out of the BPF filter so
+-    // hot fork-loops (COW map-reduce) bypass the supervisor entirely.
+-    // It only needs interception when argv safety is required, so the
+-    // supervisor can register the new child via ptrace fork events before
+-    // user code can mutate argv observed by policy_fn or exec handlers.
+-    if features.argv_safety_required {
++    // Bare fork(2) carries none of the namespace risk of clone/clone3 and
++    // was historically left out of the BPF filter so hot fork-loops (COW
++    // map-reduce) bypass the supervisor entirely. It still needs
++    // interception when a process limit is set (busybox ash forks
++    // background jobs via fork(2), which would otherwise bypass
++    // --max-processes) or when argv safety requires child registration.
++    if features.argv_safety_required || features.process_limit {
+         nrs.push_optional(arch::sys_fork());
+     }
+ 

@@ -21,13 +21,15 @@ pytest sdk/python/tests/test_security_isolation.py -v
 | 文件系统 | 读 `/dev/mem` | 拒 |
 | 文件系统 | 读 `/etc`、写 `/tmp`、写 workdir（正例） | 放行 |
 | 跨沙箱 | A 读/写 B 的 workdir（同 VM 内） | 拒 |
+| 进程 | `limits.procs` 超限 fork | 拒（EAGAIN，busybox fork 也被拦） |
+| 进程 | 限额内单进程（正例） | 放行 |
 | 网络 | 默认策略出网 | 拒（"Permission denied"） |
 | 网络 | 显式 `Network{Outbound}` 白名单 | 精确放行；未授权目标拒 |
 | 租户网络 | 跨租户 VM 二层互访 | 拒（ebtables 隔离规则） |
 | 租户网络 | 出网/网关/路由（正例） | 正常 |
 | 审计 | deny 事件进入 `audit_list` | 记录 |
 
-结果：**12 passed, 1 xfailed**。
+结果：**14 passed**。
 
 ## 审计持久化
 
@@ -81,11 +83,20 @@ ebtables -A FORWARD -i terra-+ -o terra-+ -j DROP
 
 ## 已知缺口（跟踪中）
 
-1. **进程数限制不生效**：`limits.procs` 被翻译为 sandlock `-P`，但在
-   guest 实测 `-P 1` 下 3 个并发 sleep 全部成功（测试标记 xfail）。sandlock
-   supervisor 的进程计数未触发。修复方向：cgroup pids 或 supervisor
-   clone 拦截的可靠后端。
-2. **审计默认关闭**：`SandboxPolicy.audit` 默认全 false，生产部署需显式
+1. **审计默认关闭**：`SandboxPolicy.audit` 默认全 false，生产部署需显式
    开启，或把引擎默认策略的 deny 审计改为默认开。
-3. **公网出口依赖宿主网络**：网络测试用宿主内网目标（10.102.0.254:80）
+2. **公网出口依赖宿主网络**：网络测试用宿主内网目标（10.102.0.254:80）
    保持可复现；受限公网（宿主 443 不通）环境下 NAT 出公网未覆盖。
+
+已修复：**进程数限制**（sandlock `-P` 被 busybox `fork(2)` 绕过）——
+见下节。
+
+## 进程数限制修复（sandlock `-P`）
+
+`limits.procs` 经 guest-proxy 翻译为 sandlock `--max-processes`，但
+sandlock 的 supervisor 只拦截 clone/clone3/vfork——busybox ash 用
+`fork(2)` 派发后台任务，直接绕过进程计数（实测 `-P 1` 下 3 个并发 sleep
+全部成功）。修复（`thirdparty/sandlock-v0.8.5-procs.patch`）：只要
+`max_processes` 被设置（非默认哨兵 64），`fork(2)` 也加入 seccomp-notify
+拦截集，复用 `handle_fork` 的计数逻辑（超限返回 EAGAIN）。busybox 与
+dash 的沙箱现在都受进程限制约束。
