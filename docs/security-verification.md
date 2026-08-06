@@ -29,6 +29,31 @@ pytest sdk/python/tests/test_security_isolation.py -v
 
 结果：**12 passed, 1 xfailed**。
 
+## 审计持久化
+
+审计事件（exec/deny/resource）追加写入 `$TERRA_HOME/audit/audit.jsonl`
+（JSONL，0600，daemon root 所有——沙箱用户读不到自己留下的痕迹）。
+写盘是 best-effort：磁盘满/损坏只记日志，绝不阻塞沙箱执行。
+
+```bash
+# 查内存环形缓冲（最近 10k 条）
+terra audit ls
+# 查持久化历史（daemon 重启后仍可查）
+terra audit ls --history
+```
+
+SDK：`TerraClient().audit_list(history=True, event="deny", ...)`。
+
+## e2e 真机门禁
+
+CI（ubuntu-latest 无 /dev/kvm）跑的是非 e2e 门禁；真机套件由
+`sdk/python/tests/run_e2e.sh` 串联（test_e2e_real + test_sandbox +
+test_security_isolation），在有 KVM 的机器/自托管 runner 上执行：
+
+```bash
+bash sdk/python/tests/run_e2e.sh
+```
+
 ## 租户间网络隔离
 
 所有 VM 共享 `terra0` 桥与一个子网（DHCP/路由简单），但桥的默认语义是

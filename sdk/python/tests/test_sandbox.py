@@ -315,13 +315,17 @@ class TestSandboxPolicy:
             Sandbox.destroy_tenant(tenant)
 
     def test_override_precedence(self):
-        """Per-call policy wins once; the stored policy is unaffected."""
+        """Per-call policy wins once; the stored policy is unaffected.
+
+        Per-call limits still respect the VM quota (G2: sandbox limits ⊆
+        VM quota), so the override stays under the VM's 256 MB here.
+        """
         tenant = f"polov{uuid4().hex[:6]}"
         sb = Sandbox(tenant=tenant, layers=["base"], cpu=1, memory_mb=256,
                      policy={"limits": {"memory_mb": 256}})
         try:
             r = sb.exec("echo override-ok",
-                        policy={"limits": {"memory_mb": 512, "procs": 5}})
+                        policy={"limits": {"memory_mb": 192, "procs": 5}})
             assert r.exit_code == 0
             stored = sb.policy
             assert stored["limits"]["memory_mb"] == 256, stored

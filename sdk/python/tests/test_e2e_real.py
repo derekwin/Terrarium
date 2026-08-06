@@ -15,7 +15,6 @@ Environment requirements (checked in preflight, fails fast with guidance):
     - guest images: target/guest/vmlinux.bin + target/guest/alpine.cpio
       (build with images/build.sh; memory-resize test needs a kernel with
       CONFIG_VIRTIO_MEM=y)
-    - qemu-img
     - target/release/engine (built automatically via cargo if missing)
 
 The suite starts its own daemon on a dedicated socket with an isolated
@@ -227,10 +226,8 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
         missing.append(f"{KERNEL} (run images/build.sh)")
     if not INITRAMFS.exists():
         missing.append(f"{INITRAMFS} (run images/build.sh)")
-    if not shutil.which("qemu-img"):
-        missing.append("qemu-img")
-    if missing:
-        raise RuntimeError("preflight failed:\n  - " + "\n  - ".join(missing))
+        if missing:
+            raise RuntimeError("preflight failed:\n  - " + "\n  - ".join(missing))
 
     state_dir = Path(tempfile.mkdtemp(prefix="terra-sdk-e2e-"))
 
@@ -260,6 +257,13 @@ def setup_module() -> None:  # noqa: ANN001 (pytest passes the module)
     _bin_dir = str(_terra_paths.bin_dir())
     if _bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = _bin_dir + os.pathsep + os.environ.get("PATH", "")
+    # erofsfuse links libfuse.so.2 bundled next to it in the managed bin
+    # dir — mirror build_daemon_env's LD_LIBRARY_PATH so the embedded
+    # daemon's erofs mount works without system libfuse.
+    current_lp = os.environ.get("LD_LIBRARY_PATH", "")
+    os.environ["LD_LIBRARY_PATH"] = _bin_dir + (
+        os.pathsep + current_lp if current_lp else ""
+    )
     env = {
         "TERRA_STATE_DIR": str(state_dir / "vms"),
         "TERRA_CH_BINARY": ch,

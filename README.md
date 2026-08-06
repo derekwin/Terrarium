@@ -202,8 +202,10 @@ passes (42 passed), broken patch rejected (1 failed), ~1.5s per check.
   VM lifecycle runs lock-free: 8 concurrent restores in 232 ms)
 - 🟡 P2: security verification loop — real-KVM escape/deny suite
   (`docs/security-verification.md`), default-deny networking, L2 tenant
-  isolation (ebtables) all done; process limits (sandlock -P) not enforced
-  yet. Audit persistence + policy/quota management still open.
+  isolation (ebtables), audit JSONL persistence (`terra audit ls
+  --history`), e2e gate (`sdk/python/tests/run_e2e.sh`) all done;
+  process limits (sandlock -P) not enforced yet. Policy/quota
+  management still open.
 - 🔲 P3: multi-host orchestration
 
 Strategy and scenario focus: `docs/strategy.md`.

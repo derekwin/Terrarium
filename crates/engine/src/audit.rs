@@ -1,7 +1,9 @@
 //! Audit events (D-phase, R6; productized in P2) — structured tracing
-//! output gated by the per-policy AuditSpec, plus a bounded in-engine
+//! output gated by the per-policy AuditSpec, persisted to a JSONL file
+//! under `$TERRA_HOME/audit/audit.jsonl` (0600), plus a bounded in-engine
 //! ring buffer so the daemon can answer `audit_list` queries without a
-//! log aggregator.
+//! log aggregator. The file survives daemon restarts; `audit_list` with
+//! `history: true` reads it back.
 //!
 //! Event model (consumers aggregate from the log stream):
 //! - `audit.exec` — a sandboxed exec completed (exit_code + duration).
@@ -14,11 +16,15 @@
 //!   at create; VM resize as an always-on platform event).
 use adapter_traits::{AdapterError, ExecResult, SandboxPolicy, SANDBOX_DENY_EXIT_CODE};
 use std::collections::VecDeque;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// One in-engine audit record — the same event the tracing stream emits,
 /// kept for query (`audit_list`).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AuditRecord {
     pub ts_ms: u64,
     pub event: String,
@@ -53,7 +59,85 @@ fn push(record: AuditRecord) {
     if log.len() >= AUDIT_CAPACITY {
         log.pop_front();
     }
+    append_persisted(&record);
     log.push_back(record);
+}
+
+/// `$TERRA_HOME/audit/audit.jsonl` — daemon-owned (root), 0600, so the
+/// audit trail is not readable by the sandbox users it records.
+fn audit_file_path() -> PathBuf {
+    let home = std::env::var("TERRA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/var/lib/terra"));
+    home.join("audit").join("audit.jsonl")
+}
+
+/// Append one JSON line. Best-effort: a full/corrupt audit disk must never
+/// block sandbox execution, so failures are logged and swallowed.
+fn append_persisted(record: &AuditRecord) {
+    let path = audit_file_path();
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(error = %e, path = %parent.display(), "audit persist mkdir failed");
+            return;
+        }
+    }
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "audit persist open failed");
+            return;
+        }
+    };
+    match serde_json::to_string(record) {
+        Ok(line) => {
+            if let Err(e) = writeln!(file, "{}", line).and_then(|_| file.flush()) {
+                tracing::warn!(error = %e, "audit persist write failed");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "audit persist serialize failed"),
+    }
+}
+
+/// Read persisted history back (newest first), optionally filtered —
+/// survives daemon restarts where the ring buffer does not.
+pub(crate) fn audit_history(
+    limit: usize,
+    event: Option<&str>,
+    sandbox_id: Option<&str>,
+) -> Vec<AuditRecord> {
+    let path = audit_file_path();
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::debug!(error = %e, path = %path.display(), "audit history unavailable");
+            return Vec::new();
+        }
+    };
+    let mut records: Vec<AuditRecord> = Vec::new();
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<AuditRecord>(&line) {
+            Ok(r) => records.push(r),
+            Err(e) => {
+                tracing::warn!(error = %e, "audit history: skipping unparsable line");
+            }
+        }
+    }
+    records
+        .into_iter()
+        .rev()
+        .filter(|r| event.map_or(true, |e| r.event == e))
+        .filter(|r| sandbox_id.map_or(true, |s| r.sandbox_id == s))
+        .take(limit)
+        .collect()
 }
 
 /// Query the ring buffer (newest first), optionally filtered.
@@ -288,6 +372,7 @@ mod tests {
     }
 
     fn audited_policy() -> SandboxPolicy {
+        init_test_env();
         SandboxPolicy {
             audit: AuditSpec {
                 deny: true,
@@ -299,7 +384,21 @@ mod tests {
     }
 
     fn unaudited_policy() -> SandboxPolicy {
+        init_test_env();
         SandboxPolicy::default()
+    }
+
+    /// Isolate the persisted audit trail to a temp dir: unit tests must
+    /// not write into a real TERRA_HOME, and a missing/unwritable path
+    /// would emit a tracing warn that pollutes event-count assertions.
+    fn init_test_env() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let dir = std::env::temp_dir().join("terra-audit-test");
+            let _ = std::fs::create_dir_all(&dir);
+            unsafe { std::env::set_var("TERRA_HOME", dir) };
+        });
     }
 
     fn recorded(sub: &RecordingSubscriber) -> Vec<Vec<(String, String)>> {

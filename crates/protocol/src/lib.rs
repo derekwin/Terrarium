@@ -75,6 +75,10 @@ pub struct Command {
     // audit_list: filter by event kind ("exec" | "deny" | "resource")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<String>,
+    // audit_list: query persisted history (JSONL on disk) instead of the
+    // in-memory ring buffer (default false)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_history: Option<bool>,
 
     // pool_create: number of idle VMs to maintain
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +145,7 @@ impl Command {
             memory_bytes: None,
             limit: None,
             event: None,
+            audit_history: None,
             pool_size: None,
             timeout_secs: None,
             exec_mode: None,
@@ -299,6 +304,12 @@ impl Command {
     /// Builder: audit_list event filter ("exec" | "deny" | "resource").
     pub fn with_event(mut self, event: &str) -> Self {
         self.event = Some(event.into());
+        self
+    }
+
+    /// Builder: audit_list reads persisted history instead of the ring buffer.
+    pub fn with_audit_history(mut self) -> Self {
+        self.audit_history = Some(true);
         self
     }
 }

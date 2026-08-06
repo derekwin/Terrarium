@@ -434,12 +434,15 @@ class TerraClient:
         limit: int | None = None,
         event: str | None = None,
         sandbox_id: str | None = None,
+        history: bool = False,
     ) -> dict:
-        """Query the engine's bounded audit ring buffer (P2 observability).
+        """Query audit events (P2 observability).
 
         Returns ``{audit: [{ts_ms, event, sandbox_id, args, exit_code,
         duration_ms, reason, kind, detail}], count}`` — newest first.
         ``event`` filters to ``"exec" | "deny" | "resource"``.
+        ``history=True`` reads the persisted JSONL trail (survives daemon
+        restarts) instead of the in-memory ring buffer.
         """
         cmd: dict = {"command": "audit_list"}
         if limit is not None:
@@ -448,6 +451,8 @@ class TerraClient:
             cmd["event"] = event
         if sandbox_id is not None:
             cmd["id"] = sandbox_id
+        if history:
+            cmd["audit_history"] = True
         return self._send(cmd)
 
     def vm_exec(

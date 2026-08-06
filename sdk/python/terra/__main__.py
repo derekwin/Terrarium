@@ -985,10 +985,12 @@ def cmd_vm_restore(args) -> int:
 
 
 def cmd_audit_ls(args) -> int:
-    """Query the engine's audit ring buffer."""
+    """Query audit events (ring buffer, or persisted history with --history)."""
     c = _client(args)
     try:
-        resp = c.audit_list(limit=args.limit, event=args.event, sandbox_id=args.id)
+        resp = c.audit_list(
+            limit=args.limit, event=args.event, sandbox_id=args.id, history=args.history
+        )
     except TerraError as e:
         return _err(str(e))
     records = resp.get("audit", [])
@@ -1658,10 +1660,11 @@ Common workflows:
     # ── audit ────────────────────────────────────────────────────────
     audit = sub.add_parser("audit", help="audit observability (P2)")
     audits = audit.add_subparsers(dest="action", required=True)
-    sp = audits.add_parser("ls", help="query the audit ring buffer")
+    sp = audits.add_parser("ls", help="query audit events")
     sp.add_argument("--limit", type=int, help="max records (default 100)")
     sp.add_argument("--event", choices=["exec", "deny", "resource"], help="event kind filter")
     sp.add_argument("--id", help="sandbox id / vm name filter")
+    sp.add_argument("--history", action="store_true", help="read persisted JSONL history")
     sp.add_argument("--raw", action="store_true", help="print raw JSON")
     sp.set_defaults(f=cmd_audit_ls)
 
