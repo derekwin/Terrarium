@@ -38,6 +38,10 @@ def _validate_file_capability(spec: dict) -> None:
         raise ValueError(
             f"File access must be one of {sorted(_FILE_ACCESS)}, got {access!r}"
         )
+    if access == "Execute":
+        raise ValueError(
+            "File Execute capability is not supported by the sandlock backend"
+        )
 
 
 def _validate_network_capability(spec: dict) -> None:
@@ -63,6 +67,10 @@ def _validate_network_capability(spec: dict) -> None:
     if direction not in _DIRECTIONS:
         raise ValueError(
             f"Network direction must be one of {sorted(_DIRECTIONS)}, got {direction!r}"
+        )
+    if direction == "Inbound":
+        raise ValueError(
+            "Network Inbound capability is not supported by the sandlock backend"
         )
 
 
@@ -142,11 +150,9 @@ def validate_policy(policy: dict) -> dict:
         elif kind == "Network":
             _validate_network_capability(spec)
         else:  # Device
-            path = spec.get("path")
-            if not isinstance(path, str) or not path.startswith("/"):
-                raise ValueError(
-                    f"Device capability path must be absolute: {path!r}"
-                )
+            raise ValueError(
+                "Device capability is not supported by the sandlock backend"
+            )
 
     # limits: optional dict of positive ints
     limits = normalized.get("limits")

@@ -32,8 +32,12 @@
    `ResourceLimits` 必须 ⊆ VM 配额(创建时校验,违背拒绝)。
 2. **VM 提供物理隔离,不提供逻辑授权**:VM 内所有 sandbox 共享物理边界;
    授权差异由 sandbox 能力集表达。
-3. **一 VM 多 sandbox 的隔离 = 物理(VM 内机制)+ 逻辑(能力集无交叉)**:
-   能力互不交叉是策略层保证,VM 内隔离(guest sandlock)是执行层保证。
+3. **两层分工:VM 管"防恶意",Sandbox 管"防越权"**。安全边界(逃逸、
+   跨租户、宿主访问)由 VM 层承担——这是 agent 代码可能恶意的防线。
+   Sandbox 层(guest sandlock)不是第二条安全边界,而是**行为治理面**:
+   控制 agent(即便代码合法)只能访问被授权的东西,越权被拒并审计。
+   一 VM 多 sandbox 之间靠能力集无交叉 + 独立 workdir 达成任务边界,
+   但这属于治理而非安全承诺。
 4. **两层正交**:VM 层管"能分到多少资源",sandbox 层管"能访问什么"——
    Separation of Duty。
 

@@ -211,3 +211,13 @@ class TestAudit:
             audit = TerraClient().audit_list(event="deny", sandbox_id=sb._id)
             events = audit.get("audit", [])
             assert any(e.get("sandbox_id") == sb._id for e in events), f"no deny event: {audit}"
+
+    def test_default_policy_deny_is_audited(self):
+        """Governance default: no explicit policy still records denials."""
+        from terra.client import TerraClient
+
+        with _sandbox() as sb:  # no policy → engine default (deny audit on)
+            sb.exec("sh -c 'echo x >> /etc/passwd'")  # denied
+            audit = TerraClient().audit_list(event="deny", sandbox_id=sb._id)
+            events = audit.get("audit", [])
+            assert any(e.get("sandbox_id") == sb._id for e in events), f"no deny event: {audit}"

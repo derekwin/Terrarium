@@ -109,11 +109,6 @@ pub fn tools_list() -> Vec<serde_json::Value> {
                     "Session name; omitted → the shared \"default\" session. Different names = isolated workdirs (optional)",
                 ),
                 (
-                    "sandboxed",
-                    "boolean",
-                    "Run under sandlock permission isolation (default true)",
-                ),
-                (
                     "cwd",
                     "string",
                     "Working directory inside the session; default is the session workdir (optional)",
@@ -547,10 +542,6 @@ fn terra_exec(args: &serde_json::Value, sessions: &mut SessionRegistry) -> Strin
                 .collect()
         })
         .unwrap_or_default();
-    let sandboxed = args
-        .get("sandboxed")
-        .and_then(|a| a.as_bool())
-        .unwrap_or(true);
     let cwd = args.get("cwd").and_then(|a| a.as_str());
 
     let mut final_args = argv;
@@ -569,7 +560,10 @@ fn terra_exec(args: &serde_json::Value, sessions: &mut SessionRegistry) -> Strin
             let mut c = Command::new("sandbox_exec")
                 .with_id(id)
                 .with_args(final_args.clone())
-                .with_sandbox(sandboxed);
+                // Agent-facing exec is always confined: the platform's
+                // escape hatch (sandboxed=false) stays host-side only
+                // (SDK/CLI), never reachable from an agent via MCP.
+                .with_sandbox(true);
             if let Some(t) = args.get("timeout_secs").and_then(|a| a.as_u64()) {
                 c = c.with_timeout_secs(t);
             }

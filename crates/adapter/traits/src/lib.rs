@@ -645,9 +645,21 @@ impl SandboxPolicy {
     /// positive port when present, resource limits must be > 0 when set,
     /// and `DefaultAccess::Allow` is rejected (debug escape hatch only).
     /// An empty capability set is valid (default-deny).
+    ///
+    /// Capabilities the sandlock backend cannot express are rejected here
+    /// (fail fast at the API surface) instead of failing at exec time:
+    /// `File::Execute`, `Network::Inbound`, and `Device` are unsupported.
     pub fn validate(&self) -> Result<(), String> {
         for cap in &self.capabilities {
             match cap {
+                Capability::File {
+                    access: FileAccess::Execute,
+                    ..
+                } => {
+                    return Err(
+                        "File Execute capability is not supported by the sandlock backend".into(),
+                    );
+                }
                 Capability::File { path, access: _ } => {
                     if !is_absolute_path(path) {
                         return Err(format!(
@@ -655,6 +667,15 @@ impl SandboxPolicy {
                             path_display(path)
                         ));
                     }
+                }
+                Capability::Network {
+                    direction: Direction::Inbound,
+                    ..
+                } => {
+                    return Err(
+                        "Network Inbound capability is not supported by the sandlock backend"
+                            .into(),
+                    );
                 }
                 Capability::Network { endpoint, .. } => {
                     if endpoint.host.is_empty() {
@@ -666,13 +687,8 @@ impl SandboxPolicy {
                         }
                     }
                 }
-                Capability::Device { path } => {
-                    if !path.starts_with(std::path::Path::new("/")) {
-                        return Err(format!(
-                            "device path must be absolute (got '{}')",
-                            path.display()
-                        ));
-                    }
+                Capability::Device { .. } => {
+                    return Err("Device capability is not supported by the sandlock backend".into());
                 }
             }
         }

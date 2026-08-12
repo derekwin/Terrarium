@@ -6,13 +6,17 @@
 //! Mirrors the guest sandlock defaults (read-only system dirs, RW /tmp
 //! and /dev/null); the session workdir is dynamic and injected per
 //! sandbox at creation.
+//!
+//! Governance default: deny events are audited by default. "Control the
+//! agent" starts with seeing what it tried to do; a sandbox that does not
+//! ask for audit explicitly still records denials.
 
 use adapter_traits::{
     Capability, DefaultAccess, FileAccess, PathPattern, ResourceLimits, SandboxPolicy,
 };
 
 /// The default sandbox policy: read-only system dirs, RW `/tmp` and
-/// `/dev/null`, everything else denied.
+/// `/dev/null`, everything else denied; denials are audited.
 pub fn default_sandbox_policy() -> SandboxPolicy {
     SandboxPolicy {
         capabilities: vec![
@@ -55,7 +59,11 @@ pub fn default_sandbox_policy() -> SandboxPolicy {
         ],
         limits: ResourceLimits::default(),
         default: DefaultAccess::Deny,
-        audit: Default::default(),
+        audit: adapter_traits::AuditSpec {
+            deny: true,
+            exec: false,
+            resource: false,
+        },
         version: 1,
     }
 }
