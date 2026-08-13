@@ -34,6 +34,9 @@ struct Config {
     write_paths: Vec<String>,
     net_allow: Vec<String>,
     memory_mb: Option<u64>,
+    cpu_shares: Option<u64>,
+    procs: Option<u32>,
+    max_open_files: Option<u64>,
     cmd: Vec<String>,
 }
 
@@ -60,6 +63,24 @@ fn parse_args() -> Result<Config, String> {
                 let v = it.next().ok_or("missing value after -m")?;
                 let v = v.strip_suffix('M').unwrap_or(&v);
                 cfg.memory_mb = Some(v.parse::<u64>().map_err(|_| format!("bad -m value {v}"))?);
+            }
+            "--cpu-shares" => {
+                let v = it.next().ok_or("missing value after --cpu-shares")?;
+                cfg.cpu_shares = Some(
+                    v.parse::<u64>()
+                        .map_err(|_| format!("bad cpu_shares {v}"))?,
+                );
+            }
+            "--max-procs" => {
+                let v = it.next().ok_or("missing value after --max-procs")?;
+                cfg.procs = Some(v.parse::<u32>().map_err(|_| format!("bad procs {v}"))?);
+            }
+            "--max-open-files" => {
+                let v = it.next().ok_or("missing value after --max-open-files")?;
+                cfg.max_open_files = Some(
+                    v.parse::<u64>()
+                        .map_err(|_| format!("bad max_open_files {v}"))?,
+                );
             }
             "--" => {
                 cfg.cmd = it.collect();

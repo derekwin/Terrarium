@@ -722,10 +722,12 @@ impl SandboxPolicy {
                 return Err("limits.fds must be > 0".into());
             }
         }
-        if let Some(b) = self.limits.bandwidth_kbps {
-            if b == 0 {
-                return Err("limits.bandwidth_kbps must be > 0".into());
-            }
+        if self.limits.bandwidth_kbps.is_some() {
+            return Err(
+                "limits.bandwidth_kbps is not supported at the sandbox level \
+                 (belongs on the VM layer; not implemented)"
+                    .into(),
+            );
         }
         Ok(())
     }

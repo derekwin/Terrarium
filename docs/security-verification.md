@@ -111,12 +111,20 @@ dash 的沙箱现在都受进程限制约束。
 |---|---|---|
 | 文件系统 | **Landlock 静态**（内核执行，~1.3×，无 deny 审计） | supervisor 观察（4.6×，denyfd 审计） |
 | 网络 | seccomp-notify 白名单/默认拒绝（低频，denyfd 审计） | Landlock/supervisor |
-| 进程限制 | v1 不支持（guest 内核无 cgroup pids；VM 配额兜底） | `-P`（patch 修复后生效） |
+| 进程限制 | cgroup v2 `pids.max`（guest 内核重编后含 CGROUP_PIDS） | `-P`（patch 修复后生效） |
+| fds 限制 | `setrlimit(RLIMIT_NOFILE)` | 接口未接 |
+| cpu 份额 | cgroup v2 `cpu.weight`（cpu_shares → weight） | 忽略 |
+| bandwidth | 接口拒绝（VM 层语义，未实现） | 忽略 |
 | 维护 | 自研，无第三方 patch | 4 个 sandlock patch |
 
-真实 KVM 验证（base 层）：安全套件 14 passed + 1 skipped（procs），文件
-系统/网络/审计语义与 sandlock 一致（fs deny 是静态 EACCES 而非结构化
-200；网络 deny 仍是结构化 200 + 审计）。
+真实 KVM 验证（base 层）：安全套件 **15 passed**（含 procs 限制真断言），
+文件系统/网络/审计语义与 sandlock 一致（fs deny 是静态 EACCES 而非
+结构化 200；网络 deny 仍是结构化 200 + 审计）。
+
+guest 内核重编（#10）：`config-minimal` 基础上启用
+`CONFIG_CGROUP_PIDS`（confine 进程限制）、`CONFIG_EROFS_FS` +
+`CONFIG_BLK_DEV_LOOP`（层镜像内核挂载）、`CONFIG_IKCONFIG`（便于未来
+提取配置）。
 
 ## 已知问题
 

@@ -170,6 +170,11 @@ def validate_policy(policy: dict) -> dict:
         for key, value in limits.items():
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"limit {key} must be a positive int, got {value!r}")
+        if "bandwidth_kbps" in limits:
+            raise ValueError(
+                "limit 'bandwidth_kbps' is not supported at the sandbox level "
+                "(belongs on the VM layer; not implemented)"
+            )
 
     # default: deny-by-default only through the SDK (D6 — the "allow"
     # escape hatch is not exposed)

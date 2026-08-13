@@ -1,6 +1,6 @@
-//! cgroup v2 memory cap for a sandbox process tree. The guest kernel has
-//! cpuset/cpu/io/memory controllers (no pids — process count is bounded by
-//! the VM quota; cgroup pids needs a kernel rebuild and is future work).
+//! cgroup v2 resource limits for a sandbox process tree: memory.max,
+//! cpu.weight (from cpu_shares) and pids.max (needs CONFIG_CGROUP_PIDS in
+//! the guest kernel).
 
 use std::fs;
 use std::path::PathBuf;
@@ -31,16 +31,56 @@ fn ensure_mounted() -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) struct Limits {
+    pub memory_mb: Option<u64>,
+    pub cpu_shares: Option<u64>,
+    pub procs: Option<u32>,
+}
+
 /// Move this process (and its future children) into a fresh child cgroup
-/// with memory.max = `mb`. Must run before fork so the whole tree is
-/// counted.
-pub(crate) fn apply_memory_limit(mb: u64) -> Result<(), String> {
+/// and apply the requested limits. Must run before fork so the whole tree
+/// is counted.
+pub(crate) fn apply_limits(lim: &Limits) -> Result<(), String> {
+    if lim.memory_mb.is_none() && lim.cpu_shares.is_none() && lim.procs.is_none() {
+        return Ok(());
+    }
     ensure_mounted()?;
+    enable_controllers()?;
     let dir = PathBuf::from(format!("{CGROUP_ROOT}/terra-sb-{}", std::process::id()));
     fs::create_dir(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    fs::write(dir.join("memory.max"), mb.to_string())
-        .map_err(|e| format!("write memory.max: {e}"))?;
+    if let Some(mb) = lim.memory_mb {
+        fs::write(dir.join("memory.max"), mb.to_string())
+            .map_err(|e| format!("write memory.max: {e}"))?;
+    }
+    if let Some(shares) = lim.cpu_shares {
+        // cgroup v2 cpu.weight: 1..=10000, default 100 (cpu_shares 1024).
+        let weight = (100u64 * shares / 1024).clamp(1, 10000);
+        fs::write(dir.join("cpu.weight"), weight.to_string())
+            .map_err(|e| format!("write cpu.weight: {e}"))?;
+    }
+    if let Some(p) = lim.procs {
+        fs::write(dir.join("pids.max"), p.to_string())
+            .map_err(|e| format!("write pids.max: {e} (guest kernel lacks CONFIG_CGROUP_PIDS?)"))?;
+    }
     fs::write(dir.join("cgroup.procs"), std::process::id().to_string())
         .map_err(|e| format!("join cgroup: {e}"))?;
+    Ok(())
+}
+
+/// Enable the controllers we use in the root cgroup's subtree so child
+/// cgroups can set memory/cpu/pids limits (idempotent).
+fn enable_controllers() -> Result<(), String> {
+    let existing =
+        fs::read_to_string(format!("{CGROUP_ROOT}/cgroup.subtree_control")).unwrap_or_default();
+    let mut add = String::new();
+    for c in ["memory", "cpu", "pids"] {
+        if !existing.split_whitespace().any(|w| w == c) {
+            add.push_str(&format!("+{c} "));
+        }
+    }
+    if !add.is_empty() {
+        fs::write(format!("{CGROUP_ROOT}/cgroup.subtree_control"), add.trim())
+            .map_err(|e| format!("enable cgroup controllers: {e}"))?;
+    }
     Ok(())
 }

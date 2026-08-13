@@ -52,8 +52,12 @@ pub const NATIVE_PATHS: &[&str] = &["/usr/bin/terra-confine", "/workdir/usr/bin/
 ///   seccomp supervisor; **no flag means default-deny** (unlike sandlock,
 ///   no all-deny injection is needed).
 /// - `limits.memory_mb` → `-m <n>M` (cgroup v2 memory.max).
-/// - `limits.procs` is not enforceable by terra-confine v1 (no cgroup
-///   pids controller in the guest kernel); it is intentionally ignored.
+/// - `limits.procs` → `--max-procs` (cgroup v2 pids.max; guest kernel
+///   needs CONFIG_CGROUP_PIDS).
+/// - `limits.fds` → `--max-open-files` (setrlimit RLIMIT_NOFILE).
+/// - `limits.cpu_shares` → `--cpu-shares` (cgroup v2 cpu.weight).
+/// - `limits.bandwidth_kbps` is not enforceable at the sandbox level and
+///   is rejected by the policy validator.
 /// - `File::Execute`, `Network::Inbound`, `Device` are rejected (the
 ///   engine already fails them at validate).
 pub fn wrap_for_confine(
@@ -131,6 +135,18 @@ pub fn wrap_for_confine(
         if let Some(mb) = policy.limits.memory_mb {
             argv.push("-m".into());
             argv.push(format!("{}M", mb));
+        }
+        if let Some(procs) = policy.limits.procs {
+            argv.push("--max-procs".into());
+            argv.push(procs.to_string());
+        }
+        if let Some(fds) = policy.limits.fds {
+            argv.push("--max-open-files".into());
+            argv.push(fds.to_string());
+        }
+        if let Some(shares) = policy.limits.cpu_shares {
+            argv.push("--cpu-shares".into());
+            argv.push(shares.to_string());
         }
     }
 

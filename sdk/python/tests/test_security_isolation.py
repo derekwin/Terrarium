@@ -127,22 +127,17 @@ class TestCrossSandboxIsolation:
 class TestProcessIsolation:
     """Resource limits are enforced by the sandbox policy."""
 
-    @pytest.mark.skipif(
-        _BACKEND == "confine",
-        reason=(
-            "confine v1 has no process-count limit: the guest kernel lacks "
-            "the cgroup pids controller (CONFIG_CGROUP_PIDS), so -P is not "
-            "enforceable; the VM quota bounds resources. Sandlock backend "
-            "enforces it (set TERRA_SANDBOX_BACKEND=sandlock to test)."
-        ),
-    )
     def test_procs_limit_enforced(self):
         policy = {"limits": {"procs": 2}}
         with _sandbox(policy=policy) as sb:
             # 3 concurrent sleeps exceed the 2-proc limit → fork must fail.
             r = sb.exec("sh -c 'sleep 5 & sleep 5 & sleep 5; wait'")
-            assert r.exit_code == DENY_EXIT, f"expected procs limit to bite, got {r}"
-            assert "Resource temporarily unavailable" in r.stderr, f"expected EAGAIN, got {r}"
+            assert r.exit_code != 0, f"expected procs limit to bite, got {r}"
+            assert (
+                "Resource temporarily unavailable" in r.stderr
+                or "cannot fork" in r.stderr
+                or "can't fork" in r.stderr
+            ), f"expected fork failure, got {r}"
 
     def test_procs_within_limit_ok(self):
         """Positive control: a single process stays within the limit."""

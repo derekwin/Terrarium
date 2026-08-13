@@ -153,8 +153,23 @@ fn record_deny(fd: RawFd, syscall: &str) {
 
 // ── child-side confinement ──────────────────────────────────────────────────
 fn confine_child(cfg: &Config, notif_pipe_w: RawFd) -> Result<(), String> {
-    if let Some(mb) = cfg.memory_mb {
-        cgroup::apply_memory_limit(mb)?;
+    cgroup::apply_limits(&cgroup::Limits {
+        memory_mb: cfg.memory_mb,
+        cpu_shares: cfg.cpu_shares,
+        procs: cfg.procs,
+    })?;
+    if let Some(fds) = cfg.max_open_files {
+        let lim = libc::rlimit {
+            rlim_cur: fds,
+            rlim_max: fds,
+        };
+        let ret = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) };
+        if ret != 0 {
+            return Err(format!(
+                "setrlimit(RLIMIT_NOFILE): {}",
+                std::io::Error::last_os_error()
+            ));
+        }
     }
     // Landlock restricts self (irreversible) before seccomp install.
     let _ll = LandlockGuard::install(&cfg.read_paths, &cfg.write_paths)?;
