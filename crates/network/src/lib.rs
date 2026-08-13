@@ -197,7 +197,13 @@ pub fn ensure_dhcp(bridge: &str, gateway: &str) -> Result<(), String> {
             &format!("--interface={}", bridge),
             "--bind-interfaces",
             "--except-interface=lo",
-            &format!("--dhcp-range={},12h", dhcp_range_of(gateway)),
+            // Ephemeral VMs churn fast; a 12h lease exhausted the
+            // 151-address pool after ~150 create/destroy cycles within
+            // half a day ("no address available" from dnsmasq, guests
+            // boot without eth0). A short lease (renewed silently by
+            // udhcpc while the VM lives) lets destroyed VMs' addresses
+            // return to the pool quickly.
+            &format!("--dhcp-range={},10m", dhcp_range_of(gateway)),
             // Point guests at dnsmasq itself (the NAT gateway), which
             // forwards to the host's resolver. Hardcoding public DNS
             // (8.8.8.8) breaks on hosts where outbound DNS is blocked or

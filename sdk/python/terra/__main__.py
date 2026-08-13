@@ -1232,6 +1232,7 @@ def cmd_daemon_start(args) -> int:
         "from terra.daemon import Daemon\n"
         "d = Daemon(tcp=%r, embedded=False).start()\n"
         "print(d.socket, flush=True)\n"
+        "fails = 0\n"
         "while True:\n"
         "    time.sleep(0.5)\n"
         "    try:\n"
@@ -1239,8 +1240,16 @@ def cmd_daemon_start(args) -> int:
         "        s.settimeout(1)\n"
         "        s.connect(d.socket)\n"
         "        s.close()\n"
+        "        fails = 0\n"
         "    except OSError:\n"
-        "        break\n" % (args.tcp,),
+        "        # Transient blips (a burst of concurrent creates can\n"
+        "        # momentarily refuse the heartbeat) must not kill the\n"
+        "        # service daemon. Exit only after the daemon has been\n"
+        "        # unreachable for several consecutive polls — the real\n"
+        "        # daemon_stop teardown closes the socket permanently.\n"
+        "        fails += 1\n"
+        "        if fails >= 8:\n"
+        "            break\n" % (args.tcp,),
     ]
 
     # When running via sudo, pass the original user's HOME so

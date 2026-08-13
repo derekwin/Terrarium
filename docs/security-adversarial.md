@@ -116,6 +116,36 @@ CLOEXEC，被继承进 terra-confine 再进入被约束命令：进程内可见 
 gVisor 内存数字是 Sentry 进程 RSS，需注意其 syscall 拦截的用户态 TCB
 与 KVM 硬件边界的本质差异。
 
+## 5.1 规模化密度对比（100 实例，2026-08-13）
+
+`sdk/python/tests/density_compare.py` 在同一宿主上各起 100 个长驻实例，
+测创建速率、宿主内存与并发 exec 吞吐（`docs/density-compare-2026-08-13.json`）：
+
+| 基线 | 100 实例创建 | 创建速率 | 单实例宿主内存（RSS） | 聚合 exec 吞吐 |
+|---|---|---|---|---|
+| Terrarium | 105.7 s | 0.95/s（冷启动） | **67.6 MB**（CH+virtiofsd） | **2013 exec/s**（16 并发） |
+| Docker | 30.5 s | 3.3/s | 0.6 MB（sleep 容器） | 168 exec/s（docker exec） |
+| gVisor | 1.7 s（到 sentry 就绪） | 60/s | **84.1 MB**（runsc+gofer+sentry） | n/a（do 无 exec 通道） |
+
+读法（对论文最有用的一张表）：
+- **gVisor 的每实例宿主成本（84.1 MB）高于 Terrarium（67.6 MB）**：runsc
+  do 每沙箱是 runsc wrapper + gofer + sentry 三个进程；Terrarium 是 CH +
+  virtiofsd 两个进程。加上 exec 延迟（~5ms vs 无 exec 通道）与 TCB
+  （用户态拦截 vs KVM 硬件边界），"gVisor 更轻"的常见假设在本负载下
+  不成立。
+- Docker 每实例内存极低（0.6MB），但 exec 延迟 ~78ms（docker exec 客户端
+  往返）且默认无治理（root 可改 /etc/passwd、开 raw socket）。
+- Terrarium 冷启动 ~1s/实例、聚合 2013 exec/s；暖池（`Pool.acquire`，
+  docs/benchmarks.md）把认领降到亚秒级，是规模化 RL/CI 场景的既定路径。
+
+**密度扫描暴露并修复的真实缺陷**：`tap_name` 把 VM 名截断到 9 字符，
+同前缀租户（如 `tenant-dens-0..7`）全部落到同一个 tap 设备名上，第二个
+起的 VM 的 CH 以 `Resource busy` 启动失败——批量创建被间歇打断。修复
+（`crates/adapter/cloud-hypervisor/src/process.rs`）：tap 名改为
+`<前4字符>-<16bit FNV-1a 摘要>`，15 字符内保持唯一。另修复 daemon
+keep-alive wrapper 在瞬时心跳失败时自杀的问题（连续 8 次失败才退出），
+100 实例并行创建下服务 daemon 保持存活。
+
 ## 6. 已知功能取舍（产品决策项）
 
 对抗套件同时固定了当前"默认拒绝面"的真实边界，其中三项是功能取舍而非

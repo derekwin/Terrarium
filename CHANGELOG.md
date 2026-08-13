@@ -182,6 +182,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Snapshot restore remains the full-determinism path.
 
 ### Fixed
+- **tap name collision broke same-prefix tenant bursts** — `tap_name`
+  truncated VM names to 9 chars, so tenants sharing a prefix (e.g.
+  `tenant-dens-0..7`) all got one tap; the second and later VMs failed to
+  boot with "Resource busy". Tap names now embed a 16-bit FNV-1a digest
+  of the full name (`<4 chars>-<hex>`) for uniqueness within the 15-char
+  ifname budget.
+- **daemon keep-alive wrapper killed the service under load** — the
+  `daemon start` heartbeat exited on ANY transient connect failure (a
+  burst of concurrent creates could momentarily refuse it), taking the
+  root daemon down; SDK then auto-started a rootless embedded daemon that
+  cannot do NAT. The wrapper now exits only after 8 consecutive failures.
 - **confine: seccomp listener handoff race** — the listener fd is
   close-on-exec, so a fast-exec'ing confined command could outrun the
   parent's `pidfd_getfd` and leave the filter installed with no listener

@@ -12,13 +12,30 @@ use tokio::time::{sleep, Instant};
 pub(crate) static NEXT_VSOCK_CID: AtomicU64 = AtomicU64::new(3);
 
 /// Sanitize a VM name into a kernel-safe interface name (<= 15 chars).
+///
+/// Kernel interface names are limited to 15 chars (IFNAMSIZ-1), so the
+/// full VM name cannot be used. A raw truncation to 9 chars collided for
+/// VM names sharing a 9-char prefix (e.g. tenants ``dens-0..7`` → VMs
+/// ``tenant-dens-...`` → all ``terra-tenant-de``), so the second and
+/// later VMs in a same-prefix burst failed to boot: their Cloud
+/// Hypervisor could not attach the already-owned tap ("Resource busy").
+/// Keep the first 4 sanitized chars plus a 16-bit FNV-1a digest of the
+/// full name — unique per VM within the 15-char budget
+/// (caller prepends ``terra-``; the returned suffix is 9 chars:
+/// 4 + ``-`` + 4 hex).
 pub(crate) fn tap_name(name: &str) -> String {
-    let mut t: String = name
+    let sanitized: String = name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    t.truncate(9); // "terra-" + 9 = 15 max
-    t
+    let mut digest: u32 = 0x811c_9dc5;
+    for b in name.as_bytes() {
+        digest ^= *b as u32;
+        digest = digest.wrapping_mul(0x0100_0193);
+    }
+    let head: String = sanitized.chars().take(4).collect();
+    let head = if head.is_empty() { "vm".to_string() } else { head };
+    format!("{}-{:04x}", head, digest & 0xffff)
 }
 
 /// Build the Cloud Hypervisor command-line arguments for a VM.
@@ -193,6 +210,29 @@ pub(crate) async fn wait_for_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tap_name_is_unique_for_same_prefix_bursts() {
+        // The 9-char truncation made all of these "terra-tenant-de" —
+        // the second VM in a burst failed to boot (tap Resource busy).
+        let names: Vec<String> = (0..8)
+            .map(|i| format!("tenant-dens-da5031-{i}"))
+            .collect();
+        let taps: Vec<String> = names.iter().map(|n| tap_name(n)).collect();
+        let unique: std::collections::HashSet<_> = taps.iter().collect();
+        assert_eq!(unique.len(), names.len(), "tap names must not collide: {taps:?}");
+        for t in &taps {
+            // the caller prepends "terra-" → full ifname must be ≤ 15
+            assert!(t.len() <= 9, "tap suffix too long: {t}");
+            assert!(format!("terra-{t}").len() <= 15, "tap ifname too long: terra-{t}");
+        }
+    }
+
+    #[test]
+    fn tap_name_is_deterministic() {
+        assert_eq!(tap_name("tenant-abc-1"), tap_name("tenant-abc-1"));
+        assert_ne!(tap_name("tenant-abc-1"), tap_name("tenant-abc-2"));
+    }
     use adapter_traits::VmName;
 
     fn spec(max_memory_mb: Option<u64>) -> VmSpec {
