@@ -120,8 +120,17 @@ dash 的沙箱现在都受进程限制约束。
 
 ## 已知问题
 
-- **多层（erofs + 目录层）组合 VM 启动卡**：单层（base/ubuntu/ci-terra/
-  swe）与目录+目录组合正常，但 erofs 层 + 目录层的组合在
-  `sandbox_create` 的 guest exec 处挂起（疑似 virtiofs/overlay 组合大
-  rootfs 的遍历问题）。与 sandbox 后端无关（sandbox_create 阶段即卡）。
-  待单独调查（可能需重建层或调整 virtiofs 挂载）。
+- **已修复：多层（erofs + 目录层）组合 VM 启动卡**。根因：应用层
+  （ci-terra）误带 `/bin` 目录（只有 guest-proxy），而系统层（ubuntu）
+  的 `/bin` 是指向 `/usr/bin` 的符号链接——overlay 合并时"目录 vs
+  符号链接"冲突，`/bin` 被应用层的目录整体覆盖，guest 丢失 `sh`，
+  `switch_root` 执行 `#!/bin/sh` 的 init 时 ENOENT。修复：应用层不带
+  `/bin`，guest-proxy 部署到 `/usr/bin`（经 ubuntu 的 `/bin -> /usr/bin`
+  符号链接可达），系统工具完全由系统层提供。真机验证：ci-terra+ubuntu、
+  swe-4160+ubuntu、base 单层全部正常，python 在 confine 沙箱内执行
+  通过。
+
+**层部署约定**：guest-proxy 放各层的 `/usr/bin/guest-proxy`（应用层的
+`/bin` 保持不存在，避免覆盖系统层的 `/bin` 符号链接）；terra-confine
+放 `/usr/bin/terra-confine`；sandlock（alternative）放
+`/usr/bin/sandlock`。
