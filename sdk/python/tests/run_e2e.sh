@@ -62,7 +62,7 @@ export PYTHONPATH="$REPO/sdk/python${PYTHONPATH:+:$PYTHONPATH}"
 echo "=== e2e gate: $PYTHON ==="
 echo "TERRA_HOME=$TERRA_HOME"
 
-for suite in test_e2e_real.py test_sandbox.py test_security_isolation.py; do
+for suite in test_e2e_real.py test_sandbox.py test_security_isolation.py test_adversarial_isolation.py; do
     echo
     echo "=== $suite ==="
     "$PYTHON" -m pytest "sdk/python/tests/$suite" -q

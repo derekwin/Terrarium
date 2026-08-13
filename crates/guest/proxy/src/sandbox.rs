@@ -325,6 +325,18 @@ pub fn exec_isolated(
                 if libc::fcntl(DENY_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
+                // Drop the original write end too (it survives dup2 and
+                // would otherwise leak into the confined command).
+                if deny_write != DENY_FD {
+                    libc::close(deny_write);
+                }
+                // The child must not inherit the read end of the deny
+                // pipe: the confined process could otherwise drain (DoS)
+                // or read audit records, and no confinement wrapper needs
+                // it. The parent (this process) keeps its own copy.
+                if deny_read >= 0 && deny_read != DENY_FD {
+                    libc::close(deny_read);
+                }
                 Ok(())
             });
         }

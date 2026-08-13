@@ -1,0 +1,302 @@
+{
+  "host": "sdu-232",
+  "workloads": {
+    "fs_write_system": {
+      "bare": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "sh: 1: cannot create /etc/passwd: Permission denied"
+      },
+      "docker-default": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "docker-hardened": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "sh: 1: cannot create /etc/passwd: Read-only file system"
+      },
+      "gvisor": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": "[sudo] password for liujinyao:"
+      },
+      "terra": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "sh: 1: cannot create /etc/passwd: Permission denied"
+      }
+    },
+    "fs_write_root": {
+      "bare": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "sh: 1: cannot create /root/x: Permission denied"
+      },
+      "docker-default": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "docker-hardened": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "sh: 1: cannot create /root/x: Read-only file system"
+      },
+      "gvisor": {
+        "rc": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "terra": {
+        "rc": 2,
+        "stdout": "",
+        "stderr": "sh: 1: cannot create /root/x: Permission denied"
+      }
+    },
+    "fs_read_shadow": {
+      "bare": {
+        "rc": 1,
+        "stdout": "head: cannot open '/etc/shadow' for reading: Permission denied",
+        "stderr": ""
+      },
+      "docker-default": {
+        "rc": 0,
+        "stdout": "root:*:20627:0:99999:7:::",
+        "stderr": ""
+      },
+      "docker-hardened": {
+        "rc": 0,
+        "stdout": "root:*:20627:0:99999:7:::",
+        "stderr": ""
+      },
+      "gvisor": {
+        "rc": 0,
+        "stdout": "root:*:20305:0:99999:7:::",
+        "stderr": ""
+      },
+      "terra": {
+        "rc": 0,
+        "stdout": "root:*:20494:0:99999:7:::",
+        "stderr": ""
+      }
+    },
+    "device_devmem": {
+      "bare": {
+        "rc": 1,
+        "stdout": "dd: failed to open '/dev/mem': Permission denied",
+        "stderr": ""
+      },
+      "docker-default": {
+        "rc": 1,
+        "stdout": "dd: failed to open '/dev/mem': No such file or directory",
+        "stderr": ""
+      },
+      "docker-hardened": {
+        "rc": 1,
+        "stdout": "dd: failed to open '/dev/mem': No such file or directory",
+        "stderr": ""
+      },
+      "gvisor": {
+        "rc": 1,
+        "stdout": "dd: failed to open '/dev/mem': No such file or directory",
+        "stderr": ""
+      },
+      "terra": {
+        "rc": 1,
+        "stdout": "dd: error reading '/dev/mem': Operation not permitted\n0+0 records in\n0+0 records out\n0 bytes copied, 6.3201e-05 s, 0.0 kB/s",
+        "stderr": ""
+      }
+    },
+    "proc_kcore": {
+      "bare": {
+        "rc": 1,
+        "stdout": "head: cannot open '/proc/kcore' for reading: Permission denied",
+        "stderr": ""
+      },
+      "docker-default": {
+        "rc": 1,
+        "stdout": "head: cannot open '/proc/kcore' for reading: Permission denied",
+        "stderr": ""
+      },
+      "docker-hardened": {
+        "rc": 1,
+        "stdout": "head: cannot open '/proc/kcore' for reading: Permission denied",
+        "stderr": ""
+      },
+      "gvisor": {
+        "rc": 1,
+        "stdout": "head: cannot open '/proc/kcore' for reading: No such file or directory",
+        "stderr": ""
+      },
+      "terra": {
+        "rc": 1,
+        "stdout": "head: cannot open '/proc/kcore' for reading: No such file or directory",
+        "stderr": ""
+      }
+    },
+    "net_egress_tcp": {
+      "bare": {
+        "rc": 0,
+        "stdout": "connect rc=0 errno=0 (Success)",
+        "stderr": ""
+      },
+      "docker-default": {
+        "rc": 0,
+        "stdout": "connect rc=0 errno=0 (Success)",
+        "stderr": ""
+      },
+      "docker-hardened": {
+        "rc": 1,
+        "stdout": "connect rc=-1 errno=101 (Network is unreachable)",
+        "stderr": ""
+      },
+      "gvisor": {
+        "rc": 1,
+        "stdout": "connect rc=-1 errno=101 (Network is unreachable)",
+        "stderr": ""
+      },
+      "terra": {
+        "rc": 200,
+        "stdout": "connect rc=-1 errno=1 (Operation not permitted)",
+        "stderr": ""
+      }
+    },
+    "net_egress_udp": {
+      "bare": {
+        "rc": 0,
+        "stdout": "sendto rc=4 errno=0 (Success)",
+        "stderr": ""
+      },
+      "docker-default": {
+        "rc": 0,
+        "stdout": "sendto rc=4 errno=0 (Success)",
+        "stderr": ""
+      },
+      "docker-hardened": {
+        "rc": 1,
+        "stdout": "sendto rc=-1 errno=101 (Network is unreachable)",
+        "stderr": ""
+      },
+      "gvisor": {
+        "rc": 1,
+        "stdout": "sendto rc=-1 errno=101 (Network is unreachable)",
+        "stderr": ""
+      },
+      "terra": {
+        "rc": 200,
+        "stdout": "sendto rc=-1 errno=1 (Operation not permitted)",
+        "stderr": ""
+      }
+    },
+    "net_egress_raw": {
+      "bare": {
+        "rc": 1,
+        "stdout": "raw-socket rc=-1 errno=1 (Operation not permitted)",
+        "stderr": ""
+      },
+      "docker-default": {
+        "rc": 0,
+        "stdout": "raw-socket rc=3 errno=0 (Success)\nraw-sendto rc=64 errno=0 (Success)",
+        "stderr": ""
+      },
+      "docker-hardened": {
+        "rc": 1,
+        "stdout": "raw-socket rc=-1 errno=1 (Operation not permitted)",
+        "stderr": ""
+      },
+      "gvisor": {
+        "rc": 1,
+        "stdout": "raw-socket rc=-1 errno=1 (Operation not permitted)",
+        "stderr": ""
+      },
+      "terra": {
+        "rc": 200,
+        "stdout": "raw-socket rc=3 errno=0 (Success)\nraw-sendto rc=-1 errno=1 (Operation not permitted)",
+        "stderr": ""
+      }
+    },
+    "caps": {
+      "bare": {
+        "rc": 0,
+        "stdout": "CapEff:\t0000000000000000",
+        "stderr": ""
+      },
+      "docker-default": {
+        "rc": 0,
+        "stdout": "CapEff:\t00000000a80425fb",
+        "stderr": ""
+      },
+      "docker-hardened": {
+        "rc": 0,
+        "stdout": "CapEff:\t0000000000000000",
+        "stderr": ""
+      },
+      "gvisor": {
+        "rc": 0,
+        "stdout": "CapEff:\t000001ffffffdfff",
+        "stderr": ""
+      },
+      "terra": {
+        "rc": 2,
+        "stdout": "grep: /proc/self/status: Permission denied",
+        "stderr": ""
+      }
+    },
+    "pid_visibility": {
+      "bare": {
+        "rc": 0,
+        "stdout": "1423",
+        "stderr": ""
+      },
+      "docker-default": {
+        "rc": 0,
+        "stdout": "3",
+        "stderr": ""
+      },
+      "docker-hardened": {
+        "rc": 0,
+        "stdout": "3",
+        "stderr": ""
+      },
+      "gvisor": {
+        "rc": 0,
+        "stdout": "3",
+        "stderr": ""
+      },
+      "terra": {
+        "rc": 1,
+        "stdout": "0",
+        "stderr": "ls: cannot open directory '/proc': Permission denied"
+      }
+    }
+  },
+  "perf": {
+    "bare": {
+      "cold_start_ms": 1.1524700094014406,
+      "exec_latency_ms": 0.803643666828672,
+      "per_instance_mem_mb": null
+    },
+    "docker-default": {
+      "cold_start_ms": 420.79247790388763,
+      "exec_latency_ms": 78.04905033359925,
+      "per_instance_mem_mb": 0.58203125
+    },
+    "docker-hardened": {
+      "cold_start_ms": 430.68858701735735,
+      "exec_latency_ms": 78.1581705630136,
+      "per_instance_mem_mb": 0.60546875
+    },
+    "gvisor": {
+      "cold_start_ms": 176.06340802740306,
+      "exec_latency_ms": null,
+      "per_instance_mem_mb": 34.0
+    },
+    "terra": {
+      "cold_start_ms": 1070.472217979841,
+      "exec_latency_ms": 4.747806000523269,
+      "per_instance_mem_mb": 71.23828125
+    }
+  }
+}

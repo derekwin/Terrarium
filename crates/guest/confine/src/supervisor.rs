@@ -1,7 +1,7 @@
 //! Supervisor loop: installs the confinement in a child (cgroup memory +
-//! Landlock fs + seccomp user-notify for network syscalls), then handles
-//! network-connect verdicts against the whitelist. Denials are written to
-//! the denyfd channel (guest-proxy maps them to the structured exit code).
+//! Landlock fs + seccomp user-notify for network and signal syscalls),
+//! then handles verdicts against the policy. Denials are written to the
+//! denyfd channel (guest-proxy maps them to the structured exit code).
 
 use crate::cgroup;
 use crate::landlock::LandlockGuard;
@@ -24,6 +24,13 @@ const SECCOMP_IOCTL_NOTIF_ID_VALID: u64 = (2u32 << 30 | 8u32 << 16 | 0x21u32 << 
                                                                                                // SECCOMP_USER_NOTIF_FLAG_CONTINUE — respond "proceed" without replaying
                                                                                                // the syscall (replay would re-enter the notifier and loop).
 const SECCOMP_USER_NOTIF_FLAG_CONTINUE: u32 = 1;
+
+/// fd guest-proxy hands the deny-channel write end to on exec (see
+/// crates/guest/proxy/src/sandbox.rs `DENY_FD`). The confined child must
+/// close it before exec so it cannot forge audit records; when running
+/// standalone (no SANDBOX_DENY_FD) the fd is absent and close() is a
+/// harmless EBADF.
+const DENY_FD_INHERITED: i32 = 63;
 
 #[repr(C)]
 struct SeccompData {
@@ -80,8 +87,16 @@ const NET_SYSCALLS: &[i64] = &[
     libc::SYS_sendmmsg,
 ];
 
+/// Signal syscalls the supervisor must arbitrate: the confined process
+/// runs as the same uid as its supervisor (guest root), so an untrusted
+/// command could otherwise `kill -9 $PPID` and silently remove the
+/// governance layer. The supervisor denies signals aimed at itself,
+/// init (pid 1, the VM's /init) or its own process group; everything
+/// else (signals to the sandbox's own children) passes through.
+const SIGNAL_SYSCALLS: &[i64] = &[libc::SYS_kill, libc::SYS_tkill, libc::SYS_tgkill];
+
 /// Classic BPF: load `seccomp_data.nr` and jump to USER_NOTIF for each
-/// network syscall, otherwise ALLOW.
+/// network / signal syscall, otherwise ALLOW.
 fn build_bpf() -> Vec<SockFilter> {
     // offsetof(seccomp_data, nr) == 0
     let mut insns = vec![SockFilter {
@@ -90,7 +105,7 @@ fn build_bpf() -> Vec<SockFilter> {
         jf: 0,
         k: 0,
     }];
-    for nr in NET_SYSCALLS {
+    for nr in NET_SYSCALLS.iter().chain(SIGNAL_SYSCALLS.iter()) {
         // JEQ nr: true → fall through to RET_USER_NOTIF (jt=0); false →
         // skip the RET (jf=1) to the next JEQ (or the final RET_ALLOW).
         insns.push(SockFilter {
@@ -152,7 +167,7 @@ fn record_deny(fd: RawFd, syscall: &str) {
 }
 
 // ── child-side confinement ──────────────────────────────────────────────────
-fn confine_child(cfg: &Config, notif_pipe_w: RawFd) -> Result<(), String> {
+fn confine_child(cfg: &Config, notif_pipe_w: RawFd, go_fd: RawFd) -> Result<(), String> {
     cgroup::apply_limits(&cgroup::Limits {
         memory_mb: cfg.memory_mb,
         cpu_shares: cfg.cpu_shares,
@@ -197,6 +212,16 @@ fn confine_child(cfg: &Config, notif_pipe_w: RawFd) -> Result<(), String> {
             std::io::Error::last_os_error()
         ));
     }
+    // The confined process must never retain the listener fd after exec.
+    // Explicitly force close-on-exec (some kernels may not set it) and
+    // close it on the error paths below; the parent duplicates its own
+    // copy via pidfd_getfd before the go-signal.
+    unsafe {
+        let flags = libc::fcntl(listener as RawFd, libc::F_GETFD);
+        if flags >= 0 {
+            libc::fcntl(listener as RawFd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        }
+    }
     // Pass the listener fd NUMBER to the parent over a plain pipe (write
     // only — never sendmsg, which the seccomp filter above would trap as
     // USER_NOTIF and deadlock on).
@@ -218,6 +243,26 @@ fn confine_child(cfg: &Config, notif_pipe_w: RawFd) -> Result<(), String> {
             "write notif fd: {}",
             std::io::Error::last_os_error()
         ));
+    }
+    // Deterministic listener handoff: the parent must duplicate the
+    // listener fd (via pidfd_getfd) BEFORE this child execs. The listener
+    // fd is close-on-exec, so a fast-exec'ing command could otherwise
+    // outrun the handoff and leave the filter installed with no listener
+    // — every network/signal syscall would then fail with ENOSYS and the
+    // supervisor could never audit a verdict. Block here until the parent
+    // signals that the dup succeeded (or failed; the parent kills us on
+    // failure so a broken confinement never runs).
+    let mut go = [0u8; 1];
+    unsafe {
+        let _ = libc::read(go_fd, go.as_mut_ptr() as *mut libc::c_void, 1);
+        libc::close(go_fd);
+    }
+    // Drop the deny-channel write end (fd 63, inherited from guest-proxy)
+    // in the confined child: the supervisor (parent) owns the channel.
+    // Without this the sandboxed process could forge fake deny records
+    // and pollute the audit trail.
+    unsafe {
+        let _ = libc::close(DENY_FD_INHERITED);
     }
     Ok(())
 }
@@ -263,8 +308,32 @@ fn syscall_name(nr: i64) -> &'static str {
         n if n == libc::SYS_sendto => "sendto",
         n if n == libc::SYS_sendmsg => "sendmsg",
         n if n == libc::SYS_sendmmsg => "sendmmsg",
+        n if n == libc::SYS_kill => "kill",
+        n if n == libc::SYS_tkill => "tkill",
+        n if n == libc::SYS_tgkill => "tgkill",
         _ => "net",
     }
+}
+
+/// A signal targeting the supervisor, init (pid 1) or the supervisor's
+/// own process group must be denied — the confined process shares the
+/// supervisor's uid (guest root), so without this check `kill -9 $PPID`
+/// would silently remove the governance layer. Negative pids are process
+/// groups; the whole sandbox tree (supervisor + confined command) lives
+/// in one process group created by guest-proxy, so a `kill -TERM -pgid`
+/// would also hit the supervisor.
+fn signal_allowed(notif: &SeccompNotif, supervisor_pid: i32, supervisor_pgid: i32) -> bool {
+    let target = match notif.data.nr as i64 {
+        n if n == libc::SYS_tgkill => notif.data.args[0] as i32,
+        _ => notif.data.args[0] as i32,
+    };
+    if target == supervisor_pid || target == 1 {
+        return false;
+    }
+    if target < 0 && -target == supervisor_pgid {
+        return false;
+    }
+    true
 }
 
 enum Verdict {
@@ -370,25 +439,44 @@ fn notify_valid(listener: RawFd, id: u64) -> bool {
 pub(crate) fn run(cfg: &Config) -> Result<i32, String> {
     let rules = netpolicy::parse(&cfg.net_allow)?;
     let deny_fd = deny_writer()?;
+    let supervisor_pid = unsafe { libc::getpid() };
+    let supervisor_pgid = unsafe { libc::getpgrp() };
 
-    // Plain pipe for handing the seccomp listener fd number to the
-    // supervisor (write-only; sendmsg would be trapped by the filter).
+    // Plain pipes for handing the seccomp listener fd number to the
+    // supervisor (write-only; sendmsg would be trapped by the filter)
+    // and for the supervisor's go-ahead before the child execs.
     let mut sp = [0i32; 2];
     let ret = unsafe { libc::pipe2(sp.as_mut_ptr(), libc::O_CLOEXEC) };
     if ret != 0 {
         return Err(format!("pipe2: {}", std::io::Error::last_os_error()));
     }
+    let mut gp = [0i32; 2];
+    let ret = unsafe { libc::pipe2(gp.as_mut_ptr(), libc::O_CLOEXEC) };
+    if ret != 0 {
+        unsafe {
+            libc::close(sp[0]);
+            libc::close(sp[1]);
+        }
+        return Err(format!("pipe2(go): {}", std::io::Error::last_os_error()));
+    }
 
     let pid = unsafe { libc::fork() };
     if pid < 0 {
+        unsafe {
+            libc::close(sp[0]);
+            libc::close(sp[1]);
+            libc::close(gp[0]);
+            libc::close(gp[1]);
+        }
         return Err(format!("fork: {}", std::io::Error::last_os_error()));
     }
     if pid == 0 {
         // child
         unsafe {
             libc::close(sp[0]);
+            libc::close(gp[1]);
         }
-        if let Err(e) = confine_child(cfg, sp[1]) {
+        if let Err(e) = confine_child(cfg, sp[1], gp[0]) {
             eprintln!("terra-confine child: {e}");
             unsafe { libc::_exit(1) };
         }
@@ -412,12 +500,33 @@ pub(crate) fn run(cfg: &Config) -> Result<i32, String> {
     // parent supervisor
     unsafe {
         libc::close(sp[1]);
+        libc::close(gp[0]);
     }
     let listener = recv_listener_fd(sp[0], pid);
     unsafe {
         libc::close(sp[0]);
     }
-    let listener = listener?;
+    let listener = match listener {
+        Ok(fd) => fd,
+        Err(e) => {
+            // Unblock the child, then kill it: a confinement whose
+            // listener handoff failed must never run (the filter would be
+            // active but unattended — network/signal syscalls would fail
+            // silently with no audit).
+            unsafe {
+                let _ = libc::write(gp[1], b"g".as_ptr() as *const libc::c_void, 1);
+                libc::kill(pid, libc::SIGKILL);
+                let mut status: libc::c_int = 0;
+                let _ = libc::waitpid(pid, &mut status, 0);
+                libc::close(gp[1]);
+            }
+            return Err(e);
+        }
+    };
+    unsafe {
+        let _ = libc::write(gp[1], b"g".as_ptr() as *const libc::c_void, 1);
+        libc::close(gp[1]);
+    }
 
     loop {
         let mut notif: SeccompNotif = unsafe { std::mem::zeroed() };
@@ -436,17 +545,22 @@ pub(crate) fn run(cfg: &Config) -> Result<i32, String> {
             }
             return Err(format!("NOTIF_RECV: {err}"));
         }
-        let allowed = match notif_verdict(&notif) {
-            Verdict::Allow => true,
-            Verdict::Target(ip, port) => netpolicy::allows(&rules, ip, port),
-            Verdict::Deny => false,
+        let (allowed, name) = if SIGNAL_SYSCALLS.contains(&(notif.data.nr as i64)) {
+            let ok = signal_allowed(&notif, supervisor_pid, supervisor_pgid);
+            (ok, syscall_name(notif.data.nr as i64))
+        } else {
+            let allowed = match notif_verdict(&notif) {
+                Verdict::Allow => true,
+                Verdict::Target(ip, port) => netpolicy::allows(&rules, ip, port),
+                Verdict::Deny => false,
+            };
+            (allowed, syscall_name(notif.data.nr as i64))
         };
         if allowed {
             if notify_valid(listener, notif.id) {
                 notify_send(listener, notif.id, 0, SECCOMP_USER_NOTIF_FLAG_CONTINUE);
             }
         } else {
-            let name = syscall_name(notif.data.nr as i64);
             record_deny(deny_fd, name);
             if notify_valid(listener, notif.id) {
                 notify_send(listener, notif.id, -libc::EPERM, 0);

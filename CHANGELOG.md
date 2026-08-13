@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Adversarial isolation suite (`test_adversarial_isolation.py`, 31 real-KVM
+  tests) with a static escape probe (`adversarial/probes/escape_probe.c`,
+  gcc-built, chunked-upload to the guest): Landlock bypass attempts
+  (symlink/hardlink/rename), /proc+/sys+/dev enforcement, network bypass
+  attempts (TCP/UDP/sendmsg/AF_UNIX/AF_VSOCK/raw/ping + whitelist
+  precision), resource limits (procs/fds/memory), governance-integrity
+  attacks (kill supervisor, inherited policy fds, audit forgery), L1
+  blast-radius checks (host fs/devices/audit unreachable, sibling tenants
+  isolated) and audit-query integrity. Added to `run_e2e.sh`.
+- Cross-baseline comparison harness (`compare_baselines.py`): the same
+  workload matrix on bare host / docker-default / docker-hardened /
+  gVisor(runsc) / Terrarium, plus cold-start latency, steady exec latency
+  and per-instance memory; results in
+  `docs/baseline-compare-2026-08-13.json`.
+- Paper-oriented threat model (`docs/security-threat-model.md`) and
+  adversarial-evaluation writeup (`docs/security-adversarial.md`) covering
+  the L1/L2 two-layer guarantee model, adversarial assumptions and the
+  fixed-findings loop.
+
+### Added
 - Warm-pool integration with engine sandbox entities: `sandbox_create` claims
   idle pool VMs (millisecond hot start, `pool` flag, `pool_backed` in records);
   `tenant_destroy` releases pooled VMs back to idle instead of destroying.
@@ -162,6 +182,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Snapshot restore remains the full-determinism path.
 
 ### Fixed
+- **confine: seccomp listener handoff race** — the listener fd is
+  close-on-exec, so a fast-exec'ing confined command could outrun the
+  parent's `pidfd_getfd` and leave the filter installed with no listener
+  (network syscalls silently failed ENOSYS with no deny audit). The child
+  now blocks on a go-pipe until the parent duplicated the listener fd;
+  handoff failure kills the child (fail closed, never an unattended
+  filter).
+- **confine: supervisor killable by the confined process** — the agent
+  shares the supervisor's uid (guest root); `kill -9 $PPID` could remove
+  governance. The BPF now traps kill/tgkill/tkill and the supervisor
+  denies signals aimed at itself, init (pid 1) or its process group.
+- **confine: memory.max unit bug** — `limits.memory_mb` was written as raw
+  bytes to cgroup v2 `memory.max`, capping a 64 MB limit at 64 bytes and
+  OOM-killing every process in the cgroup. Now converted to bytes.
+- **fd hygiene across the agent channel** — guest-proxy's vsock sockets
+  and the deny-pipe read end leaked into the confined process (fd 63 let
+  the sandbox forge audit records; channel sockets were reachable). vsock
+  fds are now CLOEXEC, the pre-exec closes the deny-pipe originals, and
+  the confined child closes fd 63 and forces CLOEXEC on the listener.
 - `sandbox_create` resize no longer errors when the pool VM already matches the
   requested cpus/memory (CH rejects no-op resizes).
 - SDK VM-existence probe now indexes by tenant sandbox records, so a second

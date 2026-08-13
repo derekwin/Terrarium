@@ -23,6 +23,7 @@ pub fn listen(port: u32) -> std::io::Result<i32> {
         if fd < 0 {
             return Err(Error::last_os_error());
         }
+        set_cloexec(fd);
         let addr = SockaddrVm {
             svm_family: AF_VSOCK as u16,
             svm_reserved1: 0,
@@ -58,7 +59,23 @@ pub fn accept(listen_fd: i32) -> std::io::Result<i32> {
         if fd < 0 {
             Err(Error::last_os_error())
         } else {
+            // Without CLOEXEC the accepted connection (and the listener)
+            // leak into every spawned child's fd table — including the
+            // confined command, which must never hold the agent channel
+            // or be able to fake exec responses on it.
+            set_cloexec(fd);
             Ok(fd)
+        }
+    }
+}
+
+/// Mark an fd close-on-exec (best-effort; failures are ignored because a
+/// leak is mitigated by the exec pre-exec fd sweep in `sandbox.rs`).
+fn set_cloexec(fd: i32) {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
         }
     }
 }

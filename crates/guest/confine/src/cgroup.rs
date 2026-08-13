@@ -49,7 +49,13 @@ pub(crate) fn apply_limits(lim: &Limits) -> Result<(), String> {
     let dir = PathBuf::from(format!("{CGROUP_ROOT}/terra-sb-{}", std::process::id()));
     fs::create_dir(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     if let Some(mb) = lim.memory_mb {
-        fs::write(dir.join("memory.max"), mb.to_string())
+        // cgroup v2 memory.max is in BYTES; the policy's memory_mb is
+        // megabytes. Writing the raw number would cap the cgroup at a few
+        // bytes and OOM-kill the very first allocation.
+        let bytes = mb
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| format!("memory_mb {mb} overflows bytes"))?;
+        fs::write(dir.join("memory.max"), bytes.to_string())
             .map_err(|e| format!("write memory.max: {e}"))?;
     }
     if let Some(shares) = lim.cpu_shares {

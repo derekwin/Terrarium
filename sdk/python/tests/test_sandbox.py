@@ -19,6 +19,9 @@ import pytest
 from terra.sandbox import Sandbox
 
 
+DENY_EXIT_CODE = 200  # SANDBOX_DENY_EXIT_CODE — structured deny signal
+
+
 def teardown_module():
     """Destroy tenant VMs and pool VMs created by the suite.
 
@@ -335,13 +338,12 @@ class TestSandboxPolicy:
             Sandbox.destroy_tenant(tenant)
 
     def test_net_allow_live_egress(self):
-        """Network Outbound capability: deny-by-default egress (requires NAT → root daemon).
+        """Network Outbound capability: deny-by-default egress.
 
-        Skips unless a root daemon is running (NAT needs CAP_NET_ADMIN on
-        the terra0 bridge). Run it manually with a root daemon::
-
-            sudo terra daemon start
-            python3 -m pytest sdk/python/tests/test_sandbox.py::TestSandboxPolicy::test_net_allow_live_egress -v
+        Uses a fixed LAN target (no public DNS needed — the sandbox's own
+        DNS queries are NOT whitelisted, so hostname targets cannot be
+        resolved from inside the sandbox by design). Skips unless a root
+        daemon is running (NAT needs CAP_NET_ADMIN on the terra0 bridge).
         """
         tenant = f"polnet{uuid4().hex[:6]}"
         try:
@@ -356,23 +358,23 @@ class TestSandboxPolicy:
             allow = {
                 "capabilities": [
                     {"Network": {
-                        "endpoint": {"host": "mirrors.aliyun.com", "port": 443},
+                        "endpoint": {"host": "10.102.0.254", "port": 80},
                         "direction": "Outbound",
                     }},
                 ]
             }
             r = sb.exec(
-                ["wget", "-q", "-T", "10", "-O", "/dev/null",
-                 "https://mirrors.aliyun.com/alpine/"],
+                ["wget", "-q", "-T", "10", "-O", "/tmp/w",
+                 "http://10.102.0.254:80/"],
                 policy=allow,
             )
-            assert r.exit_code == 0, f"allowed host failed: {r.stderr!r}"
+            assert "404" in r.stderr, f"allowed host failed: {r.stderr!r}"
             r = sb.exec(
-                ["wget", "-q", "-T", "10", "-O", "/dev/null",
-                 "https://example.com/"],
+                ["wget", "-q", "-T", "10", "-O", "/tmp/w",
+                 "http://192.168.2.1:80/"],
                 policy=allow,
             )
-            assert r.exit_code != 0, "unlisted host should be denied"
+            assert r.exit_code == DENY_EXIT_CODE, "unlisted host should be denied"
         finally:
             sb.kill()
             Sandbox.destroy_tenant(tenant)

@@ -18,3 +18,6 @@ build/
 
 # Built .so files in SDK (from editable installs)
 sdk/python/*.so
+
+# Built adversarial escape probe (rebuilt by build-probes.sh)
+sdk/python/tests/adversarial/probes/escape_probe
