@@ -101,13 +101,13 @@ sandlock 的 supervisor 只拦截 clone/clone3/vfork——busybox ash 用
 拦截集，复用 `handle_fork` 的计数逻辑（超限返回 EAGAIN）。busybox 与
 dash 的沙箱现在都受进程限制约束。
 
-## Native 后端（默认）：terra-sandbox
+## Native 后端（默认）：terra-confine
 
-默认 L2 后端已切换为自研 `terra-sandbox`（`crates/guest-sandbox` +
-`crates/adapter/native`），sandlock 保留为 alternative（engine
+默认 L2 后端已切换为自研 `terra-confine`（`crates/guest/confine` +
+`crates/adapter/confine`），sandlock 保留为 alternative（engine
 `--features sandlock`）。选型与 sandlock 的关键差异：
 
-| 能力 | native（terra-sandbox） | sandlock（alternative） |
+| 能力 | native（terra-confine） | sandlock（alternative） |
 |---|---|---|
 | 文件系统 | **Landlock 静态**（内核执行，~1.3×，无 deny 审计） | supervisor 观察（4.6×，denyfd 审计） |
 | 网络 | seccomp-notify 白名单/默认拒绝（低频，denyfd 审计） | Landlock/supervisor |

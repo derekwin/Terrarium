@@ -37,12 +37,12 @@ const DENY_FD: i32 = 63;
 /// ("/workdir/usr/bin/sandlock").
 pub const SANDLOCK_PATHS: &[&str] = &["/usr/bin/sandlock", "/workdir/usr/bin/sandlock"];
 
-/// Native backend (terra-sandbox) probe paths, mirroring sandlock's
+/// Native backend (terra-confine) probe paths, mirroring sandlock's
 /// cold-boot vs pool-boot split.
-pub const NATIVE_PATHS: &[&str] = &["/usr/bin/terra-sandbox", "/workdir/usr/bin/terra-sandbox"];
+pub const NATIVE_PATHS: &[&str] = &["/usr/bin/terra-confine", "/workdir/usr/bin/terra-confine"];
 
-/// Build the terra-sandbox argv wrapping `args`, translating the policy
-/// into `[terra-sandbox, run, -r/-w grants, --net-allow, -m, -w workdir,
+/// Build the terra-confine argv wrapping `args`, translating the policy
+/// into `[terra-confine, run, -r/-w grants, --net-allow, -m, -w workdir,
 /// --, args...]`.
 ///
 /// Semantics (native backend):
@@ -52,11 +52,11 @@ pub const NATIVE_PATHS: &[&str] = &["/usr/bin/terra-sandbox", "/workdir/usr/bin/
 ///   seccomp supervisor; **no flag means default-deny** (unlike sandlock,
 ///   no all-deny injection is needed).
 /// - `limits.memory_mb` → `-m <n>M` (cgroup v2 memory.max).
-/// - `limits.procs` is not enforceable by terra-sandbox v1 (no cgroup
+/// - `limits.procs` is not enforceable by terra-confine v1 (no cgroup
 ///   pids controller in the guest kernel); it is intentionally ignored.
 /// - `File::Execute`, `Network::Inbound`, `Device` are rejected (the
 ///   engine already fails them at validate).
-pub fn wrap_for_native(
+pub fn wrap_for_confine(
     args: &[String],
     work_dir: &str,
     policy: Option<&SandboxPolicy>,
@@ -64,7 +64,7 @@ pub fn wrap_for_native(
 ) -> Result<Vec<String>, String> {
     let ts = NATIVE_PATHS.iter().find(|p| exists(p)).ok_or_else(|| {
         format!(
-            "sandbox requested but terra-sandbox not present in image (probed {})",
+            "sandbox requested but terra-confine not present in image (probed {})",
             NATIVE_PATHS.join(", ")
         )
     })?;

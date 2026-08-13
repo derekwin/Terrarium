@@ -25,13 +25,13 @@ from terra.sandbox import Sandbox
 
 DENY_EXIT = 200  # SANDBOX_DENY_EXIT_CODE — structured deny signal
 
-_BACKEND = os.environ.get("TERRA_SANDBOX_BACKEND", "native")
+_BACKEND = os.environ.get("TERRA_SANDBOX_BACKEND", "confine")
 
 
 def _assert_fs_denied(r, what: str):
     """FS denial semantics: nonzero + permission error.
 
-    The native backend enforces the filesystem statically (Landlock), so a
+    The confine backend enforces the filesystem statically (Landlock), so a
     denial is the kernel's EACCES (exit != 0), not the structured 200 that
     the sandlock supervisor emits. Both must reject; only the signal
     differs.
@@ -128,9 +128,9 @@ class TestProcessIsolation:
     """Resource limits are enforced by the sandbox policy."""
 
     @pytest.mark.skipif(
-        _BACKEND == "native",
+        _BACKEND == "confine",
         reason=(
-            "native v1 has no process-count limit: the guest kernel lacks "
+            "confine v1 has no process-count limit: the guest kernel lacks "
             "the cgroup pids controller (CONFIG_CGROUP_PIDS), so -P is not "
             "enforceable; the VM quota bounds resources. Sandlock backend "
             "enforces it (set TERRA_SANDBOX_BACKEND=sandlock to test)."

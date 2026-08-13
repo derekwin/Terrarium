@@ -30,10 +30,10 @@ pub fn default_sandbox_adapter() -> Box<dyn SandboxAdapter> {
     }
     #[cfg(not(feature = "sandlock"))]
     {
-        // Default L2 backend: the native terra-sandbox confinement
+        // Default L2 backend: the native terra-confine confinement
         // (Landlock fs + seccomp network supervision + cgroup). Enable the
         // "sandlock" feature to use the sandlock alternative instead.
-        Box::new(adapter_native::GuestNativeAdapter::new())
+        Box::new(adapter_confine::GuestConfineAdapter::new())
     }
 }
 
@@ -157,7 +157,7 @@ mod default_sandbox_backend_tests {
             limits: Default::default(),
             policy: None,
         };
-        // The default backend is the native terra-sandbox adapter; it
+        // The default backend is the native terra-confine adapter; it
         // requires a complete policy (the engine injects its default).
         let result = block_on_current_thread(backend.create(Arc::new(DeadHandle), &spec));
         let err = match result {

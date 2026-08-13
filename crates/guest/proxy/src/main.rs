@@ -271,7 +271,7 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
 
     let result = if use_sandbox {
         // Pick the L2 backend: explicit "native" / "sandlock" from the
-        // adapter, else probe for terra-sandbox first (native is the
+        // adapter, else probe for terra-confine first (confine is the
         // default backend). Hard error when the chosen binary is absent —
         // never silently fall back to unsandboxed execution.
         let exists = |p: &str| std::path::Path::new(p).exists();
@@ -282,10 +282,11 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
             }
             // native is the default backend; probe for it when no explicit
             // backend came over the wire (older engine ↔ new guest-proxy).
-            Some("native") | None if native_present => {
-                sandbox::wrap_for_native(&args, work_dir, policy.as_ref(), &exists)
+            // "native" accepted for older engines that predate the rename.
+            Some("confine") | Some("native") | None if native_present => {
+                sandbox::wrap_for_confine(&args, work_dir, policy.as_ref(), &exists)
             }
-            Some("native") | None => {
+            Some("confine") | Some("native") | None => {
                 sandbox::wrap_for_sandbox(&args, work_dir, policy.as_ref(), &exists)
             }
             Some(other) => {

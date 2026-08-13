@@ -1,11 +1,11 @@
 [package]
-name = "guest-sandbox"
+name = "guest-confine"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
 [[bin]]
-name = "terra-sandbox"
+name = "terra-confine"
 path = "src/main.rs"
 
 [dependencies]

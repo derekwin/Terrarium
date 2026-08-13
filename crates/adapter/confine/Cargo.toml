@@ -1,5 +1,5 @@
 [package]
-name = "adapter-native"
+name = "adapter-confine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

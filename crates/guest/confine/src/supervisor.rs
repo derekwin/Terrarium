@@ -374,7 +374,7 @@ pub(crate) fn run(cfg: &Config) -> Result<i32, String> {
             libc::close(sp[0]);
         }
         if let Err(e) = confine_child(cfg, sp[1]) {
-            eprintln!("terra-sandbox child: {e}");
+            eprintln!("terra-confine child: {e}");
             unsafe { libc::_exit(1) };
         }
         let argv: Vec<std::ffi::CString> = cfg
@@ -389,7 +389,7 @@ pub(crate) fn run(cfg: &Config) -> Result<i32, String> {
             // absolute path).
             libc::execvp(c_args[0], c_args.as_ptr());
             let e = std::io::Error::last_os_error();
-            eprintln!("terra-sandbox exec: {e}");
+            eprintln!("terra-confine exec: {e}");
             libc::_exit(127);
         }
     }

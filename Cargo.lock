@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "adapter-native"
+name = "adapter-confine"
 version = "0.1.0"
 dependencies = [
  "adapter-traits",
@@ -93,7 +93,7 @@ name = "engine"
 version = "0.1.0"
 dependencies = [
  "adapter-cloud-hypervisor",
- "adapter-native",
+ "adapter-confine",
  "adapter-sandlock",
  "adapter-traits",
  "async-trait",
@@ -160,6 +160,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "guest-confine"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "guest-proxy"
 version = "0.1.0"
 dependencies = [
@@ -169,13 +176,6 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "guest-sandbox"
-version = "0.1.0"
-dependencies = [
- "libc",
 ]
 
 [[package]]

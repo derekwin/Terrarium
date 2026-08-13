@@ -229,7 +229,7 @@ pub struct ExecOpts {
     /// Capability-based sandbox policy for this exec (only meaningful with
     /// `sandbox`). See [`SandboxPolicy`].
     pub policy: Option<SandboxPolicy>,
-    /// L2 confinement backend in the guest: "native" (terra-sandbox,
+    /// L2 confinement backend in the guest: "confine" (terra-confine,
     /// default) or "sandlock" (alternative). The guest-proxy picks the
     /// wrapper binary from this; `None` falls back to probing.
     pub backend: Option<String>,

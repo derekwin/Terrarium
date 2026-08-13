@@ -1,12 +1,12 @@
 //! Default L2 backend: Terraarium's native guest confinement
-//! (`terra-sandbox` — Landlock fs + seccomp network supervision + cgroup),
+//! (`terra-confine` — Landlock fs + seccomp network supervision + cgroup),
 //! exposed through the [`SandboxAdapter`] contract.
 //!
 //! Like the sandlock adapter this is a thin host-side wrapper: `create`
 //! binds a VM plus its effective policy into a session; `exec` runs the
 //! command via [`VmHandle::exec`] with `sandbox: true`, the bound policy,
-//! and `backend: "native"` so the guest-proxy wraps the command with
-//! `terra-sandbox` instead of the sandlock binary.
+//! and `backend: "confine"` so the guest-proxy wraps the command with
+//! `terra-confine` instead of the sandlock binary.
 
 use std::sync::Arc;
 
@@ -16,12 +16,12 @@ use adapter_traits::{
 };
 use async_trait::async_trait;
 
-/// Native guest-sandbox backend: wraps the engine's guest `terra-sandbox`
+/// Native guest-confine backend: wraps the engine's guest `terra-confine`
 /// exec path. Stateless — each `create` produces a bound [`SandboxHandle`].
 #[derive(Default)]
-pub struct GuestNativeAdapter;
+pub struct GuestConfineAdapter;
 
-impl GuestNativeAdapter {
+impl GuestConfineAdapter {
     pub fn new() -> Self {
         Self
     }
@@ -36,7 +36,7 @@ struct GuestNativeHandle {
 }
 
 #[async_trait]
-impl SandboxAdapter for GuestNativeAdapter {
+impl SandboxAdapter for GuestConfineAdapter {
     async fn create(
         &self,
         vm: Arc<dyn VmHandle>,
@@ -44,7 +44,7 @@ impl SandboxAdapter for GuestNativeAdapter {
     ) -> Result<Box<dyn SandboxHandle>, AdapterError> {
         let policy = spec.policy.clone().ok_or_else(|| {
             AdapterError::invalid_argument(
-                "GuestNativeAdapter::create requires spec.policy (effective policy)",
+                "GuestConfineAdapter::create requires spec.policy (effective policy)",
             )
         })?;
         if let Err(err) = policy.validate() {
@@ -67,7 +67,7 @@ impl SandboxHandle for GuestNativeHandle {
 
         let mut opts =
             ExecOpts::new(cmd.args.clone(), cmd.timeout_secs.unwrap_or(60)).with_sandbox(true);
-        opts = opts.with_backend("native");
+        opts = opts.with_backend("confine");
         if let Some(work_dir) = &cmd.work_dir {
             opts = opts.with_work_dir(work_dir.clone());
         }
@@ -162,7 +162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_routes_through_native_backend_with_policy() {
+    async fn exec_routes_through_confine_backend_with_policy() {
         let mock = MockVmHandle::new();
         let exec_log = mock.exec_log();
         let vm: Arc<dyn VmHandle> = Arc::new(mock);
@@ -184,7 +184,7 @@ mod tests {
             limits: ResourceLimits::default(),
             policy: Some(policy.clone()),
         };
-        let handle = GuestNativeAdapter::new().create(vm, &spec).await.unwrap();
+        let handle = GuestConfineAdapter::new().create(vm, &spec).await.unwrap();
 
         let cmd = ExecCommand {
             args: vec!["echo".into(), "hi".into()],
@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].args, vec!["echo".to_string(), "hi".to_string()]);
         assert!(log[0].sandbox);
-        assert_eq!(log[0].backend.as_deref(), Some("native"));
+        assert_eq!(log[0].backend.as_deref(), Some("confine"));
         assert_eq!(log[0].policy.as_ref().unwrap().capabilities.len(), 1);
     }
 }

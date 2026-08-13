@@ -2,13 +2,13 @@
 resolver = "2"
 members = [
     "crates/engine",
-    "crates/guest-proxy",
-    "crates/guest-sandbox",
+    "crates/guest/proxy",
+    "crates/guest/confine",
     "crates/mcp",
     "crates/adapter/traits",
     "crates/adapter/cloud-hypervisor",
     "crates/adapter/sandlock",
-    "crates/adapter/native",
+    "crates/adapter/confine",
     "crates/network",
     "crates/protocol",
     "crates/fs",

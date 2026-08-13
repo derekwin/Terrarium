@@ -1,4 +1,4 @@
-//! terra-sandbox — Terrarium's native in-guest sandbox (SandboxAdapter L2).
+//! terra-confine — Terrarium's native in-guest confinement (SandboxAdapter L2).
 //!
 //! Runs a command confined by:
 //! - **Landlock** (static, kernel-enforced): default-deny filesystem with
@@ -15,7 +15,7 @@
 //! alternative via the guest-proxy backend selection.
 //!
 //! CLI (mirrors sandlock's shape so guest-proxy stays symmetric):
-//!   terra-sandbox run [-r path] [-w path] [--net-allow host[:port]]
+//!   terra-confine run [-r path] [-w path] [--net-allow host[:port]]
 //!                     [-m <n>M] -w <workdir> -- <cmd...>
 
 mod cgroup;
@@ -81,14 +81,14 @@ fn main() -> ExitCode {
     let cfg = match parse_args() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("terra-sandbox: {e}");
+            eprintln!("terra-confine: {e}");
             return ExitCode::from(2);
         }
     };
     match supervisor::run(&cfg) {
         Ok(code) => ExitCode::from(code as u8),
         Err(e) => {
-            eprintln!("terra-sandbox: {e}");
+            eprintln!("terra-confine: {e}");
             ExitCode::from(1)
         }
     }
