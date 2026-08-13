@@ -57,7 +57,10 @@ def _chmod_x(path: Path) -> None:
 def _download(url: str, dest: Path) -> None:
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     try:
-        urllib.request.urlretrieve(url, tmp)
+        # urlretrieve has no timeout — a dead endpoint hangs daemon startup
+        # forever. Download via urlopen with a hard cap instead.
+        with urllib.request.urlopen(url, timeout=30) as resp, open(tmp, "wb") as f:
+            shutil.copyfileobj(resp, f)
         _chmod_x(tmp)
         tmp.replace(dest)
     except Exception as e:  # noqa: BLE001

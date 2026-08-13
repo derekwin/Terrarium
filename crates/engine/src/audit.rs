@@ -94,6 +94,11 @@ fn append_persisted(record: &AuditRecord) {
             return;
         }
     };
+    // D4: a root-launched daemon leaves root-owned 0600 files that the
+    // operator cannot read. sudo exports SUDO_UID/SUDO_GID — hand the
+    // audit file to the launching user so ops can inspect it without
+    // root (root keeps writing it: root can write anything).
+    chown_to_launcher(&path);
     match serde_json::to_string(record) {
         Ok(line) => {
             if let Err(e) = writeln!(file, "{}", line).and_then(|_| file.flush()) {
@@ -101,6 +106,19 @@ fn append_persisted(record: &AuditRecord) {
             }
         }
         Err(e) => tracing::warn!(error = %e, "audit persist serialize failed"),
+    }
+}
+
+fn chown_to_launcher(path: &std::path::Path) {
+    use std::os::unix::fs::chown;
+    let uid = std::env::var("SUDO_UID")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok());
+    let gid = std::env::var("SUDO_GID")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok());
+    if let (Some(uid), Some(gid)) = (uid, gid) {
+        let _ = chown(path, Some(uid), Some(gid));
     }
 }
 
