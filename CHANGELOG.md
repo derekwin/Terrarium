@@ -193,6 +193,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   burst of concurrent creates could momentarily refuse it), taking the
   root daemon down; SDK then auto-started a rootless embedded daemon that
   cannot do NAT. The wrapper now exits only after 8 consecutive failures.
+- **ebtables isolation rule was never idempotent** — `ebtables -C` does
+  not match rules added with interface wildcards (`-i terra-+`), so every
+  net-enabled VM appended a duplicate DROP rule and the FORWARD chain grew
+  without bound (545 copies observed). `ensure_vm_isolation` now probes
+  the table listing; 3 net VMs → exactly 1 rule.
+- **dnsmasq lease exhaustion under VM churn** — the 12h lease time filled
+  the 151-address pool after ~150 create/destroy cycles and new guests
+  booted without eth0 ("no address available"). Lease time is now 10m so
+  destroyed VMs' addresses return to the pool quickly.
 - **confine: seccomp listener handoff race** — the listener fd is
   close-on-exec, so a fast-exec'ing confined command could outrun the
   parent's `pidfd_getfd` and leave the filter installed with no listener

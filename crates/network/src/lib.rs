@@ -65,14 +65,18 @@ fn run_ebtables(args: &[&str]) -> Result<(), String> {
 /// while VM↔host traffic (gateway, DHCP/ARP to the bridge port) keeps
 /// working. The `+` suffix is ebtables' interface-prefix wildcard.
 pub fn ensure_vm_isolation() -> Result<(), String> {
-    let check = [
-        "-C", "FORWARD", "-i", "terra-+", "-o", "terra-+", "-j", "DROP",
-    ];
-    let exists = Command::new("ebtables")
-        .args(check)
+    // ebtables -C does NOT match rules added with interface wildcards
+    // ("-i terra-+" returns "rule not found" even when the rule exists),
+    // so a -C-based probe would append a duplicate on every net-up and
+    // grow the FORWARD chain without bound (observed: 545 copies).
+    // Probe the table listing instead.
+    let listing = Command::new("ebtables")
+        .args(["-L", "FORWARD"])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .map_err(|e| format!("ebtables -L FORWARD: {}", e))?;
+    let exists = String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .any(|l| l.contains("terra-+") && l.contains("DROP"));
     if !exists {
         run_ebtables(&[
             "-A", "FORWARD", "-i", "terra-+", "-o", "terra-+", "-j", "DROP",
