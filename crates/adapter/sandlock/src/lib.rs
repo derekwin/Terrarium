@@ -77,6 +77,7 @@ impl SandboxHandle for GuestSandlockHandle {
         // engine's exec default).
         let mut opts =
             ExecOpts::new(cmd.args.clone(), cmd.timeout_secs.unwrap_or(60)).with_sandbox(true);
+        opts = opts.with_backend("sandlock");
         if let Some(work_dir) = &cmd.work_dir {
             opts = opts.with_work_dir(work_dir.clone());
         }

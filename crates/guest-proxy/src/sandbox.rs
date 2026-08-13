@@ -37,6 +37,118 @@ const DENY_FD: i32 = 63;
 /// ("/workdir/usr/bin/sandlock").
 pub const SANDLOCK_PATHS: &[&str] = &["/usr/bin/sandlock", "/workdir/usr/bin/sandlock"];
 
+/// Native backend (terra-sandbox) probe paths, mirroring sandlock's
+/// cold-boot vs pool-boot split.
+pub const NATIVE_PATHS: &[&str] = &["/usr/bin/terra-sandbox", "/workdir/usr/bin/terra-sandbox"];
+
+/// Build the terra-sandbox argv wrapping `args`, translating the policy
+/// into `[terra-sandbox, run, -r/-w grants, --net-allow, -m, -w workdir,
+/// --, args...]`.
+///
+/// Semantics (native backend):
+/// - Landlock fs: `-r` read-only grants, `-w` read-write grants; a path
+///   not granted is denied by the kernel (zero per-syscall overhead).
+/// - Network: `--net-allow host[:port]` whitelist, enforced by the
+///   seccomp supervisor; **no flag means default-deny** (unlike sandlock,
+///   no all-deny injection is needed).
+/// - `limits.memory_mb` → `-m <n>M` (cgroup v2 memory.max).
+/// - `limits.procs` is not enforceable by terra-sandbox v1 (no cgroup
+///   pids controller in the guest kernel); it is intentionally ignored.
+/// - `File::Execute`, `Network::Inbound`, `Device` are rejected (the
+///   engine already fails them at validate).
+pub fn wrap_for_native(
+    args: &[String],
+    work_dir: &str,
+    policy: Option<&SandboxPolicy>,
+    exists: impl Fn(&str) -> bool,
+) -> Result<Vec<String>, String> {
+    let ts = NATIVE_PATHS.iter().find(|p| exists(p)).ok_or_else(|| {
+        format!(
+            "sandbox requested but terra-sandbox not present in image (probed {})",
+            NATIVE_PATHS.join(", ")
+        )
+    })?;
+    let mut argv = vec![ts.to_string(), "run".to_string()];
+    let mut wants_dev = false;
+
+    if let Some(policy) = policy {
+        if policy.default == DefaultAccess::Allow {
+            return Err("DefaultAccess::Allow is not allowed".into());
+        }
+        for cap in &policy.capabilities {
+            match cap {
+                Capability::File { path, access } => {
+                    let (flag, path_str) = match (path, access) {
+                        (PathPattern::Prefix(p) | PathPattern::Exact(p), FileAccess::Read) => {
+                            ("-r", p.to_string_lossy())
+                        }
+                        (PathPattern::Prefix(p) | PathPattern::Exact(p), FileAccess::ReadWrite) => {
+                            ("-w", p.to_string_lossy())
+                        }
+                        (_, FileAccess::Execute) => {
+                            return Err("Execute capability not supported by this backend".into());
+                        }
+                    };
+                    let is_dev = path_str.starts_with("/dev/");
+                    if exists(&path_str) {
+                        argv.push(flag.into());
+                        argv.push(path_str.into_owned());
+                        // Landlock grants are directory-scoped — a device
+                        // grant like /dev/urandom or /dev/null cannot be
+                        // expressed exactly. When the policy asks for any
+                        // /dev device, widen to a read-only /dev (the guest
+                        // kernel has STRICT_DEVMEM, so /dev/mem etc. stay
+                        // kernel-restricted; block devices don't exist in
+                        // the virtiofs guest).
+                        if is_dev {
+                            wants_dev = true;
+                        }
+                    }
+                }
+                Capability::Network {
+                    endpoint,
+                    direction,
+                } => match direction {
+                    Direction::Outbound => {
+                        let entry = match endpoint.port {
+                            Some(port) => format!("{}:{}", endpoint.host, port),
+                            None => endpoint.host.clone(),
+                        };
+                        argv.push("--net-allow".into());
+                        argv.push(entry);
+                    }
+                    Direction::Inbound => {
+                        return Err(
+                            "Inbound network capability not supported by this backend".into()
+                        );
+                    }
+                },
+                Capability::Device { .. } => {
+                    return Err("Device capability not supported by this backend".into());
+                }
+            }
+        }
+        if let Some(mb) = policy.limits.memory_mb {
+            argv.push("-m".into());
+            argv.push(format!("{}M", mb));
+        }
+    }
+
+    if wants_dev && exists("/dev") {
+        argv.push("-r".into());
+        argv.push("/dev".into());
+    }
+
+    if exists(work_dir) {
+        argv.push("-w".into());
+        argv.push(work_dir.to_string());
+    }
+
+    argv.push("--".into());
+    argv.extend(args.iter().cloned());
+    Ok(argv)
+}
+
 /// Build the sandlock argv wrapping `args`, translating the policy's
 /// capability set into sandlock flags (D3), i.e.
 /// `[sandlock, run, <policy flags>, <limits>, -w work_dir, --, args...]`.

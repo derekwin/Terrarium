@@ -1,0 +1,12 @@
+[package]
+name = "adapter-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+adapter-traits = { path = "../traits", version = "0.1.0" }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

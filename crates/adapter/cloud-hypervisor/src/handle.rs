@@ -267,6 +267,9 @@ impl VmHandle for ChVmHandle {
         if let Some(exec_id) = &opts.exec_id {
             req["exec_id"] = serde_json::Value::String(exec_id.to_string());
         }
+        if let Some(backend) = &opts.backend {
+            req["backend"] = serde_json::Value::String(backend.to_string());
+        }
         if let Some(policy) = &opts.policy {
             req["policy"] = serde_json::to_value(policy)
                 .map_err(|e| AdapterError::internal(format!("serialize policy: {}", e)))?;

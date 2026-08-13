@@ -270,11 +270,31 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
     };
 
     let result = if use_sandbox {
-        // Hard error when sandlock is absent — never silently fall back
-        // to unsandboxed execution.
-        match sandbox::wrap_for_sandbox(&args, work_dir, policy.as_ref(), |p| {
-            std::path::Path::new(p).exists()
-        }) {
+        // Pick the L2 backend: explicit "native" / "sandlock" from the
+        // adapter, else probe for terra-sandbox first (native is the
+        // default backend). Hard error when the chosen binary is absent —
+        // never silently fall back to unsandboxed execution.
+        let exists = |p: &str| std::path::Path::new(p).exists();
+        let native_present = sandbox::NATIVE_PATHS.iter().any(|p| exists(p));
+        let wrapped = match cmd["backend"].as_str() {
+            Some("sandlock") => {
+                sandbox::wrap_for_sandbox(&args, work_dir, policy.as_ref(), &exists)
+            }
+            // native is the default backend; probe for it when no explicit
+            // backend came over the wire (older engine ↔ new guest-proxy).
+            Some("native") | None if native_present => {
+                sandbox::wrap_for_native(&args, work_dir, policy.as_ref(), &exists)
+            }
+            Some("native") | None => {
+                sandbox::wrap_for_sandbox(&args, work_dir, policy.as_ref(), &exists)
+            }
+            Some(other) => {
+                let resp = serde_json::json!({"status": "error", "message": format!("unknown sandbox backend: {other}")});
+                let _ = writeln!(stream, "{}", resp);
+                return;
+            }
+        };
+        match wrapped {
             Ok(argv) => sandbox::exec_isolated(&argv[0], &argv, work_dir, timeout, exec_id, true)
                 .map(sandbox::classify_sandlock_result),
             Err(e) => Err(e),

@@ -30,7 +30,10 @@ pub fn default_sandbox_adapter() -> Box<dyn SandboxAdapter> {
     }
     #[cfg(not(feature = "sandlock"))]
     {
-        Box::new(UnavailableSandboxAdapter)
+        // Default L2 backend: the native terra-sandbox confinement
+        // (Landlock fs + seccomp network supervision + cgroup). Enable the
+        // "sandlock" feature to use the sandlock alternative instead.
+        Box::new(adapter_native::GuestNativeAdapter::new())
     }
 }
 
@@ -117,7 +120,7 @@ mod default_sandbox_backend_tests {
 
     #[cfg(not(feature = "sandlock"))]
     #[test]
-    fn unavailable_backend_reports_a_clear_error() {
+    fn default_backend_is_native() {
         struct DeadHandle;
         #[async_trait::async_trait]
         impl adapter_traits::VmHandle for DeadHandle {
@@ -154,19 +157,17 @@ mod default_sandbox_backend_tests {
             limits: Default::default(),
             policy: None,
         };
+        // The default backend is the native terra-sandbox adapter; it
+        // requires a complete policy (the engine injects its default).
         let result = block_on_current_thread(backend.create(Arc::new(DeadHandle), &spec));
         let err = match result {
             Err(e) => e,
-            Ok(_) => panic!("unavailable backend must fail create"),
+            Ok(_) => panic!("create without policy must fail"),
         };
         assert!(matches!(
             &err,
-            adapter_traits::AdapterError::NotSupported(_)
+            adapter_traits::AdapterError::InvalidArgument(_)
         ));
-        // `AdapterError`'s Display prefixes the variant ("not supported: …").
-        assert!(err
-            .to_string()
-            .contains(UnavailableSandboxAdapter::ERROR_MESSAGE));
     }
 
     #[cfg(not(feature = "sandlock"))]

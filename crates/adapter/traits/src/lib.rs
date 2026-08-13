@@ -229,6 +229,10 @@ pub struct ExecOpts {
     /// Capability-based sandbox policy for this exec (only meaningful with
     /// `sandbox`). See [`SandboxPolicy`].
     pub policy: Option<SandboxPolicy>,
+    /// L2 confinement backend in the guest: "native" (terra-sandbox,
+    /// default) or "sandlock" (alternative). The guest-proxy picks the
+    /// wrapper binary from this; `None` falls back to probing.
+    pub backend: Option<String>,
 }
 
 impl ExecOpts {
@@ -256,6 +260,12 @@ impl ExecOpts {
     /// Builder: register the exec under this id (for `kill_exec`).
     pub fn with_exec_id(mut self, exec_id: impl Into<String>) -> Self {
         self.exec_id = Some(exec_id.into());
+        self
+    }
+
+    /// Builder: select the guest-side confinement backend.
+    pub fn with_backend(mut self, backend: impl Into<String>) -> Self {
+        self.backend = Some(backend.into());
         self
     }
 }

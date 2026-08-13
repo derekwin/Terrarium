@@ -20,6 +20,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "adapter-native"
+version = "0.1.0"
+dependencies = [
+ "adapter-traits",
+ "async-trait",
+ "tokio",
+]
+
+[[package]]
 name = "adapter-sandlock"
 version = "0.1.0"
 dependencies = [
@@ -84,6 +93,7 @@ name = "engine"
 version = "0.1.0"
 dependencies = [
  "adapter-cloud-hypervisor",
+ "adapter-native",
  "adapter-sandlock",
  "adapter-traits",
  "async-trait",
@@ -159,6 +169,13 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "guest-sandbox"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
