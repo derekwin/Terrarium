@@ -88,24 +88,29 @@ pub struct VmStorage {
 pub enum PathPattern { Exact(PathBuf), Prefix(PathBuf) }
 
 /// 文件访问操作(最小权限粒度)
-pub enum FileAccess { Read, ReadWrite, Execute }
+pub enum FileAccess { Read, ReadWrite }
 
 /// 网络端点(host:port;端口省略=任意)
 pub struct Endpoint { pub host: String, pub port: Option<u16> }
 
-pub enum Direction { Outbound, Inbound }
+pub enum Direction { Outbound }
 
 /// 一个能力:单一访问许可(不可伪造的边界内授权记录)
 pub enum Capability {
     File { path: PathPattern, access: FileAccess },
     Network { endpoint: Endpoint, direction: Direction },
-    Device { path: PathBuf },
 }
 
-> **能力可用性**：`Execute` / `Inbound` / `Device` 枚举保留（协议接口面），
-> 但策略校验（`SandboxPolicy::validate` / SDK `validate_policy`）一律拒绝——
-> 见 §4「拒绝项的语义约定」。`ResourceLimits.bandwidth_kbps` 同样拒绝
-> （属 VM 层配额，未实现）。
+> **能力面（接口评审后收敛）**：`File::Execute`、`Network::Inbound`、
+> `Device`、`ResourceLimits.bandwidth_kbps` 已从类型与校验中**移除**——
+> 接口只表达后端真实支持的能力，不存在"定义了却不支持"的悬空项。
+> 语义说明：
+> - 执行权限由 `Read` 隐含（Linux 上执行即读）。
+> - 入站不显式化：VM 内监听（bind）不设限，外部由 NAT 隔离；Bridge
+>   直通（P3）未实现前无外部入站语义。
+> - 设备：安全设备（/dev/urandom 等）由默认策略覆盖（/dev 只读 +
+>   STRICT_DEVMEM），危险设备不授权。
+> - 带宽属 VM 层配额（未实现），不在 sandbox 策略面。
 
 /// 逻辑资源配额(⊆ VM 配额)
 pub struct ResourceLimits {
@@ -189,20 +194,8 @@ write_paths / net_allow）已移除，一律拒绝：
   **terra-confine**（`crates/guest/confine`，Landlock fs + seccomp 网络 +
   cgroup），alternative 为 **sandlock** 二进制。两后端均由 guest-proxy
   翻译 policy → 各自 argv（`-r/-w/--net-allow/-m/--max-procs/
-  --max-open-files/--cpu-shares`）。`Execute` / `Inbound` / `Device`
-  三类能力在**策略校验层**（引擎 + SDK）即拒绝，不落到 guest。
-
-  **拒绝项的语义约定**：
-  - `Execute`：Linux 上"能执行 = 能读"（执行须加载代码/解释器），由
-    `Read` 隐含；不单独授权。
-  - `Inbound`：VM 内监听（bind）不设限（agent 起本地服务/自测是合理
-    需求）；外部入站由 VM 网络拓扑（NAT）天然隔离——`Bridge` 直通
-    未实现前，"外部可达"不是可表达的能力。因此 Inbound 能力无需显式化。
-  - `Device`：microVM 设备面很小；安全设备（/dev/urandom、/dev/null）
-    由默认策略覆盖（/dev 只读 + 内核 STRICT_DEVMEM 兜底），危险设备
-    （/dev/mem 等）不应授权；不做精确设备授权。
-  - `bandwidth_kbps`（sandbox 层）：带宽属于 VM 层配额（未实现）；接口
-  拒绝，避免静默不生效。
+  --max-open-files/--cpu-shares`）。能力面已收敛（无 Execute/Inbound/
+  Device/带宽），类型层面不存在后端无法表达的能力。
 - **SDK/CLI**：SDK `validate_policy` 客户端校验 + CLI
   `--read-path/--write-path/--net-allow/--memory-mb/--procs` 直接产出新形状。
 - **继承语义**：per-call policy **替换**存储策略（`.or()` 链：per-call →

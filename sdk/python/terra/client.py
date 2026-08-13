@@ -13,9 +13,9 @@ from .exceptions import TerraError
 
 _POLICY_KEYS = {"capabilities", "limits", "default", "audit", "version"}
 _CAPABILITY_TYPES = {"File", "Network", "Device"}
-_FILE_ACCESS = {"Read", "ReadWrite", "Execute"}
-_DIRECTIONS = {"Outbound", "Inbound"}
-_LIMIT_KEYS = {"memory_mb", "procs", "fds", "bandwidth_kbps", "cpu_shares"}
+_FILE_ACCESS = {"Read", "ReadWrite"}
+_DIRECTIONS = {"Outbound"}
+_LIMIT_KEYS = {"memory_mb", "procs", "fds", "cpu_shares"}
 
 
 def _validate_file_capability(spec: dict) -> None:
@@ -37,10 +37,6 @@ def _validate_file_capability(spec: dict) -> None:
     if access not in _FILE_ACCESS:
         raise ValueError(
             f"File access must be one of {sorted(_FILE_ACCESS)}, got {access!r}"
-        )
-    if access == "Execute":
-        raise ValueError(
-            "File Execute capability is not supported by the sandlock backend"
         )
 
 
@@ -67,13 +63,6 @@ def _validate_network_capability(spec: dict) -> None:
     if direction not in _DIRECTIONS:
         raise ValueError(
             f"Network direction must be one of {sorted(_DIRECTIONS)}, got {direction!r}"
-        )
-    if direction == "Inbound":
-        raise ValueError(
-            "Network Inbound is not an explicit capability: VM-internal "
-            "listening is always allowed (NAT keeps it unreachable from "
-            "outside); external ingress needs the Bridge topology (not "
-            "implemented)"
         )
 
 
@@ -173,11 +162,6 @@ def validate_policy(policy: dict) -> dict:
         for key, value in limits.items():
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"limit {key} must be a positive int, got {value!r}")
-        if "bandwidth_kbps" in limits:
-            raise ValueError(
-                "limit 'bandwidth_kbps' is not supported at the sandbox level "
-                "(belongs on the VM layer; not implemented)"
-            )
 
     # default: deny-by-default only through the SDK (D6 — the "allow"
     # escape hatch is not exposed)

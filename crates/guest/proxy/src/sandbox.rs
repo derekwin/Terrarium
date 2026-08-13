@@ -89,9 +89,6 @@ pub fn wrap_for_confine(
                         (PathPattern::Prefix(p) | PathPattern::Exact(p), FileAccess::ReadWrite) => {
                             ("-w", p.to_string_lossy())
                         }
-                        (_, FileAccess::Execute) => {
-                            return Err("Execute capability not supported by this backend".into());
-                        }
                     };
                     let is_dev = path_str.starts_with("/dev/");
                     if exists(&path_str) {
@@ -121,15 +118,7 @@ pub fn wrap_for_confine(
                         argv.push("--net-allow".into());
                         argv.push(entry);
                     }
-                    Direction::Inbound => {
-                        return Err(
-                            "Inbound network capability not supported by this backend".into()
-                        );
-                    }
                 },
-                Capability::Device { .. } => {
-                    return Err("Device capability not supported by this backend".into());
-                }
             }
         }
         if let Some(mb) = policy.limits.memory_mb {
@@ -222,9 +211,6 @@ pub fn wrap_for_sandbox(
                         (PathPattern::Prefix(p) | PathPattern::Exact(p), FileAccess::ReadWrite) => {
                             ("-w", p.to_string_lossy())
                         }
-                        (_, FileAccess::Execute) => {
-                            return Err("Execute capability not supported by this backend".into());
-                        }
                     };
                     // Grant only paths that exist — sandlock errors on
                     // nonexistent grant paths.
@@ -245,15 +231,7 @@ pub fn wrap_for_sandbox(
                         argv.push("--net-allow".into());
                         argv.push(entry);
                     }
-                    Direction::Inbound => {
-                        return Err(
-                            "Inbound network capability not supported by this backend".into()
-                        );
-                    }
                 },
-                Capability::Device { .. } => {
-                    return Err("Device capability not supported by this backend".into());
-                }
             }
         }
         if let Some(mb) = policy.limits.memory_mb {
@@ -796,66 +774,17 @@ mod tests {
         assert!(m < sep && p < sep, "limits must precede the -- separator");
     }
 
-    /// cpu_shares / fds / bandwidth_kbps have no sandlock flag — they are
-    /// ignored and the argv is identical to a policy without them.
+    /// cpu_shares / fds have no sandlock flag — they are ignored and the
+    /// argv is identical to a policy without them.
     #[test]
     fn unsupported_limits_are_ignored() {
         let mut policy = default_policy();
         policy.limits.cpu_shares = Some(100);
         policy.limits.fds = Some(64);
-        policy.limits.bandwidth_kbps = Some(1024);
         let argv = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap();
         let base =
             wrap_for_sandbox(&args(), "/workdir", Some(&default_policy()), |_| true).unwrap();
         assert_eq!(argv, base);
-    }
-
-    /// `File::Execute` is a contract-bearing capability sandlock cannot
-    /// express — the translation fails honestly instead of silently
-    /// downgrading to Read.
-    #[test]
-    fn execute_capability_is_unsupported() {
-        let mut policy = default_policy();
-        policy.capabilities.push(Capability::File {
-            path: PathPattern::Exact("/usr/bin/foo".into()),
-            access: FileAccess::Execute,
-        });
-        let err = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap_err();
-        assert!(err.contains("Execute capability not supported"), "{}", err);
-    }
-
-    /// `Network::Inbound` cannot be expressed by sandlock — honest error.
-    #[test]
-    fn inbound_network_capability_is_unsupported() {
-        let policy = SandboxPolicy {
-            capabilities: vec![Capability::Network {
-                endpoint: Endpoint {
-                    host: "0.0.0.0".into(),
-                    port: Some(8080),
-                },
-                direction: Direction::Inbound,
-            }],
-            ..default_policy()
-        };
-        let err = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap_err();
-        assert!(
-            err.contains("Inbound network capability not supported"),
-            "{}",
-            err
-        );
-    }
-
-    /// `Device` capabilities cannot be expressed by sandlock — honest error.
-    #[test]
-    fn device_capability_is_unsupported() {
-        let policy = SandboxPolicy {
-            capabilities: vec![Capability::Device {
-                path: "/dev/kvm".into(),
-            }],
-            ..default_policy()
-        };
-        let err = wrap_for_sandbox(&args(), "/workdir", Some(&policy), |_| true).unwrap_err();
-        assert!(err.contains("Device capability not supported"), "{}", err);
     }
 
     /// `DefaultAccess::Allow` is a debug escape hatch — defense in depth

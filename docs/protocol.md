@@ -93,10 +93,9 @@ Sandbox 是租户共享 VM（`tenant-<tenant>`）内的一个会话（独立工�
 - `capabilities`：能力集——默认拒绝下的**显式授予**，每条为单键对象：
   - `File`：路径能力。`path` 为 `{"Exact": "/path"}`（仅该路径）或
     `{"Prefix": "/path"}`（覆盖其子树），路径必须绝对；`access` 为
-    `"Read"` / `"ReadWrite"` / `"Execute"`。
-  - `Network`：端点白名单。`endpoint` 为 `{"host": HOST, "port": N}`
-    （port 省略 = 任意端口）；`direction` 为 `"Outbound"` / `"Inbound"`。
-  - `Device`：设备路径能力（见下：后端未实现）。
+    `"Read"` / `"ReadWrite"`。
+  - `Network`：出站端点白名单。`endpoint` 为 `{"host": HOST, "port": N}`
+    （port 省略 = 任意端口）；`direction` 恒为 `"Outbound"`。
 - **自包含语义**：提供的 policy **整体替换**默认能力集（引擎不自动叠加
   默认；要保留系统只读集须自行包含）；完全不提供 policy 时，沙箱化执行由
   引擎注入 `DEFAULT_SANDBOX_POLICY`——**沙箱化 exec 恒携带完整策略**。
@@ -109,9 +108,8 @@ Sandbox 是租户共享 VM（`tenant-<tenant>`）内的一个会话（独立工�
   的门控开关，驱动结构化审计事件输出（见下方「审计」小节）。
 - `version`：策略版本（审计可追溯）。
 - 未知字段一律拒绝。
-- **后端能力缺口（诚实报错）**：`File` 的 `Execute`、`Network` 的 `Inbound`、
-  `Device` 三类能力 sandlock 后端无法表达——guest-proxy 返回硬错误，绝不
-  静默丢弃。
+- **能力面收敛**：接口类型不含 `File::Execute`、`Network::Inbound`、
+  `Device`、`bandwidth_kbps`（评审后移除）——不存在"定义但不支持"的能力。
 - `policy` 与 `"sandbox": false` 同现 → 报错（策略只在沙箱化执行时有意义）。
 - 存放与覆盖：`sandbox_create` 的 policy 存入记录（`sandbox_info` /
   `sandbox_list` 回显），后续 `sandbox_exec` 继承；`sandbox_exec` 自带的

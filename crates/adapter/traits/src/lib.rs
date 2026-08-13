@@ -209,7 +209,6 @@ pub struct ResourceLimits {
     pub cpu_shares: Option<u64>,
     pub procs: Option<u32>,
     pub fds: Option<u32>,
-    pub bandwidth_kbps: Option<u64>,
 }
 
 /// Options for a single [`VmHandle::exec`] call.
@@ -377,7 +376,6 @@ impl VmSpec {
                 memory_mb: self.memory_mb,
                 max_cpus: self.max_vcpus,
                 max_memory_mb: self.max_memory_mb,
-                bandwidth_kbps: None,
             },
             network: if self.net {
                 VmNetwork::Nat
@@ -566,7 +564,6 @@ pub enum PathPattern {
 pub enum FileAccess {
     Read,
     ReadWrite,
-    Execute,
 }
 
 /// Network endpoint (host:port; omitted port = any).
@@ -579,7 +576,6 @@ pub struct Endpoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Direction {
     Outbound,
-    Inbound,
 }
 
 /// A single access grant held by a subject (capability).
@@ -592,9 +588,6 @@ pub enum Capability {
     Network {
         endpoint: Endpoint,
         direction: Direction,
-    },
-    Device {
-        path: std::path::PathBuf,
     },
 }
 
@@ -650,42 +643,21 @@ impl SandboxPolicy {
         })
     }
 
-    /// Validate the capability set: every file/device path must be
-    /// absolute, network endpoints must have a non-empty host and a
-    /// positive port when present, resource limits must be > 0 when set,
-    /// and `DefaultAccess::Allow` is rejected (debug escape hatch only).
-    /// An empty capability set is valid (default-deny).
-    ///
-    /// Capabilities the sandlock backend cannot express are rejected here
-    /// (fail fast at the API surface) instead of failing at exec time:
-    /// `File::Execute`, `Network::Inbound`, and `Device` are unsupported.
+    /// Validate the capability set: every file path must be absolute,
+    /// network endpoints must have a non-empty host and a positive port
+    /// when present, resource limits must be > 0 when set, and
+    /// `DefaultAccess::Allow` is rejected (debug escape hatch only). An
+    /// empty capability set is valid (default-deny).
     pub fn validate(&self) -> Result<(), String> {
         for cap in &self.capabilities {
             match cap {
-                Capability::File {
-                    access: FileAccess::Execute,
-                    ..
-                } => {
-                    return Err(
-                        "File Execute capability is not supported by the sandlock backend".into(),
-                    );
-                }
-                Capability::File { path, access: _ } => {
+                Capability::File { path, .. } => {
                     if !is_absolute_path(path) {
                         return Err(format!(
                             "capability file path must be absolute (got '{}')",
                             path_display(path)
                         ));
                     }
-                }
-                Capability::Network {
-                    direction: Direction::Inbound,
-                    ..
-                } => {
-                    return Err(
-                        "Network Inbound capability is not supported by the sandlock backend"
-                            .into(),
-                    );
                 }
                 Capability::Network { endpoint, .. } => {
                     if endpoint.host.is_empty() {
@@ -696,9 +668,6 @@ impl SandboxPolicy {
                             return Err("network endpoint port must be > 0".into());
                         }
                     }
-                }
-                Capability::Device { .. } => {
-                    return Err("Device capability is not supported by the sandlock backend".into());
                 }
             }
         }
@@ -722,13 +691,6 @@ impl SandboxPolicy {
                 return Err("limits.fds must be > 0".into());
             }
         }
-        if self.limits.bandwidth_kbps.is_some() {
-            return Err(
-                "limits.bandwidth_kbps is not supported at the sandbox level \
-                 (belongs on the VM layer; not implemented)"
-                    .into(),
-            );
-        }
         Ok(())
     }
 
@@ -750,7 +712,7 @@ impl SandboxPolicy {
     /// appended, deduplicated) so a user granting only their task's paths
     /// still gets the base read-only system set. Limits: `other`'s values
     /// win when present, else this policy's (per-field: memory_mb, procs,
-    /// fds, bandwidth_kbps, cpu_shares). `default` and `version` follow
+    /// fds, cpu_shares). `default` and `version` follow
     /// `other` when present, else this policy's; `audit` is the OR of both
     /// per flag.
     ///
@@ -772,7 +734,6 @@ impl SandboxPolicy {
                 memory_mb: other.limits.memory_mb.or(self.limits.memory_mb),
                 procs: other.limits.procs.or(self.limits.procs),
                 fds: other.limits.fds.or(self.limits.fds),
-                bandwidth_kbps: other.limits.bandwidth_kbps.or(self.limits.bandwidth_kbps),
                 cpu_shares: other.limits.cpu_shares.or(self.limits.cpu_shares),
             },
             default: other.default,
@@ -805,10 +766,7 @@ fn path_display(pattern: &PathPattern) -> String {
 
 fn access_ge(have: FileAccess, need: FileAccess) -> bool {
     use FileAccess::*;
-    matches!(
-        (have, need),
-        (ReadWrite, _) | (Execute, Execute) | (Read, Read)
-    )
+    matches!((have, need), (ReadWrite, _) | (Read, Read))
 }
 
 fn pattern_matches(p: &PathPattern, path: &std::path::Path) -> bool {
@@ -825,7 +783,6 @@ pub struct VmResources {
     pub memory_mb: u64,
     pub max_cpus: Option<u8>,
     pub max_memory_mb: Option<u64>,
-    pub bandwidth_kbps: Option<u64>,
 }
 
 /// VM network topology.
@@ -886,7 +843,6 @@ mod policy_tests {
                 memory_mb: 1024,
                 max_cpus: Some(4),
                 max_memory_mb: Some(2048),
-                bandwidth_kbps: None,
             },
             network: VmNetwork::Nat,
             storage: VmStorage {
@@ -975,7 +931,6 @@ mod policy_tests {
                 memory_mb: 1024,
                 max_cpus: Some(4),
                 max_memory_mb: Some(2048),
-                bandwidth_kbps: None,
             }
         );
         assert_eq!(policy.network, VmNetwork::Nat);

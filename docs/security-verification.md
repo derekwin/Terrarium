@@ -126,15 +126,18 @@ guest 内核重编（#10）：`config-minimal` 基础上启用
 `CONFIG_BLK_DEV_LOOP`（层镜像内核挂载）、`CONFIG_IKCONFIG`（便于未来
 提取配置）。
 
-## 接口拒绝项评估（结论）
+## 能力面收敛（评审后移除）
 
-| 拒绝项 | 结论 | 理由 |
-|---|---|---|
-| `File::Execute` | 不做 | Linux 上执行即读，由 `Read` 隐含 |
-| `Network::Inbound` | 不显式化 | VM 内监听（bind）不设限，外部由 NAT 隔离；Bridge 未实现前无外部入站语义 |
-| `Device` | 不做 | 安全设备默认覆盖（/dev 只读 + STRICT_DEVMEM），危险设备不该授权 |
-| `bandwidth_kbps` | 留 VM 层 | 进程级带宽成本高价值低，属 VM 配额（未实现，接口拒绝） |
-| `VmNetwork::Bridge` | P3 | 对外暴露场景才有需求，且绕过租户隔离有安全含义 |
+| 移除项 | 理由 |
+|---|---|
+| `File::Execute` | Linux 上执行即读，由 `Read` 隐含 |
+| `Network::Inbound` | VM 内监听（bind）不设限，外部由 NAT 隔离；Bridge 未实现前无外部入站语义 |
+| `Device` | 安全设备默认覆盖（/dev 只读 + STRICT_DEVMEM），危险设备不该授权 |
+| `bandwidth_kbps` | 进程级带宽成本高价值低，属 VM 配额（未实现） |
+| `VmNetwork::Bridge` | 对外暴露场景才有需求（P3），且绕过租户隔离有安全含义 |
+
+上述能力已从类型与校验中**移除**（接口只表达后端真实支持的能力）；
+`VmNetwork::Bridge` 保留枚举但标注 P3。
 
 ## 已知问题
 

@@ -173,11 +173,10 @@ class Sandbox:
         Optional SandboxPolicy dict (validated client-side by
         ``validate_policy``): ``capabilities`` is a list of capability
         objects — File grants use ``{"path": {"Prefix"|"Exact":
-        "/abs/path"}, "access": "Read"|"ReadWrite"|"Execute"}``,
+        "/abs/path"}, "access": "Read"|"ReadWrite"}``,
         Network egress allowlist entries use ``{"endpoint": {"host":
-        HOST, "port": N}, "direction": "Outbound"}``, Device grants an
-        absolute path; ``limits`` maps ``memory_mb``/``procs`` (and
-        ``fds``/``bandwidth_kbps``/``cpu_shares``) to positive ints;
+        HOST, "port": N}, "direction": "Outbound"}``; ``limits`` maps
+        ``memory_mb``/``procs``/``fds``/``cpu_shares`` to positive ints;
         ``default`` (deny-only via the SDK), ``version`` and ``audit``
         are optional. Stored on the sandbox engine-side; echoed by
         ``sandbox_info``.
