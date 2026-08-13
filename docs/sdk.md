@@ -85,7 +85,7 @@ sb2 = Sandbox(tenant="research-team")   # 复用同一 VM，新工作目录
 sb3 = Sandbox(tenant="research-team")
 # sb1、sb2、sb3 在同一个 VM 内，各自拥有独立的 /workdir
 
-# exec — blocking 执行，返回 ExecResult；默认经 sandlock（Landlock/seccomp）沙箱化
+# exec — blocking 执行，返回 ExecResult；默认经 confine（Landlock fs + seccomp + cgroup）沙箱化
 result = sb.exec(["python3", "-c", "print(1+1)"])
 print(result.stdout, result.stderr, result.exit_code)
 
@@ -151,10 +151,10 @@ with Sandbox(tenant="my-org", template="py312") as sb:
 >
 > **预热池集成：** 租户首次创建 sandbox 时，引擎优先从预热池认领一台空闲 VM（`pool` 参数，默认 True，毫秒级热启动）；池空或无池则回退冷启动（秒级）。`Sandbox(..., pool=False)` 强制冷启动专用 `tenant-<t>` VM。池认领的租户 VM 名是 `pool-N`（`sb.pool_backed == True`），同租户后续 sandbox 依旧复用该 VM。
 
-> **沙箱化执行（`sandboxed=True`，默认）：** 命令在 guest 内经 sandlock
-> （Landlock/seccomp，由 `terra setup` 烘焙进系统层的 `/usr/bin/sandlock`）
+> **沙箱化执行（`sandboxed=True`，默认）：** 命令在 guest 内默认经 confine
+> （Landlock fs + seccomp 网络监管 + cgroup，烘焙进层；sandlock 为备选后端）
 > 约束运行。默认策略：系统目录只读，仅本会话工作目录与 `/tmp` 可写，
-> 同 VM 其他会话的工作目录不可达，网络暂不限制。镜像缺少 sandlock 二进制
+> 同 VM 其他会话的工作目录不可达，出网默认拒绝。镜像缺少限制器二进制
 > 时是硬错误（无静默回退）。仅当确实需要写系统路径（如调试、安装软件包）
 > 时才用 `sandboxed=False`。
 >
@@ -378,7 +378,7 @@ terra daemon start            # 启动引擎（自动 sudo 提权；--no-root �
 # 2) 高层沙箱（推荐日常使用）
 terra sandbox create --template alpine --net    # 输出引擎 id 形如 sb-a3f2b1c4
 terra sandbox ls                                # 引擎注册表中的全部 sandbox
-terra sandbox exec sb-a3f2b1c4 -- echo hi       # 默认 sandlock 沙箱化
+terra sandbox exec sb-a3f2b1c4 -- echo hi       # 默认 confine 沙箱化
 terra sandbox exec sb-a3f2b1c4 --detach -- sleep 60   # 后台执行：立即返回 session_id
 terra sandbox session status <session_id>       # 查询后台会话状态
 terra sandbox session ls                        # 列出全部后台会话
@@ -437,7 +437,7 @@ terra sandbox destroy-tenant <tenant>   # 销毁租户 VM 及其全部 sandbox
 
 `sandbox` 命令直接操作引擎注册表中的沙箱实体（`sandbox_*` 协议族）。
 `cp` / `resize` / `metrics` 接受 sandbox id 或 VM 名（id 解析失败时按
-VM 名回退）。`exec` 默认经 sandlock（Landlock/seccomp）沙箱化执行（同
+VM 名回退）。`exec` 默认经 confine（Landlock fs + seccomp + cgroup）沙箱化执行（同
 Python API 的 `sandboxed=True`）；`--no-sandbox` 为逃生舱。镜像缺少
 sandlock 二进制时报错（先跑 `terra setup` 将其烘焙进系统层）。
 `exec --detach` 后台执行：立即返回 `{session_id, sandbox, status}`，

@@ -39,9 +39,9 @@ LLM 驱动的自主程序,循环为 观察 → 推理 → 行动。从使用中�
 │ D2 执行与工具   R2       命令执行(参数化能力授予)        │
 │ D3 会话生命周期 R1       创建/检查/销毁 + 会话状态持久    │
 │ D4 资源治理     R4       配额声明/运行时调整/耗尽防护     │
-│ D5 网络         R2 R5    方向化端点白名单/带宽            │
+│ D5 网络         R2 R5    方向化端点白名单（带宽评估后留 VM 层）│
 │ D6 可观测性     R6       执行审计/资源度量/拒绝事件       │
-│ D7 策略         R5 R10   类型化能力集/默认拒绝/继承/版本  │
+│ D7 策略         R5 R10   类型化能力集/默认拒绝/继承/版本（SandboxPolicy 已落地）│
 │ D8 弹性供给     R7 R8 R9 预热/冷启动/池/可组合环境        │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -191,17 +191,21 @@ SDK 的 `validate_policy` 校验)。引擎**不再接收旧 ExecPolicy dict**—
 
 1. **文件默认语义自包含**:不再"追加到硬编码只读系统集",而是策略显式含
    `File { path: "/usr", Read }` 等——同一策略跨实现语义一致(消除漂移)。
-   内置"默认能力集"(sandlock 默认)作为**引擎级常量**注入,而非 guest 硬编码。
+   内置"默认能力集"(引擎级)作为**引擎级常量**注入,而非 guest 硬编码。
 2. **网络默认方向化**:`Direction::Outbound`;默认拒绝时需显式端点。
 3. **资源配额不可被能力授予**:`limits` 只能由策略设置者(平台)设定,agent 不可自授。
 4. **审计事件**:`audit.deny`(拒绝事件)、`audit.exec`(执行)、`audit.resource`(超限)。
 
 ## 4. SandboxAdapter 接入引擎(统一 L2 边界)
 
-### 4.1 现状与错位
+### 4.1 现状（已接入）
 
-引擎的实际 L2 隔离由 **guest 侧 sandlock 二进制**执行(guest-proxy 包装);
-host 侧 `SandboxAdapter` 是独立参考实现,未参与执行路径。接口与实现错位。
+`SandboxAdapter` 已是执行路径的一部分：engine 默认注入
+`adapter/confine`（`GuestConfineAdapter`），备选 `adapter/sandlock`
+（`--features sandlock`）。宿主侧 adapter 绑定 policy 并通过
+`ExecOpts.backend` 标识后端；guest-proxy 按标识把策略翻译成对应
+限制器的 argv（默认 `terra-confine`，alternative sandlock 二进制）。
+接口与实现不再错位。
 
 ### 4.2 接入设计(契约驱动)
 
@@ -210,17 +214,18 @@ engine ── exec(策略) ──► SandboxAdapter ──► 后端隔离机制
                             │
               ┌─────────────┴──────────────┐
               ▼                            ▼
-     默认:guest sandlock          未来:gVisor / Kata / seccomp 容器
-     (guest-proxy 代理,            (host 侧直接执行)
-     策略经 vsock 下发)
+     默认: terra-confine          alternative: sandlock 二进制
+     (guest-proxy 翻译 argv,       (guest-proxy 翻译 argv,
+      策略经 vsock 下发)            策略经 vsock 下发)
 ```
 
 **关键决策**:
 1. `SandboxAdapter::create(vm, spec)` 接收完整 `SandboxPolicy`(D7)——策略在
    host 侧被 adapter 理解并转化为后端的隔离原语。
-2. **默认实现 = guest-sandlock 代理**:host 侧 `SandboxAdapter` 将策略序列化
-   经 vsock 下发给 guest-proxy,由 sandlock 执行——把现有"guest 直连"包装为
-   adapter 的默认实现,而非另起炉灶。
+2. **默认实现 = confine 代理**:host 侧 `SandboxAdapter`（默认
+   `adapter/confine`，备选 `adapter/sandlock`）将策略序列化经 vsock 下发
+   给 guest-proxy，由对应限制器（`terra-confine` / sandlock 二进制）执行——
+   把"guest 直连"包装为 adapter 的实现，而非另起炉灶。
 3. **引擎执行路径统一**:所有会话 exec 走 `SandboxAdapter`(不再旁路);
    guest-proxy 成为"默认后端的传输层"。
 4. **策略到达处校验**:每次 exec 的 `policy` 在边界(adapter)做 complete
@@ -230,7 +235,7 @@ engine ── exec(策略) ──► SandboxAdapter ──► 后端隔离机制
 
 - **4a 接口定形**:`SandboxAdapter`/`SandboxHandle` 方法签名更新为携带
   `SandboxPolicy`;trait 文档声明边界属性契约。
-- **4b 默认后端**:guest-sandlock 代理实现(策略经 vsock 下发);引擎切到
+- **4b 默认后端**:confine 代理实现(策略经 vsock 下发);引擎切到
   adapter 路径;现有行为(双层隔离)不变——纯重构,测试锁定。
 - **4c 验证**:会话隔离 e2e 在 adapter 路径下全绿;证明契约承载现有安全语义。
 - **4d(未来)**:第二实现(gVisor)接入,验证可替换性。
@@ -241,7 +246,7 @@ engine ── exec(策略) ──► SandboxAdapter ──► 后端隔离机制
 |---|---|---|---|
 | **A 契约化** | 能力域↔接口映射表 + trait 边界属性注释 | R1-R10 全覆盖 | ✅ |
 | **B 策略形式化** | `SandboxPolicy`/`Capability` 类型 + 全面替换 | R5 R10 | ✅ |
-| **C L2 统一** | SandboxAdapter 接入引擎(默认=guest sandlock 后端) | R3 R5 | ✅ |
+| **C L2 统一** | SandboxAdapter 接入引擎(默认=confine 后端) | R3 R5 | ✅ |
 | **D 审计度量** | 拒绝事件/资源度量接口 | R6 | ✅ |
 | **E 可替换性实证** | 契约承载异构后端(engine 零改动) | 全局 | ✅(见下) |
 

@@ -103,7 +103,7 @@ terra_session_kill(session_id="sess-…")               # 终止并清理工作�
 兼容 function calling，示例用 deepseek）通过 MCP 客户端连接 `terra-mcp`，
 把 `terra_*` 工具暴露给模型，agent 自主决策并在沙箱内执行任务。agent
 本身没有宿主文件系统/shell 访问权——所有命令都经 `terra_exec` /
-`terra_session_*` 在隔离 VM 会话中执行（默认 sandlock 约束）。
+`terra_session_*` 在隔离 VM 会话中执行（默认 confine 约束）。
 
 ```bash
 export DEEPSEEK_API_KEY=... TERRA_SOCKET=/tmp/terra.sock \

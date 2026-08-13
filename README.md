@@ -59,10 +59,13 @@ terrarium/
 │   ├── adapter/
 │   │   ├── traits/           # VmAdapter / SandboxAdapter traits, VmSpec, FsSpec, error types
 │   │   ├── cloud-hypervisor/ # CH adapter (FS/VM decoupled), virtiofs, hotplug, network, landlock
-│   │   └── sandlock/         # Sandlock adapter (Landlock/seccomp confinement; SandboxAdapter reference impl)
+│   │   ├── confine/          # Default SandboxAdapter (terra-confine backend)
+│   │   └── sandlock/         # Alternative SandboxAdapter (sandlock backend)
+│   ├── guest/
+│   │   ├── proxy/            # In-guest command relay (vsock), backend argv translation
+│   │   └── confine/          # In-guest limiter (terra-confine: Landlock/seccomp/cgroup)
 │   ├── fs/                   # Independent filesystem crate: EROFS, cpio, layer build/list/remove (PyO3 bindings)
 │   ├── protocol/             # Shared Command / Response types (single source of truth)
-│   ├── guest-proxy/          # In-guest agent: vsock relay, exec, mount, umount
 │   ├── network/              # Tap / NAT / dnsmasq DHCP, tc QoS
 │   └── mcp/                  # MCP server (stdio JSON-RPC, 21 user-facing tools)
 ├── sdk/python/               # Python SDK (terra package: Sandbox, Pool, Template, client, daemon, assets, images)
@@ -117,10 +120,10 @@ pool.release(sb2)
 **CLI** — three steps to a running sandbox:
 
 ```bash
-terra setup alpine                             # one-time: kernel + rootfs + initramfs + base layer (with sandlock) + template
+terra setup alpine                             # one-time: kernel + rootfs + initramfs + base layer (with confine) + template
 terra daemon start                             # engine daemon (self-elevates via sudo; --no-root for rootless)
 terra sandbox create --template alpine --net   # high-level sandbox (VM = tenant)
-terra sandbox exec sb-xxxxxxxx -- echo hi      # sandboxed (sandlock) by default
+terra sandbox exec sb-xxxxxxxx -- echo hi      # sandboxed (confine) by default
 terra sandbox kill sb-xxxxxxxx                 # kill the session (VM survives)
 terra pool create -n mypool --size 3           # warm pool
 terra pool claim --template alpine             # claim a ready sandbox
@@ -193,7 +196,7 @@ passes (42 passed), broken patch rejected (1 failed), ~1.5s per check.
 - ✅ virtiofs layered filesystem, warm pool, NAT networking, layer build-by-doing
 - ✅ High-level Sandbox / Pool / Template API, exception hierarchy, async support
 - ✅ Warm-pool-backed tenant sandboxes (claim on create, release on destroy); MCP session-scoped exec
-- ✅ Audit observability (per-policy tracing events; structured sandlock deny signal)
+- ✅ Audit observability (per-policy tracing events; structured deny signal)
 - ✅ Density benchmarks (harness + first 12-tenant data in
   `sdk/python/tests/manual_density_bench.py`; see `docs/benchmarks.md`)
 - ✅ P1: fast sandbox reset (snapshot/restore, verified ~200 ms on real KVM,

@@ -71,7 +71,7 @@ pub struct VmResources {
 pub enum VmNetwork {
     None,                    // 无网络
     Nat,                     // NAT + DHCP(现有)
-    Bridge { iface: String }, // 直通网桥
+    Bridge { iface: String }, // 直通网桥（评估后 P3：对外暴露场景；当前仅 None/Nat 实现）
 }
 
 pub struct VmStorage {
@@ -101,6 +101,11 @@ pub enum Capability {
     Network { endpoint: Endpoint, direction: Direction },
     Device { path: PathBuf },
 }
+
+> **能力可用性**：`Execute` / `Inbound` / `Device` 枚举保留（协议接口面），
+> 但策略校验（`SandboxPolicy::validate` / SDK `validate_policy`）一律拒绝——
+> 见 §4「拒绝项的语义约定」。`ResourceLimits.bandwidth_kbps` 同样拒绝
+> （属 VM 层配额，未实现）。
 
 /// 逻辑资源配额(⊆ VM 配额)
 pub struct ResourceLimits {
@@ -180,8 +185,12 @@ write_paths / net_allow）已移除，一律拒绝：
 - **默认注入**：引擎级 `DEFAULT_SANDBOX_POLICY`（`crates/engine/src/policy.rs`）——
   沙箱化 exec 未显式给 policy 时注入，exec 恒携带完整策略（默认集从 guest
   硬编码迁至引擎级常量，跨实现语义一致）。
-- **guest 翻译**：guest-proxy 将能力集翻译为 sandlock 旗标；`Execute` /
-  `Inbound` / `Device` 三类能力后端无法表达，返回硬错误（诚实不支持）。
+- **guest 翻译**：guest-proxy 按 backend 标识翻译能力集——默认
+  **terra-confine**（`crates/guest/confine`，Landlock fs + seccomp 网络 +
+  cgroup），alternative 为 **sandlock** 二进制。两后端均由 guest-proxy
+  翻译 policy → 各自 argv（`-r/-w/--net-allow/-m/--max-procs/
+  --max-open-files/--cpu-shares`）。`Execute` / `Inbound` / `Device`
+  三类能力在**策略校验层**（引擎 + SDK）即拒绝，不落到 guest。
 
   **拒绝项的语义约定**：
   - `Execute`：Linux 上"能执行 = 能读"（执行须加载代码/解释器），由
@@ -193,38 +202,26 @@ write_paths / net_allow）已移除，一律拒绝：
     由默认策略覆盖（/dev 只读 + 内核 STRICT_DEVMEM 兜底），危险设备
     （/dev/mem 等）不应授权；不做精确设备授权。
   - `bandwidth_kbps`（sandbox 层）：带宽属于 VM 层配额（未实现）；接口
-    拒绝，避免静默不生效。
+  拒绝，避免静默不生效。
 - **SDK/CLI**：SDK `validate_policy` 客户端校验 + CLI
   `--read-path/--write-path/--net-allow/--memory-mb/--procs` 直接产出新形状。
 - **继承语义**：per-call policy **替换**存储策略（`.or()` 链：per-call →
   存储 → 引擎默认），非并集。
 - **AuditSpec 已接线（D 阶段）**：`policy.audit.{deny, exec, resource}` 按策略
-  门控结构化审计事件（tracing 输出，无协议面）——`audit.exec`（沙箱 exec
-  完成：exit_code + duration）、`audit.deny`（guest sandlock 拒绝；guest-proxy
-  将拒绝的 exit code 改写为保留值 `SANDBOX_DENY_EXIT_CODE`，引擎按 exit code
-  判定，不嗅探 stderr 文本）、`audit.resource`（sandbox_create 的 limits
-  声明 + VM resize 平台动作）。门控用生效策略（默认 ∪ 用户，`audit` 标志 OR
-  合并）；事件与发射点见 `docs/protocol.md`「审计」小节。
-- **拒绝信号是结构化通道（M7）**：guest-proxy 不再从子进程 stderr 文本推断
-  拒绝。sandlock supervisor（seccomp notify 层）把每次拒绝响应写成一行 JSON
-  记录（`{"syscall":...,"errno":...}` / `{"syscall":...,"killed":...}`）到
-  `SANDBOX_DENY_FD` 指定的 fd（见 `thirdparty/sandlock-v0.8.5-denyfd.patch`）；
-  guest-proxy 仅在收到记录**且** exec 非零退出时改写 exit code 为
-  `SANDBOX_DENY_EXIT_CODE`，子进程 stderr 仅作为 `reason` 附带。覆盖边界
-  （诚实声明）：seccomp-notify 可观测的拒绝（网络、动态 deny、COW、chroot
-  等）精确上报；静态 fs 授权（`fs_readable`/`fs_writable`）由
-  `sandlock-v0.8.5-fsgrant.patch` 在 supervisor 侧镜像——非 chroot 模式下，
-  open/openat/openat2 与 execve/execveat 在落入内核（Landlock）之前先按授权
-  判定，被拒即 `EACCES`（被 denyfd 通道记录），因此默认策略下 `cat /etc/passwd`
-  这类读拒绝现在会产生 `audit.deny`。Landlock 仍是内核兜底（本门只镜像其
-  判定、不放松）。**剩余不可观测面**：link/rename 等双路径 syscall 与
-  mkdir/unlink/truncate 等路径 syscall（未纳入 notify BPF 集）、以及 chroot
-  模式（chroot handler 自有语义）——此类失败仍按普通非零退出呈现。
-  **运行时验证（2026-08-04，真实 KVM）**：带全部补丁（musl+denyfd+
-  fsgrant）的 sandlock 已烘焙进 base/ubuntu 层；越权读取
-  （`cat /var/secret`）返回保留码 200 并产生 `audit.deny`（reason 带
-  stderr），允许的读取正常 exit 0 —— deny 通道与 fsgrant 门在运行系统
-  中激活。
+  门控结构化审计事件——`audit.exec`（沙箱 exec 完成：exit_code +
+  duration）、`audit.deny`（guest 拒绝；guest-proxy 将拒绝的 exit code 改写为
+  保留值 `SANDBOX_DENY_EXIT_CODE`，引擎按 exit code 判定，不嗅探 stderr
+  文本）、`audit.resource`（sandbox_create 的 limits 声明 + VM resize 平台
+  动作）。门控用生效策略（默认 ∪ 用户）；事件与发射点见
+  `docs/protocol.md`「审计」小节。默认策略的 `audit.deny` 开启。
+- **拒绝信号是结构化通道（M7）**：guest-proxy 不从子进程 stderr 推断拒绝。
+  后端（confine / sandlock）把拒绝响应写成 JSON 行到 `SANDBOX_DENY_FD`
+  指定 fd；guest-proxy 仅在收到记录**且** exec 非零退出时改写 exit code 为
+  `SANDBOX_DENY_EXIT_CODE`。**覆盖边界（诚实声明）**：confine 的网络拒绝
+  （seccomp-notify）与 sandlock 的网络/动态拒绝精确上报；confine 的静态 fs
+  拒绝（Landlock 内核执行）不可观测——不产生 `audit.deny`，这是性能取舍
+  （fs ~1.3× vs sandlock 4.6×）。sandlock 的 fsgrant patch 镜像静态 fs
+  授权，可上报 fs 拒绝（4.6×）。
 
 原"映射层保留协议兼容"的设计已取消——契约面即唯一实现，无兼容输入。
 
@@ -235,10 +232,10 @@ write_paths / net_allow）已移除，一律拒绝：
 | 访问 | VM 层(VmPolicy) | Sandbox 层(SandboxPolicy) | 执行者 |
 |---|---|---|---|
 | CPU/内存 | 物理配额 | 逻辑上限(⊆) | VmAdapter(硬)+ SandboxAdapter(逻辑) |
-| 文件 | 持久盘 upper 策略 | 路径能力 | SandboxAdapter → guest sandlock |
-| 网络 | 拓扑(NAT/桥) | 端点白名单 | VM 网络 + sandbox 出站过滤 |
-| 设备 | — | Device 能力 | SandboxAdapter → guest |
-| 进程 | — | procs 配额 | SandboxAdapter → guest sandlock |
+| 文件 | 持久盘 upper 策略 | 路径能力 | SandboxAdapter → guest-proxy → confine（Landlock）/ sandlock |
+| 网络 | 拓扑(NAT；桥=P3) | 端点白名单 | VM 网络 + sandbox 出站过滤（confine seccomp / sandlock） |
+| 设备 | — | 拒绝（见 §4） | — |
+| 进程 | — | procs 配额 | cgroup pids（confine）/ sandlock `-P` |
 
 **隔离保证**:
 - 同 VM 内 sandbox 互不可达 = 能力集无交叉(策略)+ guest 隔离(执行)。
@@ -252,8 +249,8 @@ write_paths / net_allow）已移除，一律拒绝：
    断言能力集不变(roundtrip)。
 2. **默认拒绝测试**:空能力集 + `default: Deny` → 一切访问拒绝,有 deny 审计事件。
 3. **上限校验测试**:sandbox limits > VM 配额 → 创建拒绝。
-4. **不支持能力测试**:`Execute` / `Inbound` / `Device` 能力 → 后端硬错误
-   (诚实不支持);`default: "allow"` → 拒绝。
+4. **不支持能力测试**:`Execute` / `Inbound` / `Device` / `bandwidth_kbps`
+   → 策略校验层拒绝（引擎 + SDK，fail-fast）；`default: "allow"` → 拒绝。
 5. **隔离测试**:一 VM 两 sandbox,能力集无交叉 → 互不可达(e2e)。
 
 ---
@@ -265,7 +262,7 @@ write_paths / net_allow）已移除，一律拒绝：
 | 类型(`VmPolicy`/`SandboxPolicy`/`Capability`…) | `crates/adapter/traits`(与 VmSpec 同层) | ✅ B1 已落地 |
 | 默认策略常量 | 引擎层(`DEFAULT_SANDBOX_POLICY`) | ✅ B1 已落地 |
 | ~~旧 ExecPolicy 兼容映射~~ | —(兼容层已移除,旧 dict 拒绝) | B2 移除 |
-| SandboxAdapter 携带策略 | trait 签名更新 | C(L2 统一时) |
+| SandboxAdapter 携带策略 | trait 签名更新 | ✅ C 已实现（adapter/confine + adapter/sandlock） |
 
 *本规范为 B 阶段设计基线。B(类型落地 + 协议统一)已实现,兼容层按设计取消;
 C(L2 统一)独立评审后实现。*

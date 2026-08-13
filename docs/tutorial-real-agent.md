@@ -4,7 +4,7 @@
 Terrarium 的核心用法：**LLM agent 通过 MCP 接口把任务放进隔离沙箱执行**。
 agent 本身没有任何宿主文件系统 / shell 访问权——它唯一的执行通道是
 `terra-mcp` 暴露的 `terra_*` 工具，每个命令都在隔离 VM 会话中运行
-（默认经 sandlock 约束）。
+（默认经 confine 约束）。
 
 读完本文你可以：跑通一个真实 agent 编码任务、理解 agent 循环与 MCP 的
 衔接方式、把示例换成你自己的任务或框架（LangGraph / Claude SDK / Codex）。
