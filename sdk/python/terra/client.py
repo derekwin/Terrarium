@@ -70,7 +70,10 @@ def _validate_network_capability(spec: dict) -> None:
         )
     if direction == "Inbound":
         raise ValueError(
-            "Network Inbound capability is not supported by the sandlock backend"
+            "Network Inbound is not an explicit capability: VM-internal "
+            "listening is always allowed (NAT keeps it unreachable from "
+            "outside); external ingress needs the Bridge topology (not "
+            "implemented)"
         )
 
 

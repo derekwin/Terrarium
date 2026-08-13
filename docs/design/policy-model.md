@@ -182,6 +182,18 @@ write_paths / net_allow）已移除，一律拒绝：
   硬编码迁至引擎级常量，跨实现语义一致）。
 - **guest 翻译**：guest-proxy 将能力集翻译为 sandlock 旗标；`Execute` /
   `Inbound` / `Device` 三类能力后端无法表达，返回硬错误（诚实不支持）。
+
+  **拒绝项的语义约定**：
+  - `Execute`：Linux 上"能执行 = 能读"（执行须加载代码/解释器），由
+    `Read` 隐含；不单独授权。
+  - `Inbound`：VM 内监听（bind）不设限（agent 起本地服务/自测是合理
+    需求）；外部入站由 VM 网络拓扑（NAT）天然隔离——`Bridge` 直通
+    未实现前，"外部可达"不是可表达的能力。因此 Inbound 能力无需显式化。
+  - `Device`：microVM 设备面很小；安全设备（/dev/urandom、/dev/null）
+    由默认策略覆盖（/dev 只读 + 内核 STRICT_DEVMEM 兜底），危险设备
+    （/dev/mem 等）不应授权；不做精确设备授权。
+  - `bandwidth_kbps`（sandbox 层）：带宽属于 VM 层配额（未实现）；接口
+    拒绝，避免静默不生效。
 - **SDK/CLI**：SDK `validate_policy` 客户端校验 + CLI
   `--read-path/--write-path/--net-allow/--memory-mb/--procs` 直接产出新形状。
 - **继承语义**：per-call policy **替换**存储策略（`.or()` 链：per-call →
