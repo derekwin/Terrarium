@@ -182,6 +182,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Snapshot restore remains the full-determinism path.
 
 ### Fixed
+- **sandbox_create serialized all creates on the manager lock** — VM boot
+  + agent-ready + workdir ran entirely under `Mutex<VmManager>`, so
+  concurrent clients queued ~1s each (1.05 VMs/s with 8 workers) while
+  `vm_create` already spawned lock-free (18.8 VMs/s). `sandbox_create` is
+  now split into prepare (lock: validate/resolve/quota/id) + bind
+  (lock-free: spawn, L2 session, workdir) + finish (lock: register +
+  audit); measured 7.0 VMs/s at 100 instances (8 workers), ahead of
+  docker's 3.5/s. Also fixed a tokio Mutex re-entrancy deadlock found by
+  the daemon lock tests.
 - **tap name collision broke same-prefix tenant bursts** — `tap_name`
   truncated VM names to 9 chars, so tenants sharing a prefix (e.g.
   `tenant-dens-0..7`) all got one tap; the second and later VMs failed to

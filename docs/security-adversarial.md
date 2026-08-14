@@ -116,27 +116,28 @@ CLOEXEC，被继承进 terra-confine 再进入被约束命令：进程内可见 
 gVisor 内存数字是 Sentry 进程 RSS，需注意其 syscall 拦截的用户态 TCB
 与 KVM 硬件边界的本质差异。
 
-## 5.1 规模化密度对比（100 实例，2026-08-13）
+## 5.1 规模化密度对比（100 实例，2026-08-14）
 
 `sdk/python/tests/density_compare.py` 在同一宿主上各起 100 个长驻实例，
-测创建速率、宿主内存与并发 exec 吞吐（`docs/density-compare-2026-08-13.json`）：
+测创建速率、宿主内存与并发 exec 吞吐（`docs/density-compare-2026-08-14.json`）：
 
 | 基线 | 100 实例创建 | 创建速率 | 单实例宿主内存（RSS） | 聚合 exec 吞吐 |
 |---|---|---|---|---|
-| Terrarium | 105.7 s | 0.95/s（冷启动） | **67.6 MB**（CH+virtiofsd） | **2013 exec/s**（16 并发） |
-| Docker | 30.5 s | 3.3/s | 0.6 MB（sleep 容器） | 168 exec/s（docker exec） |
-| gVisor | 1.7 s（到 sentry 就绪） | 60/s | **84.1 MB**（runsc+gofer+sentry） | n/a（do 无 exec 通道） |
+| Terrarium | 14.3 s | **7.0/s**（冷启动，8 并发） | **67.5 MB**（CH+virtiofsd） | **1869 exec/s**（16 并发） |
+| Docker | 28.8 s | 3.5/s | 0.6 MB（sleep 容器） | 173 exec/s（docker exec） |
+| gVisor | 1.6 s（到 sentry 就绪） | 65/s | **84.4 MB**（runsc+gofer+sentry） | n/a（do 无 exec 通道） |
 
 读法（对论文最有用的一张表）：
-- **gVisor 的每实例宿主成本（84.1 MB）高于 Terrarium（67.6 MB）**：runsc
+- **gVisor 的每实例宿主成本（84.4 MB）高于 Terrarium（67.5 MB）**：runsc
   do 每沙箱是 runsc wrapper + gofer + sentry 三个进程；Terrarium 是 CH +
   virtiofsd 两个进程。加上 exec 延迟（~5ms vs 无 exec 通道）与 TCB
   （用户态拦截 vs KVM 硬件边界），"gVisor 更轻"的常见假设在本负载下
   不成立。
 - Docker 每实例内存极低（0.6MB），但 exec 延迟 ~78ms（docker exec 客户端
   往返）且默认无治理（root 可改 /etc/passwd、开 raw socket）。
-- Terrarium 冷启动 ~1s/实例、聚合 2013 exec/s；暖池（`Pool.acquire`，
-  docs/benchmarks.md）把认领降到亚秒级，是规模化 RL/CI 场景的既定路径。
+- **Terrarium 冷创建 7.0/s，是 docker 的两倍**（2026-08-14 锁修复后，
+  见下）；聚合 ~1870 exec/s；暖池（`Pool.acquire`，docs/benchmarks.md）
+  把认领降到 ~18ms，是规模化 RL/CI 场景的既定路径。
 
 **密度扫描暴露并修复的真实缺陷**：`tap_name` 把 VM 名截断到 9 字符，
 同前缀租户（如 `tenant-dens-0..7`）全部落到同一个 tap 设备名上，第二个
@@ -145,6 +146,14 @@ gVisor 内存数字是 Sentry 进程 RSS，需注意其 syscall 拦截的用户�
 `<前4字符>-<16bit FNV-1a 摘要>`，15 字符内保持唯一。另修复 daemon
 keep-alive wrapper 在瞬时心跳失败时自杀的问题（连续 8 次失败才退出），
 100 实例并行创建下服务 daemon 保持存活。
+
+**2026-08-14：sandbox_create 锁串行化修复**——并发创建从 0.95/s 提升到
+7.0/s（8 并发，100 实例实测）。根因：`sandbox_create` 全程持有 manager
+锁（VM 启动 + agent 就绪 + workdir 都在锁内），并发客户端全部排队；
+而 `vm_create` 早已是锁外 spawn（并行 18.8 VMs/s）。修复把
+`sandbox_create` 拆成"锁内准备 + 锁外 spawn/bind + 重入注册"
+（`crates/engine/src/daemon.rs`、`commands/sandbox.rs`），并修掉了
+过程中发现的 tokio Mutex 不可重入死锁。暖池路径不变（~18ms）。
 
 ## 6. 已知功能取舍（产品决策项）
 
