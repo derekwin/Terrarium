@@ -43,6 +43,7 @@ fn record_json(r: &SandboxRecord) -> serde_json::Value {
 /// cold-boot spec the caller must spawn and register under
 /// `tenant-<tenant>` (the daemon spawns it OUTSIDE the manager lock so
 /// concurrent sandbox_create calls boot VMs in parallel).
+#[derive(Clone)]
 pub(crate) enum TenantVm {
     Existing {
         vm_name: String,
@@ -169,6 +170,7 @@ async fn resolve_tenant_vm(
 /// Everything `sandbox_create` needs that can be resolved under the
 /// manager lock, so the daemon can run the slow parts (VM boot, agent
 /// ready, workdir) outside it.
+#[derive(Clone)]
 pub(crate) struct PreparedSandboxCreate {
     pub tenant: String,
     pub vm: TenantVm,
@@ -529,6 +531,7 @@ pub(crate) async fn cmd_sandbox_kill(mgr: &mut VmManager, cmd: Command) -> Respo
 /// `destroy`). All of the tenant's sandbox records are dropped either way.
 /// Everything `tenant_destroy` needs resolved under the manager lock; the
 /// caller runs the vsock/CH work outside it and finalizes on re-lock.
+#[derive(Clone)]
 pub(crate) struct TenantDestroyPlan {
     pub tenant: String,
     pub vm_name: String,

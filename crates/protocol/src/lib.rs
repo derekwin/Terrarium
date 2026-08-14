@@ -121,6 +121,26 @@ pub struct Command {
     // (default true; false forces a cold-booted dedicated VM)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<bool>,
+
+    // batch: number of environments (batch_create / pool sizing)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+
+    // batch_create: tenant-name prefix (`{prefix}-0..N-1`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+
+    // batch_exec: sandbox ids to run the same command on
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sandboxes: Vec<String>,
+
+    // batch_recycle: tenant names to recycle
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tenants: Vec<String>,
+
+    // batch_recycle: "destroy" (release to pool) or "reset" (in-place)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 impl Command {
@@ -155,6 +175,11 @@ impl Command {
             tenant: None,
             id: None,
             pool: None,
+            count: None,
+            prefix: None,
+            sandboxes: Vec::new(),
+            tenants: Vec::new(),
+            mode: None,
         }
     }
 

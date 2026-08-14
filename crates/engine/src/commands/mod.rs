@@ -4,6 +4,7 @@
 //! executes it, and returns a serializable response.
 
 mod audit_cmd;
+pub(crate) mod batch;
 mod exec;
 mod fs;
 mod network;
@@ -591,6 +592,9 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "net_up" => network::cmd_net_up(),
         "pool_create" => pool::cmd_pool_create(mgr, cmd).await,
         "pool_create_snapshot" => pool::cmd_pool_create_snapshot(mgr, cmd).await,
+        "batch_create" => batch::cmd_batch_create(mgr, cmd).await,
+        "batch_exec" => batch::cmd_batch_exec(mgr, cmd).await,
+        "batch_recycle" => batch::cmd_batch_recycle(mgr, cmd).await,
         "pool_list" => pool::cmd_pool_list(mgr),
         "pool_claim" => pool::cmd_pool_claim(mgr, cmd).await,
         "pool_release" => pool::cmd_pool_release(mgr, cmd).await,

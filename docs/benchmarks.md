@@ -257,3 +257,17 @@ sandbox 销毁、reset/detach/shutdown 全在 manager 锁外执行，重入锁�
 （拒绝在 daemon 运行时执行；`daemon start` 检测到孤儿时给出提示）。
 `pool_create_snapshot` 填充已并行化（16 槽 ~1.5s，含一次性 tap 池填充；
 此前顺序 ~4.8s）。
+
+## 批量编排 API（P1 #2，2026-08-14）
+
+三个单命令批量原语（engine + SDK），全部锁外并行：
+
+| 命令 | 语义 | 实测（16 环境） |
+|---|---|---|
+| `batch_create(prefix, N)` | 一次拉起 N 个环境（Ready 池认领 + 冷启动补齐，并行绑定） | 753 ms |
+| `batch_exec(ids, args)` | 同一命令并行跑在 N 个沙箱（任务注入 + 采集） | 13 ms |
+| `batch_recycle(tenants, mode="reset"/"destroy")` | 并行 in-place reset（保留环境）或释放回池 | reset 25 ms / destroy 138 ms |
+
+RL episode 循环因此变成 3 次调用：`batch_create` → `batch_exec` →
+`batch_recycle(reset)`；重置后环境仍可复用（已验证）。单节点数百环境的
+编排不再需要客户端逐环境循环。

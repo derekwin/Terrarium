@@ -16,6 +16,11 @@ use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
 use crate::commands::{
+    batch::{
+        batch_create_response, bind_batch_envs, prepare_batch_create, prepare_batch_exec,
+        prepare_batch_recycle, run_batch_execs, run_batch_recycle, spawn_batch_vms,
+        BatchRecycleItem,
+    },
     execute, pool::{
         finish_pool_create_snapshot, pool_create_snapshot_response, prepare_pool_create_snapshot,
     },
@@ -46,6 +51,8 @@ const REAP_COMMANDS: &[&str] = &[
     "pool_release",
     "sandbox_create",
     "tenant_destroy",
+    "batch_create",
+    "batch_recycle",
 ];
 
 /// Run the controller in daemon mode.
@@ -446,6 +453,124 @@ async fn dispatch(
                 }
                 let resp = pool_create_snapshot_response(ready, failed);
                 return (resp, false);
+            }
+            Err(resp) => return (resp, false),
+        }
+    }
+
+    // batch_create: N environments in one call. Prepare N sandbox plans
+    // under the lock (ready-pool claims), spawn + bind outside in
+    // parallel, register on re-lock.
+    if cmd.command == "batch_create" {
+        // reuse the top-of-dispatch guard (never re-lock; see the note
+        // above the reap scan)
+        match prepare_batch_create(&mut mgr, &cmd).await {
+            Ok(envs) => {
+                let adapter = mgr.adapter();
+                let sb_adapter = mgr.sandbox_adapter_arc();
+                drop(mgr);
+                let spawned = spawn_batch_vms(&envs, adapter).await;
+                let mut mgr = manager.lock().await;
+                let mut handles = std::collections::HashMap::new();
+                let mut failed: Vec<(String, String)> = Vec::new();
+                for (idx, handle) in spawned {
+                    if let TenantVm::ColdSpec { spec, .. } = &envs[idx].plan.vm {
+                        match mgr.register_vm(spec, handle) {
+                            Ok(()) => {
+                                let vm = match &envs[idx].plan.vm {
+                                    TenantVm::ColdSpec { vm_name, .. } => vm_name.clone(),
+                                    _ => String::new(),
+                                };
+                                if let Some(h) = mgr.get_handle(&vm) {
+                                    handles.insert(idx, h);
+                                }
+                            }
+                            Err(e) => failed.push((envs[idx].tenant.clone(), e.to_string())),
+                        }
+                    }
+                }
+                for (idx, env) in envs.iter().enumerate() {
+                    if let TenantVm::Existing { handle, .. } = &env.plan.vm {
+                        handles.insert(idx, handle.clone());
+                    }
+                }
+                drop(mgr);
+                let results = bind_batch_envs(&envs, &handles, sb_adapter).await;
+                let mut mgr = manager.lock().await;
+                let mut created = Vec::new();
+                for (idx, r) in results {
+                    match r {
+                        Ok(record) => {
+                            crate::commands::sandbox::finish_sandbox_create(
+                                &mut mgr,
+                                &envs[idx].plan,
+                                record,
+                            );
+                            let vm = match &envs[idx].plan.vm {
+                                TenantVm::Existing { vm_name, .. } => vm_name.clone(),
+                                TenantVm::ColdSpec { vm_name, .. } => vm_name.clone(),
+                            };
+                            created.push(serde_json::json!({
+                                "tenant": envs[idx].tenant,
+                                "id": envs[idx].plan.sandbox_id,
+                                "vm": vm,
+                            }));
+                        }
+                        Err(e) => failed.push((envs[idx].tenant.clone(), e)),
+                    }
+                }
+                let resp = batch_create_response(created, failed);
+                return (resp, false);
+            }
+            Err(resp) => return (resp, false),
+        }
+    }
+
+    // batch_exec: run one command on N sandboxes in parallel.
+    if cmd.command == "batch_exec" {
+        // reuse the top-of-dispatch guard (never re-lock)
+        match prepare_batch_exec(&mgr, &cmd) {
+            Ok(envs) => {
+                drop(mgr);
+                let results = run_batch_execs(envs).await;
+                let rows: Vec<_> = results
+                    .into_iter()
+                    .map(|(id, resp)| {
+                        serde_json::json!({"id": id, "status": resp.status, "data": resp.data})
+                    })
+                    .collect();
+                return (Response::ok(serde_json::json!({"results": rows, "count": rows.len()})), false);
+            }
+            Err(resp) => return (resp, false),
+        }
+    }
+
+    // batch_recycle: reset or destroy N tenants in parallel; destroy
+    // finalizes pool bookkeeping on re-lock.
+    if cmd.command == "batch_recycle" {
+        // reuse the top-of-dispatch guard (never re-lock)
+        match prepare_batch_recycle(&mut mgr, &cmd) {
+            Ok(items) => {
+                drop(mgr);
+                let results = run_batch_recycle(&items).await;
+                let mut mgr = manager.lock().await;
+                for item in &items {
+                    if let BatchRecycleItem::Destroy(plan) = item {
+                        crate::commands::sandbox::finalize_tenant_destroy(&mut mgr, plan);
+                    }
+                }
+                let rows: Vec<_> = results
+                    .into_iter()
+                    .map(|(tenant, r)| {
+                        let status = match &r {
+                            Ok(released) if *released => "released",
+                            Ok(_) => "reset",
+                            Err(_) => "error",
+                        };
+                        serde_json::json!({"tenant": tenant, "status": status, "error": r.err()})
+                    })
+                    .collect();
+                return (Response::ok(serde_json::json!({"results": rows, "count": rows.len()})), false);
             }
             Err(resp) => return (resp, false),
         }

@@ -375,6 +375,72 @@ class TerraClient:
             cmd["net"] = True
         return self._send(cmd)
 
+    def batch_create(
+        self,
+        prefix: str,
+        count: int,
+        *,
+        layers: list[str],
+        net: bool = False,
+        kernel: str | None = None,
+        initramfs: str | None = None,
+        cpus: int = 1,
+        memory_mb: int = 256,
+        pool: bool = True,
+    ) -> dict:
+        """Create ``count`` sandbox environments in ONE daemon command
+        (P1 batch orchestration): tenants ``{prefix}-0..N-1`` are claimed
+        from the ready/warm pool (or cold-booted as the shortfall) and
+        bound in parallel. Returns per-env ``{tenant, id, vm}`` plus
+        per-env failures."""
+        cmd: dict = {
+            "command": "batch_create",
+            "prefix": prefix,
+            "count": count,
+            "layers": list(layers),
+            "net": bool(net),
+            "cpus": cpus,
+            "memory_mb": memory_mb,
+            "pool": bool(pool),
+        }
+        if kernel:
+            cmd["kernel"] = kernel
+        if initramfs:
+            cmd["initramfs"] = initramfs
+        return self._send(cmd)
+
+    def batch_exec(
+        self,
+        sandboxes: list[str],
+        args: list[str],
+        *,
+        timeout_secs: int | None = None,
+    ) -> dict:
+        """Run the same command on N sandboxes in parallel (task injection
+        + collect). Returns per-sandbox ``{id, status, data}``."""
+        cmd: dict = {
+            "command": "batch_exec",
+            "sandboxes": list(sandboxes),
+            "args": list(args),
+        }
+        if timeout_secs is not None:
+            cmd["timeout_secs"] = timeout_secs
+        return self._send(cmd)
+
+    def batch_recycle(
+        self,
+        tenants: list[str],
+        *,
+        mode: str = "destroy",
+    ) -> dict:
+        """Recycle N tenants in parallel. ``mode="destroy"`` releases
+        pool-backed tenants back to the pool (with in-place reset for ready
+        slots); ``mode="reset"`` resets the tenant VM in place and keeps it
+        (RL episode cadence)."""
+        return self._send(
+            {"command": "batch_recycle", "tenants": list(tenants), "mode": mode}
+        )
+
     def pool_list(self) -> dict:
         """List warm-pool slots and their claim state."""
         return self._send({"command": "pool_list"})

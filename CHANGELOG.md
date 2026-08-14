@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Batch lifecycle API (P1 #2)** — `batch_create(prefix, N)` /
+  `batch_exec(ids, args)` / `batch_recycle(tenants, mode)` run N
+  environments in one daemon command: prepare under the lock, spawn/bind/
+  exec/reset/teardown on a JoinSet outside it, register on re-lock.
+  Measured at 16 envs: create 753ms (ready-pool claims + cold fallback),
+  exec 13ms, recycle-reset 25ms, recycle-destroy 138ms — the RL episode
+  loop is now three calls instead of a client-side N-loop. Protocol
+  Command gains count/prefix/sandboxes/tenants/mode fields.
 - **`terra cleanup` command + daemon-start orphan warning** — reaps
   cloud-hypervisor/virtiofsd/erofsfuse processes left by a crashed daemon
   and removes stale `/tmp/terra-*` sockets (refuses while a daemon is
