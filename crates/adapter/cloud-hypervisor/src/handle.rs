@@ -104,6 +104,7 @@ impl ChVmHandle {
             .map_err(|e| AdapterError::internal(format!("parse snapshot config: {}", e)))?;
         let fs_socket = format!("/tmp/terra-{}-fs.sock", name);
         let vsock_socket = format!("/tmp/terra-{}-vsock.sock", name);
+        let tap = format!("terra-{}", tap_name(name));
         if let Some(fs) = cfg.get_mut("fs").and_then(|f| f.as_array_mut()) {
             for entry in fs.iter_mut() {
                 if let Some(sock) = entry.get_mut("socket") {
@@ -113,6 +114,19 @@ impl ChVmHandle {
         }
         if let Some(sock) = cfg.get_mut("vsock").and_then(|v| v.get_mut("socket")) {
             *sock = serde_json::json!(vsock_socket);
+        }
+        // The restored config.json carries the ORIGINAL VM's net device
+        // (including its tap name). CH restore re-attaches devices from
+        // config.json — without this rewrite the restored VM would open
+        // the snapshotted VM's tap, which is still owned by its live CH
+        // ("Resource busy", observed on every net restore). Point it at
+        // the fresh tap launch() created for this restored VM.
+        if let Some(net) = cfg.get_mut("net").and_then(|n| n.as_array_mut()) {
+            for entry in net.iter_mut() {
+                if let Some(t) = entry.get_mut("tap") {
+                    *t = serde_json::json!(tap);
+                }
+            }
         }
         let out = serde_json::to_string_pretty(&cfg)
             .map_err(|e| AdapterError::internal(format!("serialize snapshot config: {}", e)))?;
@@ -166,17 +180,28 @@ impl ChVmHandle {
         }
 
         // Networking: NAT bridge + per-VM tap (privileged; clear error).
-        let tap = if spec.net {
-            terrarium_network::ensure_nat_bridge(
-                terrarium_network::DEFAULT_BRIDGE,
-                terrarium_network::DEFAULT_GATEWAY,
-                terrarium_network::DEFAULT_PREFIX,
-            )
+        // These run BLOCKING `ip`/`ebtables` subprocesses — under high
+        // parallel creation they must not occupy the tokio workers (that
+        // starves the daemon's accept loop and the keep-alive wrapper /
+        // SDK fallback take the wrong action). spawn_blocking keeps the
+        // async workers free while the subprocesses run.
+        let net_flag = spec.net;
+        let tap = if net_flag {
+            let name_for_tap = name.as_ref().to_string();
+            let setup = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+                terrarium_network::ensure_nat_bridge(
+                    terrarium_network::DEFAULT_BRIDGE,
+                    terrarium_network::DEFAULT_GATEWAY,
+                    terrarium_network::DEFAULT_PREFIX,
+                )?;
+                let tap = format!("terra-{}", tap_name(&name_for_tap));
+                terrarium_network::ensure_tap(&tap, terrarium_network::DEFAULT_BRIDGE)?;
+                Ok(Some(tap))
+            })
+            .await
+            .map_err(|e| AdapterError::internal(format!("tap setup task: {e}")))?
             .map_err(AdapterError::internal)?;
-            let tap = format!("terra-{}", tap_name(name.as_ref()));
-            terrarium_network::ensure_tap(&tap, terrarium_network::DEFAULT_BRIDGE)
-                .map_err(AdapterError::internal)?;
-            Some(tap)
+            setup
         } else {
             None
         };

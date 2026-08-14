@@ -14,6 +14,13 @@ Measures, for each of terra / docker / gvisor:
   via ``runsc do``, so it is skipped);
 * per-instance incremental cost — (mem at N − mem at N/2) / (N/2).
 
+Creation modes (``--create-mode``):
+* ``cold`` — every instance cold-boots a fresh VM (~1s each; parallel
+  workers overlap them — the sandbox_create lock-free path).
+* ``snapshot`` — one base VM is booted + snapshotted once, then N VMs are
+  restored from that snapshot (P1 fast-reset) and bound as sandboxes;
+  restore is the RL/density fast-create path.
+
 Baselines missing on the host are skipped. The sweep cleans up every
 instance it created, on every exit path.
 
@@ -79,6 +86,25 @@ def _proc_pss_mb(pid: int) -> float | None:
     return None
 
 
+def _retry_transient(fn, attempts: int = 40, delay: float = 0.25):
+    """Retry a daemon call across transient unavailability: a heavy create
+    burst can briefly starve the daemon's accept loop (connection refused /
+    ENOENT on the socket). The SDK's Sandbox path already retries; direct
+    client calls need the same treatment here."""
+    import time
+
+    last: Exception | None = None
+    for _ in range(attempts):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if "Connection refused" not in str(e) and "No such file" not in str(e):
+                raise
+            time.sleep(delay)
+    raise last  # type: ignore[misc]
+
+
 def _scan_proc_pids(needle: str) -> list[int]:
     out: list[int] = []
     for p in Path("/proc").iterdir():
@@ -112,14 +138,19 @@ class DensityBaseline:
 class TerraDensity(DensityBaseline):
     name = "terra"
 
-    def __init__(self) -> None:
+    def __init__(self, mode: str = "cold") -> None:
         sys.path.insert(0, str(REPO / "sdk" / "python"))
         from terra.client import TerraClient
+        from terra import images
         from terra.sandbox import Sandbox
 
         self.client = TerraClient()
         self.Sandbox = Sandbox
+        self.images = images
         self.prefix = f"dens-{uuid4().hex[:6]}"
+        self.mode = mode
+        self._snapshot_path: str | None = None
+        self._base_vm: str | None = None
 
     def create(self, n: int, parallel: int) -> list[str]:
         tenants = [f"{self.prefix}-{i}" for i in range(n)]
@@ -129,6 +160,42 @@ class TerraDensity(DensityBaseline):
             sb.kill()  # session gone; the tenant VM stays up
             return tenant
 
+        if self.mode == "snapshot":
+            self._ensure_snapshot()
+            kernel = str(self.images.ensure("vmlinux.bin"))
+
+            def restore(tenant: str) -> None:
+                _retry_transient(lambda: self.client.vm_restore(
+                    f"tenant-{tenant}", self._snapshot_path,
+                    cpus=1, memory_mb=256, layers=["ubuntu"], kernel=kernel, net=True,
+                ))
+
+            if parallel > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as ex:
+                    list(ex.map(restore, tenants))
+            else:
+                for t in tenants:
+                    restore(t)
+            # bind sandboxes onto the restored VMs (fast — no boot; run
+            # in parallel so the bind round-trips overlap). Direct client
+            # calls (not Sandbox(), which adds a sandbox_list probe per
+            # bind) keep the command volume low enough for the daemon.
+            irfs = str(self.images.ensure("initramfs-virtiofs.cpio.gz"))
+
+            def bind(tenant: str) -> None:
+                _retry_transient(lambda: self.client.sandbox_create(
+                    tenant, layers=["ubuntu"], kernel=kernel, initramfs=irfs,
+                    cpus=1, memory_mb=256, net=True, pool=False,
+                ))
+
+            if parallel > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as ex:
+                    list(ex.map(bind, tenants))
+            else:
+                for t in tenants:
+                    bind(t)
+            return tenants
+
         if parallel > 1:
             with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as ex:
                 list(ex.map(one, tenants))
@@ -136,6 +203,25 @@ class TerraDensity(DensityBaseline):
             for t in tenants:
                 one(t)
         return tenants
+
+    def _ensure_snapshot(self) -> None:
+        """Boot one base VM, snapshot it, then tear the base down — the
+        restored VMs get fresh taps (restore rewrites config.json), so the
+        base's tap/CID are freed for reuse."""
+        if self._snapshot_path is not None:
+            return
+        base = f"{self.prefix}-base"
+        sb = self.Sandbox(tenant=base, layers=["ubuntu"], network=True, timeout=120)
+        sb.kill()
+        # Snapshot to a custom path: vm_destroy removes the DEFAULT
+        # snapshot dir ({snapshot_dir}/terra-snap-<vm>) as garbage, which
+        # would delete the base snapshot we restore from.
+        snap_path = f"/tmp/terra-dens-snap-{uuid4().hex[:12]}"
+        snap = self.client.vm_snapshot(f"tenant-{base}", snapshot_path=snap_path)
+        self._snapshot_path = snap["snapshot_path"]
+        self._base_vm = f"tenant-{base}"
+        self.client.vm_destroy(self._base_vm)
+        self._base_vm = None
 
     def host_memory_mb(self) -> dict:
         vms = {v["name"]: v.get("pid") for v in self.client.vm_list().get("vms", [])}
@@ -197,6 +283,11 @@ class TerraDensity(DensityBaseline):
             try:
                 self.client.vm_destroy(f"tenant-{t}")
             except (TerraError, Exception):
+                pass
+        if self._base_vm:
+            try:
+                self.client.vm_destroy(self._base_vm)
+            except Exception:
                 pass
 
 
@@ -355,16 +446,21 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--instances", type=int, default=100)
     ap.add_argument("--parallel", type=int, default=8)
+    ap.add_argument("--create-mode", choices=["cold", "snapshot"], default="cold")
     ap.add_argument("--baselines", default="terra,docker,gvisor")
     ap.add_argument("--out", default="/tmp/density-compare.json")
     args = ap.parse_args()
 
     classes: dict[str, type[DensityBaseline]] = {
-        "terra": TerraDensity,
+        "terra": lambda: TerraDensity(mode=args.create_mode),
         "docker": DockerDensity,
         "gvisor": GvisorDensity,
     }
-    results: dict = {"instances": args.instances, "baselines": {}}
+    results: dict = {
+        "instances": args.instances,
+        "create_mode": args.create_mode,
+        "baselines": {},
+    }
     for name in args.baselines.split(","):
         cls = classes.get(name)
         if cls is None:

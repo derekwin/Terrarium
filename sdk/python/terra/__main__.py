@@ -1288,7 +1288,7 @@ def cmd_daemon_start(args) -> int:
         "        # unreachable for several consecutive polls — the real\n"
         "        # daemon_stop teardown closes the socket permanently.\n"
         "        fails += 1\n"
-        "        if fails >= 8:\n"
+        "        if fails >= 30:\n"
         "            break\n" % (args.tcp,),
     ]
 

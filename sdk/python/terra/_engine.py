@@ -49,10 +49,35 @@ class DaemonManager:
         the daemon is started and we poll until it answers or *timeout*
         seconds elapse.
         """
+        import os as _os
+        import time as _time
+
         from .daemon import DaemonError, daemon_ping
 
         if daemon_ping(self.socket_path):
             return
+        # A socket file that exists but does not answer usually means the
+        # daemon is BUSY (a heavy create burst can starve its accept loop)
+        # or still starting. Auto-starting an embedded daemon here would
+        # steal the socket path from a merely-busy root daemon and silently
+        # lose CAP_NET_ADMIN. Retry the ping before falling back.
+        if _os.path.exists(self.socket_path):
+            deadline = _time.time() + min(float(timeout), 8.0)
+            while _time.time() < deadline:
+                if daemon_ping(self.socket_path):
+                    return
+                _time.sleep(0.25)
+            # A socket file that never answers after the retry window means
+            # the existing daemon is wedged/busy, not absent. Auto-starting
+            # an embedded daemon would unlink its socket path and steal it
+            # (silently losing root privileges / NAT). Surface the state
+            # instead — the operator restarts the daemon.
+            raise EngineError(
+                f"engine daemon at {self.socket_path} exists but is "
+                "unresponsive (busy or wedged) — stop it with "
+                "'terra daemon stop' and retry",
+                engine_error="daemon socket present but not answering",
+            )
         try:
             self._daemon.start(timeout=timeout)
         except DaemonError as e:

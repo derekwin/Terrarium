@@ -88,6 +88,19 @@ pub fn ensure_vm_isolation() -> Result<(), String> {
 /// Ensure the NAT bridge + forwarding rules exist (idempotent).
 /// Requires CAP_NET_ADMIN.
 pub fn ensure_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), String> {
+    // One-time per daemon: every VM launch calls this, and each call
+    // spawns several BLOCKING `ip`/`ebtables`/pgrep subprocesses. Under
+    // high parallel creation (the density/RL scenario) those blocking
+    // calls starve the tokio workers and the daemon's accept loop stops
+    // answering (the keep-alive wrapper then takes the process down).
+    // The bridge is daemon-lifetime state — cache "up" per bridge and
+    // short-circuit subsequent launches.
+    {
+        let state = BRIDGE_STATE.lock().unwrap();
+        if state.get(bridge) == Some(&true) {
+            return Ok(());
+        }
+    }
     // Create bridge if missing.
     let exists = Command::new("ip")
         .args(["link", "show", bridge])
@@ -169,6 +182,7 @@ pub fn ensure_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), 
     // Tenant L2 isolation (drop frames between VM tap ports).
     ensure_vm_isolation()?;
 
+    BRIDGE_STATE.lock().unwrap().insert(bridge.to_string(), true);
     tracing::info!(%bridge, %gateway, "NAT bridge ready");
     Ok(())
 }
@@ -284,6 +298,7 @@ pub fn stop_dhcp(bridge: &str) {
 /// Tear down the NAT bridge, masquerade rule, and DHCP server.
 /// Caller must guarantee no VM is using the bridge anymore.
 pub fn teardown_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), String> {
+    BRIDGE_STATE.lock().unwrap().remove(bridge);
     stop_dhcp(bridge);
     // Best-effort: remove the tenant-isolation rule if present.
     let _ = run_ebtables(&[
@@ -310,6 +325,10 @@ pub fn teardown_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<()
     tracing::info!(%bridge, "NAT bridge torn down");
     Ok(())
 }
+
+/// Daemon-lifetime NAT bridge readiness cache (see `ensure_nat_bridge`).
+static BRIDGE_STATE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Remove a tap device (best-effort on missing).
 pub fn remove_tap(tap: &str) -> Result<(), String> {

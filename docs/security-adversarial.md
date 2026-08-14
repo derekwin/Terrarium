@@ -123,7 +123,8 @@ gVisor 内存数字是 Sentry 进程 RSS，需注意其 syscall 拦截的用户�
 
 | 基线 | 100 实例创建 | 创建速率 | 单实例宿主内存（RSS） | 聚合 exec 吞吐 |
 |---|---|---|---|---|
-| Terrarium | 14.3 s | **7.0/s**（冷启动，8 并发） | **67.5 MB**（CH+virtiofsd） | **1869 exec/s**（16 并发） |
+| Terrarium（冷启动） | 14.3 s | 7.0/s（8 并发） | **67.5 MB**（CH+virtiofsd） | **1869 exec/s** |
+| Terrarium（快照恢复） | 1.9 s | **53.2/s**（64 并发，含一次性基 VM+快照） | **62.6 MB** | **2117 exec/s** |
 | Docker | 28.8 s | 3.5/s | 0.6 MB（sleep 容器） | 173 exec/s（docker exec） |
 | gVisor | 1.6 s（到 sentry 就绪） | 65/s | **84.4 MB**（runsc+gofer+sentry） | n/a（do 无 exec 通道） |
 
@@ -138,6 +139,10 @@ gVisor 内存数字是 Sentry 进程 RSS，需注意其 syscall 拦截的用户�
 - **Terrarium 冷创建 7.0/s，是 docker 的两倍**（2026-08-14 锁修复后，
   见下）；聚合 ~1870 exec/s；暖池（`Pool.acquire`，docs/benchmarks.md）
   把认领降到 ~18ms，是规模化 RL/CI 场景的既定路径。
+- **Terrarium 快照恢复创建 53.2/s，反超 gVisor**（同轮 40.8/s）：一份
+  基 VM 快照（~1.3s 一次性成本）后，100 个环境从快照并行恢复 + 绑定
+  sandbox 仅 1.9s。这是 P1 快照快速重置在"创建"语义上的直接兑现；
+  手动拆解 restore+bind 在 64 路下实测 ~101 VMs/s。
 
 **密度扫描暴露并修复的真实缺陷**：`tap_name` 把 VM 名截断到 9 字符，
 同前缀租户（如 `tenant-dens-0..7`）全部落到同一个 tap 设备名上，第二个
@@ -154,6 +159,17 @@ keep-alive wrapper 在瞬时心跳失败时自杀的问题（连续 8 次失败�
 `sandbox_create` 拆成"锁内准备 + 锁外 spawn/bind + 重入注册"
 （`crates/engine/src/daemon.rs`、`commands/sandbox.rs`），并修掉了
 过程中发现的 tokio Mutex 不可重入死锁。暖池路径不变（~18ms）。
+
+**2026-08-14：快照恢复创建 + 高并发健壮性**——
+- 恢复路径的真实缺陷：CH restore 从快照 config.json 重挂设备，但 net
+  设备的 tap 仍指向基 VM 的 tap（Resource busy，所有带网恢复失败）；
+  `prepare_restore_dir` 现在把 tap 一并改写为恢复 VM 自己的（vsock/fs
+  早已如此）。
+- 高并发下 daemon 可被饿死：每次 VM 启动的 `ip`/`ebtables` 子进程同步
+  阻塞 tokio worker；NAT 桥初始化改为每 daemon 一次（缓存），网络设置
+  包进 `spawn_blocking`。另修复 SDK 在 daemon 忙时静默起内嵌 daemon
+  抢占 socket 的问题（socket 存在但不响应时明确报错，不再自动接管），
+  并把 keep-alive wrapper 的心跳容错从 8 次放宽到 30 次。
 
 ## 6. 已知功能取舍（产品决策项）
 

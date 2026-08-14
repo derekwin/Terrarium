@@ -182,6 +182,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Snapshot restore remains the full-determinism path.
 
 ### Fixed
+- **net restores failed with tap "Resource busy"** — CH restore re-attaches
+  devices from the snapshot's config.json, whose net device still pointed
+  at the source VM's tap; `prepare_restore_dir` now rewrites the tap to the
+  restored VM's own (as it already did for vsock/fs sockets). Restore is
+  now the fast-create path: 100 instances from one snapshot in ~1.9s
+  (53.2 VMs/s end-to-end, ~101/s restore+bind at 64-way), ahead of gVisor.
+- **daemon accept loop starved by blocking subprocess calls** — every VM
+  launch ran `ip`/`ebtables` synchronously on the tokio workers; heavy
+  parallel creation starved the accept loop and the SDK silently replaced
+  the (merely busy) root daemon with a rootless embedded one. NAT bridge
+  setup is now cached per daemon, the network setup runs in
+  `spawn_blocking`, the SDK refuses to auto-start an embedded daemon when
+  the socket path exists but does not answer, and the keep-alive wrapper
+  tolerates 30 consecutive heartbeat failures.
 - **sandbox_create serialized all creates on the manager lock** — VM boot
   + agent-ready + workdir ran entirely under `Mutex<VmManager>`, so
   concurrent clients queued ~1s each (1.05 VMs/s with 8 workers) while
