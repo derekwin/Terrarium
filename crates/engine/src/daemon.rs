@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 use crate::commands::{
     batch::{
@@ -166,11 +166,55 @@ pub async fn run(
     Ok(())
 }
 
+/// Owns `Mutex<VmManager>`: the ONLY way dispatch code can lock/unlock.
+/// Handler functions receive only ``&mut LockGuard`` — never the raw
+/// ``&Mutex`` — so a stray ``manager.lock().await`` cannot even compile
+/// inside a handler, and a double-lock PANICS loudly instead of silently
+/// deadlocking (tokio Mutex is not reentrant).
+struct LockGuard<'a> {
+    manager: &'a Mutex<VmManager>,
+    guard: Option<MutexGuard<'a, VmManager>>,
+}
+
+impl<'a> LockGuard<'a> {
+    fn new(manager: &'a Mutex<VmManager>) -> Self {
+        Self {
+            manager,
+            guard: None,
+        }
+    }
+
+    /// Acquire the manager lock. Panics on a double-lock (the guard must
+    /// be `take()`n/dropped first).
+    async fn lock(&mut self) {
+        assert!(
+            self.guard.is_none(),
+            "LockGuard double-lock: drop the taken guard first"
+        );
+        self.guard = Some(self.manager.lock().await);
+    }
+
+    /// Take the guard out for under-lock work. The mutex is released when
+    /// the returned guard is dropped.
+    fn take(&mut self) -> MutexGuard<'a, VmManager> {
+        self.guard.take().expect("LockGuard not currently locked")
+    }
+
+    /// Release + re-acquire around slow outside work. Panics if the guard
+    /// was not released first (i.e. a missing `drop`).
+    async fn relock(&mut self) {
+        assert!(
+            self.guard.is_none(),
+            "LockGuard relock while still locked: drop the guard first"
+        );
+        self.guard = Some(self.manager.lock().await);
+    }
+}
+
 /// Dispatch one parsed command. `daemon_stop` is intercepted here because
-/// it needs the daemon's embedded flag; everything else goes through the
-/// shared `execute`. Returns the response plus whether a daemon stop was
-/// requested (the caller triggers the shutdown channel after writing the
-/// response, so the client still receives it).
+/// it needs the daemon's embedded flag; everything else dispatches to a
+/// per-command handler. Lock-free handlers receive ``&mut LockGuard`` (not
+/// the raw mutex), so re-entrant locking is structurally impossible.
 async fn dispatch(
     cmd: Command,
     manager: &Arc<Mutex<VmManager>>,
@@ -185,426 +229,404 @@ async fn dispatch(
         }
         return (Response::ok_msg("daemon shutting down"), true);
     }
-    let mut mgr = manager.lock().await;
-    // NOTE: `mgr` is the ONE manager-lock guard for this whole dispatch.
-    // Lock-free special branches REUSE it (never call manager.lock() again
-    // — tokio Mutex is not reentrant, and re-acquiring deadlocks). Drop it
-    // around the slow outside work, then re-acquire for the finalize.
+
+    let mut lock = LockGuard::new(manager);
+    lock.lock().await;
+
     // Best-effort liveness scan, only before commands that can change VM
-    // state — read-only commands skip the O(n) `Arc::get_mut` scan.
+    // state — read-only commands skip the O(n) scan.
     if REAP_COMMANDS.contains(&cmd.command.as_str()) {
+        let mut mgr = lock.take();
         mgr.reap_dead();
-    }
-
-    // VM lifecycle (create/restore) is the other slow path: compose +
-    // CH spawn takes ~200ms. Resolve the spec under the lock, call the
-    // adapter outside it, then register the handle — so batch restores
-    // (P1-2) don't serialize on the manager lock.
-    if matches!(cmd.command.as_str(), "create" | "restore") {
-        match prepare_lifecycle(&mgr, &cmd) {
-            Ok(prepared) => {
-                let adapter = mgr.adapter();
-                drop(mgr);
-                let handle = match &prepared {
-                    PreparedLifecycle::Create(spec) => adapter.create(spec).await,
-                    PreparedLifecycle::Restore { snapshot, spec } => {
-                        adapter.restore(snapshot, spec).await
-                    }
-                };
-                let handle = match handle {
-                    Ok(h) => h,
-                    Err(e) => return (Response::err(e.to_string()), false),
-                };
-                let spec = match &prepared {
-                    PreparedLifecycle::Create(spec) => spec,
-                    PreparedLifecycle::Restore { spec, .. } => spec,
-                };
-                let mut mgr = manager.lock().await;
-                if let Err(e) = mgr.register_vm(spec, handle) {
-                    return (Response::err(e.to_string()), false);
-                }
-                let name = spec.name.to_string();
-                let pid = mgr.get(&name).map(|h| h.pid());
-                let resp = match prepared {
-                    PreparedLifecycle::Create(_) => Response::ok(serde_json::json!({
-                        "name": name,
-                        "status": "created",
-                        "pid": pid,
-                    })),
-                    PreparedLifecycle::Restore { .. } => Response::ok(serde_json::json!({
-                        "name": name,
-                        "status": "restored",
-                        "pid": pid,
-                    })),
-                };
-                return (resp, false);
-            }
-            Err(resp) => return (resp, false),
-        }
-    }
-
-    // sandbox_create is the other cold-boot path: VM boot + agent ready
-    // take ~1s. Resolve everything cheap under the lock, spawn + bind the
-    // session outside it, then re-register — so concurrent sandbox_create
-    // calls (the density/RL scenario) boot VMs in parallel instead of
-    // queuing ~1s each on the manager mutex.
-    if cmd.command == "sandbox_create" {
-        // `mgr` is the guard acquired at the top of dispatch — reuse it
-        // (the Mutex is not reentrant), then drop it around the slow
-        // spawn/bind and re-acquire for the registrations.
-        match prepare_sandbox_create(&mut mgr, &cmd).await {
-            Ok(prepared) => {
-                let vm_adapter = mgr.adapter();
-                let sb_adapter = mgr.sandbox_adapter_arc();
-                drop(mgr);
-
-                // Cold boot outside the lock (concurrent creates run in
-                // parallel; the existing-VM/pool path has no spawn).
-                let mut spawned: Option<(VmSpec, Box<dyn VmHandle>)> = None;
-                if let TenantVm::ColdSpec { spec, .. } = &prepared.vm {
-                    match vm_adapter.create(spec).await {
-                        Ok(h) => spawned = Some((spec.clone(), h)),
-                        Err(e) => return (Response::err(e.to_string()), false),
-                    }
-                }
-
-                // Brief re-lock: register a freshly booted VM + resolve
-                // the Arc handle for the session binding below.
-                let mut mgr = manager.lock().await;
-                let handle = match &prepared.vm {
-                    TenantVm::Existing { handle, .. } => handle.clone(),
-                    TenantVm::ColdSpec { vm_name, spec } => {
-                        let (_, h) = spawned
-                            .take()
-                            .expect("a ColdSpec must have been spawned above");
-                        if let Err(e) = mgr.register_vm(spec, h) {
-                            return (Response::err(e.to_string()), false);
-                        }
-                        match mgr.get_handle(vm_name) {
-                            Some(h) => h,
-                            None => {
-                                return (
-                                    Response::err(format!("VM '{}' not found", vm_name)),
-                                    false,
-                                )
-                            }
-                        }
-                    }
-                };
-                drop(mgr);
-
-                // Slow, lock-free: L2 session + workdir (agent-boot
-                // retries live in bind_sandbox).
-                let record = match bind_sandbox(&*sb_adapter, handle, &prepared).await {
-                    Ok(r) => r,
-                    Err(resp) => return (resp, false),
-                };
-
-                // Re-lock only to register the sandbox record + audit.
-                let mut mgr = manager.lock().await;
-                let resp = finish_sandbox_create(&mut mgr, &prepared, record);
-                return (resp, false);
-            }
-            Err(resp) => return (resp, false),
-        }
-    }
-
-    // Teardown (destroy/shutdown/kill) is the other lifecycle slow path:
-    // CH shutdown + fs teardown take ~50-100ms. Unregister under the
-    // lock, run the teardown outside it — so a 64-env recycle does not
-    // serialize on the manager lock.
-    if matches!(cmd.command.as_str(), "destroy" | "shutdown" | "kill") {
-        let name = match require_name(&cmd) {
-            Ok(n) => n,
-            Err(resp) => return (resp, false),
-        };
-        let handle = match mgr.unregister(&name) {
-            Some(h) => h,
-            None => {
-                let err =
-                    adapter_traits::AdapterError::not_found(format!("VM '{}' not found", name))
-                        .to_string();
-                return (Response::err(err), false);
-            }
-        };
-        let snap_dir = format!("{}/terra-snap-{}", mgr.snapshot_dir(), name);
         drop(mgr);
-        if cmd.command == "destroy" {
-            // Snapshot artifacts of this VM are garbage (best-effort).
-            let _ = std::fs::remove_dir_all(&snap_dir);
+        // The reap released the guard; re-acquire so the handler below can
+        // take() it for its under-lock phase.
+        lock.lock().await;
+    }
+
+    match cmd.command.as_str() {
+        "create" | "restore" => handle_create_restore(&mut lock, &cmd).await,
+        "sandbox_create" => handle_sandbox_create(&mut lock, &cmd).await,
+        "destroy" | "shutdown" | "kill" => handle_teardown(&mut lock, &cmd).await,
+        "reset_vm" => handle_reset_vm(&mut lock, &cmd).await,
+        "tenant_destroy" => handle_tenant_destroy(&mut lock, &cmd).await,
+        "pool_create_snapshot" => handle_pool_create_snapshot(&mut lock, &cmd).await,
+        "batch_create" => handle_batch_create(&mut lock, &cmd).await,
+        "batch_exec" => handle_batch_exec(&mut lock, &cmd).await,
+        "batch_recycle" => handle_batch_recycle(&mut lock, &cmd).await,
+        "exec" | "sandbox_exec"
+            if cmd.exec_mode.as_deref().unwrap_or("blocking") == "blocking" =>
+        {
+            handle_blocking_exec(&mut lock, &cmd).await
         }
-        let msg = match cmd.command.as_str() {
-            "destroy" | "shutdown" => match handle.shutdown().await {
-                Ok(()) => format!(
-                    "VM '{}' {}",
-                    name,
-                    if cmd.command == "destroy" {
-                        "destroyed"
-                    } else {
-                        "shut down"
-                    }
-                ),
+        _ => {
+            // Default: the shared execute() path holds the lock for the
+            // whole command (read-only or non-hot-path commands).
+            let mut mgr = lock.take();
+            (execute(&mut mgr, cmd).await, false)
+        }
+    }
+}
+
+async fn handle_create_restore(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, bool) {
+    let mgr = lock.take();
+    match prepare_lifecycle(&mgr, cmd) {
+        Ok(prepared) => {
+            let adapter = mgr.adapter();
+            drop(mgr);
+            let handle = match &prepared {
+                PreparedLifecycle::Create(spec) => adapter.create(spec).await,
+                PreparedLifecycle::Restore { snapshot, spec } => adapter.restore(snapshot, spec).await,
+            };
+            let handle = match handle {
+                Ok(h) => h,
                 Err(e) => return (Response::err(e.to_string()), false),
-            },
-            "kill" => {
-                drop(handle); // the backend's Drop kills the process
-                format!("VM '{}' killed", name)
+            };
+            let spec = match &prepared {
+                PreparedLifecycle::Create(spec) => spec,
+                PreparedLifecycle::Restore { spec, .. } => spec,
+            };
+            lock.relock().await;
+            let mut mgr = lock.take();
+            if let Err(e) = mgr.register_vm(spec, handle) {
+                return (Response::err(e.to_string()), false);
             }
-            _ => unreachable!(),
-        };
-        return (Response::ok_msg(&msg), false);
-    }
-
-    // In-place episode reset is a guest vsock round-trip (~10-20ms) —
-    // resolve the handle under the lock and run it outside, so a 32-env
-    // batch reset does not serialize on the manager lock.
-    if cmd.command == "reset_vm" {
-        let name = match require_name(&cmd) {
-            Ok(n) => n,
-            Err(resp) => return (resp, false),
-        };
-        let handle = match mgr.get_handle(&name) {
-            Some(h) => h,
-            None => {
-                let err =
-                    adapter_traits::AdapterError::not_found(format!("VM '{}' not found", name))
-                        .to_string();
-                return (Response::err(err), false);
-            }
-        };
-        drop(mgr);
-        match handle.reset_fs().await {
-            Ok(()) => {
-                return (
-                    Response::ok(serde_json::json!({"name": name, "status": "reset"})),
-                    false,
-                )
-            }
-            Err(e) => return (Response::err(e.to_string()), false),
+            let name = spec.name.to_string();
+            let pid = mgr.get(&name).map(|h| h.pid());
+            let resp = match prepared {
+                PreparedLifecycle::Create(_) => Response::ok(serde_json::json!({
+                    "name": name,
+                    "status": "created",
+                    "pid": pid,
+                })),
+                PreparedLifecycle::Restore { .. } => Response::ok(serde_json::json!({
+                    "name": name,
+                    "status": "restored",
+                    "pid": pid,
+                })),
+            };
+            (resp, false)
         }
+        Err(resp) => (resp, false),
     }
+}
 
-    // tenant_destroy is the pool-return path: session kills + sandbox
-    // destroys + reset/detach/shutdown are vsock/CH round trips that must
-    // NOT serialize on the manager lock (the high-churn claim/release
-    // loop). Resolve the plan under the lock, run the teardown outside,
-    // finalize bookkeeping on re-lock.
-    if cmd.command == "tenant_destroy" {
-        // `mgr` is the guard acquired at the top of dispatch (the Mutex is
-        // not reentrant) — reuse it, drop it around the slow teardown,
-        // then re-acquire for the finalize.
-        match prepare_tenant_destroy(&mut mgr, &cmd) {
-            Ok(plan) => {
-                drop(mgr);
-                let released = match finish_tenant_destroy(&plan).await {
-                    Ok(r) => r,
-                    Err(e) => return (Response::err(e), false),
-                };
-                let mut mgr = manager.lock().await;
-                finalize_tenant_destroy(&mut mgr, &plan);
-                let resp = Response::ok(serde_json::json!({
-                    "tenant": plan.tenant,
-                    "vm": plan.vm_name,
-                    "sandboxes_removed": plan.removed,
-                    "released_to_pool": released,
-                    "status": if released { "released" } else { "destroyed" },
-                }));
-                return (resp, false);
+async fn handle_sandbox_create(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, bool) {
+    let mut mgr = lock.take();
+    match prepare_sandbox_create(&mut mgr, cmd).await {
+        Ok(prepared) => {
+            let vm_adapter = mgr.adapter();
+            let sb_adapter = mgr.sandbox_adapter_arc();
+            drop(mgr);
+
+            // Cold boot outside the lock (concurrent creates run in
+            // parallel; the existing-VM/pool path has no spawn).
+            let mut spawned: Option<(VmSpec, Box<dyn VmHandle>)> = None;
+            if let TenantVm::ColdSpec { spec, .. } = &prepared.vm {
+                match vm_adapter.create(spec).await {
+                    Ok(h) => spawned = Some((spec.clone(), h)),
+                    Err(e) => return (Response::err(e.to_string()), false),
+                }
             }
-            Err(resp) => return (resp, false),
-        }
-    }
 
-    // pool_create_snapshot restores N VMs from a snapshot — the slow part.
-    // Build the specs under the lock, restore + ping in parallel outside,
-    // then register the READY slots on re-lock.
-    if cmd.command == "pool_create_snapshot" {
-        // reuse the guard acquired at the top of dispatch (the Mutex is
-        // not reentrant); drop it around the parallel restores.
-        match prepare_pool_create_snapshot(&mut mgr, &cmd) {
-            Ok(plan) => {
-                let adapter = mgr.adapter();
-                drop(mgr);
-                let results = finish_pool_create_snapshot(&plan, adapter).await;
-                let mut mgr = manager.lock().await;
-                let mut ready = Vec::new();
-                let mut failed = Vec::new();
-                for (spec, result) in results {
-                    match result {
-                        Some((handle, Ok(()))) => {
-                            match mgr.pool_register_ready(
-                                &spec,
-                                handle,
-                                plan.layers.clone(),
-                                plan.net,
-                            ) {
-                                Ok(()) => ready.push(spec.name.to_string()),
-                                Err(e) => failed.push((spec.name.to_string(), e.to_string())),
-                            }
-                        }
-                        Some((handle, Err(e))) => {
-                            drop(handle);
-                            failed.push((spec.name.to_string(), e));
-                        }
+            // Brief re-lock: register a freshly booted VM + resolve the
+            // Arc handle for the session binding below.
+            lock.relock().await;
+            let mut mgr = lock.take();
+            let handle = match &prepared.vm {
+                TenantVm::Existing { handle, .. } => handle.clone(),
+                TenantVm::ColdSpec { vm_name, spec } => {
+                    let (_, h) = spawned.take().expect("a ColdSpec must have been spawned above");
+                    if let Err(e) = mgr.register_vm(spec, h) {
+                        return (Response::err(e.to_string()), false);
+                    }
+                    match mgr.get_handle(vm_name) {
+                        Some(h) => h,
                         None => {
-                            failed.push((spec.name.to_string(), "restore failed".to_string()));
+                            return (Response::err(format!("VM '{}' not found", vm_name)), false)
                         }
                     }
                 }
-                let resp = pool_create_snapshot_response(ready, failed);
-                return (resp, false);
-            }
-            Err(resp) => return (resp, false),
-        }
-    }
+            };
+            drop(mgr);
 
-    // batch_create: N environments in one call. Prepare N sandbox plans
-    // under the lock (ready-pool claims), spawn + bind outside in
-    // parallel, register on re-lock.
-    if cmd.command == "batch_create" {
-        // reuse the top-of-dispatch guard (never re-lock; see the note
-        // above the reap scan)
-        match prepare_batch_create(&mut mgr, &cmd).await {
-            Ok(envs) => {
-                let adapter = mgr.adapter();
-                let sb_adapter = mgr.sandbox_adapter_arc();
-                drop(mgr);
-                let spawned = spawn_batch_vms(&envs, adapter).await;
-                let mut mgr = manager.lock().await;
-                let mut handles = std::collections::HashMap::new();
-                let mut failed: Vec<(String, String)> = Vec::new();
-                for (idx, handle) in spawned {
-                    if let TenantVm::ColdSpec { spec, .. } = &envs[idx].plan.vm {
-                        match mgr.register_vm(spec, handle) {
-                            Ok(()) => {
-                                let vm = match &envs[idx].plan.vm {
-                                    TenantVm::ColdSpec { vm_name, .. } => vm_name.clone(),
-                                    _ => String::new(),
-                                };
-                                if let Some(h) = mgr.get_handle(&vm) {
-                                    handles.insert(idx, h);
-                                }
-                            }
-                            Err(e) => failed.push((envs[idx].tenant.clone(), e.to_string())),
+            // Slow, lock-free: L2 session + workdir (agent-boot retries
+            // live in bind_sandbox).
+            let record = match bind_sandbox(&*sb_adapter, handle, &prepared).await {
+                Ok(r) => r,
+                Err(resp) => return (resp, false),
+            };
+
+            // Re-lock only to register the sandbox record + audit.
+            lock.relock().await;
+            let mut mgr = lock.take();
+            let resp = finish_sandbox_create(&mut mgr, &prepared, record);
+            (resp, false)
+        }
+        Err(resp) => (resp, false),
+    }
+}
+
+async fn handle_teardown(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, bool) {
+    let mut mgr = lock.take();
+    let name = match require_name(cmd) {
+        Ok(n) => n,
+        Err(resp) => return (resp, false),
+    };
+    let handle = match mgr.unregister(&name) {
+        Some(h) => h,
+        None => {
+            let err =
+                adapter_traits::AdapterError::not_found(format!("VM '{}' not found", name))
+                    .to_string();
+            return (Response::err(err), false);
+        }
+    };
+    let snap_dir = format!("{}/terra-snap-{}", mgr.snapshot_dir(), name);
+    drop(mgr);
+    if cmd.command == "destroy" {
+        // Snapshot artifacts of this VM are garbage (best-effort).
+        let _ = std::fs::remove_dir_all(&snap_dir);
+    }
+    let msg = match cmd.command.as_str() {
+        "destroy" | "shutdown" => match handle.shutdown().await {
+            Ok(()) => format!(
+                "VM '{}' {}",
+                name,
+                if cmd.command == "destroy" {
+                    "destroyed"
+                } else {
+                    "shut down"
+                }
+            ),
+            Err(e) => return (Response::err(e.to_string()), false),
+        },
+        "kill" => {
+            drop(handle); // the backend's Drop kills the process
+            format!("VM '{}' killed", name)
+        }
+        _ => unreachable!(),
+    };
+    (Response::ok_msg(&msg), false)
+}
+
+async fn handle_reset_vm(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, bool) {
+    let mgr = lock.take();
+    let name = match require_name(cmd) {
+        Ok(n) => n,
+        Err(resp) => return (resp, false),
+    };
+    let handle = match mgr.get_handle(&name) {
+        Some(h) => h,
+        None => {
+            let err =
+                adapter_traits::AdapterError::not_found(format!("VM '{}' not found", name))
+                    .to_string();
+            return (Response::err(err), false);
+        }
+    };
+    drop(mgr);
+    match handle.reset_fs().await {
+        Ok(()) => (Response::ok(serde_json::json!({"name": name, "status": "reset"})), false),
+        Err(e) => (Response::err(e.to_string()), false),
+    }
+}
+
+async fn handle_tenant_destroy(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, bool) {
+    let mut mgr = lock.take();
+    match prepare_tenant_destroy(&mut mgr, cmd) {
+        Ok(plan) => {
+            drop(mgr);
+            let released = match finish_tenant_destroy(&plan).await {
+                Ok(r) => r,
+                Err(e) => return (Response::err(e), false),
+            };
+            lock.relock().await;
+            let mut mgr = lock.take();
+            finalize_tenant_destroy(&mut mgr, &plan);
+            let resp = Response::ok(serde_json::json!({
+                "tenant": plan.tenant,
+                "vm": plan.vm_name,
+                "sandboxes_removed": plan.removed,
+                "released_to_pool": released,
+                "status": if released { "released" } else { "destroyed" },
+            }));
+            (resp, false)
+        }
+        Err(resp) => (resp, false),
+    }
+}
+
+async fn handle_pool_create_snapshot(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, bool) {
+    let mut mgr = lock.take();
+    match prepare_pool_create_snapshot(&mut mgr, cmd) {
+        Ok(plan) => {
+            let adapter = mgr.adapter();
+            drop(mgr);
+            let results = finish_pool_create_snapshot(&plan, adapter).await;
+            lock.relock().await;
+            let mut mgr = lock.take();
+            let mut ready = Vec::new();
+            let mut failed = Vec::new();
+            for (spec, result) in results {
+                match result {
+                    Some((handle, Ok(()))) => {
+                        match mgr.pool_register_ready(&spec, handle, plan.layers.clone(), plan.net) {
+                            Ok(()) => ready.push(spec.name.to_string()),
+                            Err(e) => failed.push((spec.name.to_string(), e.to_string())),
                         }
                     }
-                }
-                for (idx, env) in envs.iter().enumerate() {
-                    if let TenantVm::Existing { handle, .. } = &env.plan.vm {
-                        handles.insert(idx, handle.clone());
+                    Some((handle, Err(e))) => {
+                        drop(handle);
+                        failed.push((spec.name.to_string(), e));
                     }
+                    None => failed.push((spec.name.to_string(), "restore failed".to_string())),
                 }
-                drop(mgr);
-                let results = bind_batch_envs(&envs, &handles, sb_adapter).await;
-                let mut mgr = manager.lock().await;
-                let mut created = Vec::new();
-                for (idx, r) in results {
-                    match r {
-                        Ok(record) => {
-                            crate::commands::sandbox::finish_sandbox_create(
-                                &mut mgr,
-                                &envs[idx].plan,
-                                record,
-                            );
+            }
+            let resp = pool_create_snapshot_response(ready, failed);
+            (resp, false)
+        }
+        Err(resp) => (resp, false),
+    }
+}
+
+async fn handle_batch_create(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, bool) {
+    let mut mgr = lock.take();
+    match prepare_batch_create(&mut mgr, cmd).await {
+        Ok(envs) => {
+            let adapter = mgr.adapter();
+            let sb_adapter = mgr.sandbox_adapter_arc();
+            drop(mgr);
+            let spawned = spawn_batch_vms(&envs, adapter).await;
+            lock.relock().await;
+            let mut mgr = lock.take();
+            let mut handles = std::collections::HashMap::new();
+            let mut failed: Vec<(String, String)> = Vec::new();
+            for (idx, handle) in spawned {
+                if let TenantVm::ColdSpec { spec, .. } = &envs[idx].plan.vm {
+                    match mgr.register_vm(spec, handle) {
+                        Ok(()) => {
                             let vm = match &envs[idx].plan.vm {
-                                TenantVm::Existing { vm_name, .. } => vm_name.clone(),
                                 TenantVm::ColdSpec { vm_name, .. } => vm_name.clone(),
+                                _ => String::new(),
                             };
-                            created.push(serde_json::json!({
-                                "tenant": envs[idx].tenant,
-                                "id": envs[idx].plan.sandbox_id,
-                                "vm": vm,
-                            }));
+                            if let Some(h) = mgr.get_handle(&vm) {
+                                handles.insert(idx, h);
+                            }
                         }
-                        Err(e) => failed.push((envs[idx].tenant.clone(), e)),
+                        Err(e) => failed.push((envs[idx].tenant.clone(), e.to_string())),
                     }
                 }
-                let resp = batch_create_response(created, failed);
-                return (resp, false);
             }
-            Err(resp) => return (resp, false),
-        }
-    }
-
-    // batch_exec: run one command on N sandboxes in parallel.
-    if cmd.command == "batch_exec" {
-        // reuse the top-of-dispatch guard (never re-lock)
-        match prepare_batch_exec(&mgr, &cmd) {
-            Ok(envs) => {
-                drop(mgr);
-                let results = run_batch_execs(envs).await;
-                let rows: Vec<_> = results
-                    .into_iter()
-                    .map(|(id, resp)| {
-                        serde_json::json!({"id": id, "status": resp.status, "data": resp.data})
-                    })
-                    .collect();
-                return (Response::ok(serde_json::json!({"results": rows, "count": rows.len()})), false);
-            }
-            Err(resp) => return (resp, false),
-        }
-    }
-
-    // batch_recycle: reset or destroy N tenants in parallel; destroy
-    // finalizes pool bookkeeping on re-lock.
-    if cmd.command == "batch_recycle" {
-        // reuse the top-of-dispatch guard (never re-lock)
-        match prepare_batch_recycle(&mut mgr, &cmd) {
-            Ok(items) => {
-                drop(mgr);
-                let results = run_batch_recycle(&items).await;
-                let mut mgr = manager.lock().await;
-                for item in &items {
-                    if let BatchRecycleItem::Destroy(plan) = item {
-                        crate::commands::sandbox::finalize_tenant_destroy(&mut mgr, plan);
-                    }
+            for (idx, env) in envs.iter().enumerate() {
+                if let TenantVm::Existing { handle, .. } = &env.plan.vm {
+                    handles.insert(idx, handle.clone());
                 }
-                let rows: Vec<_> = results
-                    .into_iter()
-                    .map(|(tenant, r)| {
-                        let status = match &r {
-                            Ok(released) if *released => "released",
-                            Ok(_) => "reset",
-                            Err(_) => "error",
+            }
+            drop(mgr);
+            let results = bind_batch_envs(&envs, &handles, sb_adapter).await;
+            lock.relock().await;
+            let mut mgr = lock.take();
+            let mut created = Vec::new();
+            for (idx, r) in results {
+                match r {
+                    Ok(record) => {
+                        crate::commands::sandbox::finish_sandbox_create(
+                            &mut mgr,
+                            &envs[idx].plan,
+                            record,
+                        );
+                        let vm = match &envs[idx].plan.vm {
+                            TenantVm::Existing { vm_name, .. } => vm_name.clone(),
+                            TenantVm::ColdSpec { vm_name, .. } => vm_name.clone(),
                         };
-                        serde_json::json!({"tenant": tenant, "status": status, "error": r.err()})
-                    })
-                    .collect();
-                return (Response::ok(serde_json::json!({"results": rows, "count": rows.len()})), false);
+                        created.push(serde_json::json!({
+                            "tenant": envs[idx].tenant,
+                            "id": envs[idx].plan.sandbox_id,
+                            "vm": vm,
+                        }));
+                    }
+                    Err(e) => failed.push((envs[idx].tenant.clone(), e)),
+                }
             }
-            Err(resp) => return (resp, false),
+            let resp = batch_create_response(created, failed);
+            (resp, false)
         }
+        Err(resp) => (resp, false),
     }
+}
 
-    // Blocking exec is the one command that can run for up to its full
-    // timeout (3600s). Resolve everything under the lock — handle Arc +
-    // ExecOpts — then drop the lock before awaiting `handle.exec`, so a
-    // long-running exec no longer serializes every other command behind
-    // `Mutex<VmManager>`. Background execs keep the shared `execute` path
-    // below: they register their session under the lock and return
-    // immediately (their spawned task already runs lock-free), and an
-    // invalid exec_mode must still produce the shared-path error.
-    if matches!(cmd.command.as_str(), "exec" | "sandbox_exec")
-        && cmd.exec_mode.as_deref().unwrap_or("blocking") == "blocking"
-    {
-        match prepare_blocking_exec(&mgr, &cmd) {
-            Ok(prepared) => {
-                let PreparedBlockingExec {
-                    prepared,
-                    policy,
-                    audit_id,
-                } = prepared;
-                drop(mgr); // the exec itself runs without the manager lock
-                return (
-                    prepared_exec_audited(prepared, policy.as_ref(), &audit_id, &cmd.args).await,
-                    false,
-                );
+async fn handle_batch_exec(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, bool) {
+    let mgr = lock.take();
+    match prepare_batch_exec(&mgr, cmd) {
+        Ok(envs) => {
+            drop(mgr);
+            let results = run_batch_execs(envs).await;
+            let rows: Vec<_> = results
+                .into_iter()
+                .map(|(id, resp)| {
+                    serde_json::json!({"id": id, "status": resp.status, "data": resp.data})
+                })
+                .collect();
+            (
+                Response::ok(serde_json::json!({"results": rows, "count": rows.len()})),
+                false,
+            )
+        }
+        Err(resp) => (resp, false),
+    }
+}
+
+async fn handle_batch_recycle(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, bool) {
+    let mut mgr = lock.take();
+    match prepare_batch_recycle(&mut mgr, cmd) {
+        Ok(items) => {
+            drop(mgr);
+            let results = run_batch_recycle(&items).await;
+            lock.relock().await;
+            let mut mgr = lock.take();
+            for item in &items {
+                if let BatchRecycleItem::Destroy(plan) = item {
+                    crate::commands::sandbox::finalize_tenant_destroy(&mut mgr, plan);
+                }
             }
-            Err(resp) => return (resp, false),
+            let rows: Vec<_> = results
+                .into_iter()
+                .map(|(tenant, r)| {
+                    let status = match &r {
+                        Ok(released) if *released => "released",
+                        Ok(_) => "reset",
+                        Err(_) => "error",
+                    };
+                    serde_json::json!({"tenant": tenant, "status": status, "error": r.err()})
+                })
+                .collect();
+            (
+                Response::ok(serde_json::json!({"results": rows, "count": rows.len()})),
+                false,
+            )
         }
+        Err(resp) => (resp, false),
     }
+}
 
-    (execute(&mut mgr, cmd).await, false)
+async fn handle_blocking_exec(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, bool) {
+    let mgr = lock.take();
+    match prepare_blocking_exec(&mgr, cmd) {
+        Ok(prepared) => {
+            let PreparedBlockingExec {
+                prepared,
+                policy,
+                audit_id,
+            } = prepared;
+            drop(mgr); // the exec itself runs without the manager lock
+            (
+                prepared_exec_audited(prepared, policy.as_ref(), &audit_id, &cmd.args).await,
+                false,
+            )
+        }
+        Err(resp) => (resp, false),
+    }
 }
 
 /// Token gate for remote connections: the first line must equal the

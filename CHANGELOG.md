@@ -204,6 +204,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Snapshot restore remains the full-determinism path.
 
 ### Fixed
+- **daemon dispatch restructured so lock-free handlers cannot re-lock** —
+  the reentrant-`Mutex` deadlock recurred four times (sandbox_create,
+  tenant_destroy, pool_create_snapshot, batch_*) by re-acquiring the
+  top-of-dispatch guard. Dispatch now owns a `LockGuard` (the ONLY lock
+  entry point; double-lock PANICS instead of deadlocking) and every
+  lock-free command is an extracted handler that receives only
+  `&mut LockGuard` — never the raw `&Mutex` — so a stray
+  `manager.lock().await` cannot compile. Verified: `manager.lock()`
+  appears only inside LockGuard (+ daemon shutdown), handlers use only
+  `take()`/`relock()`.
 - **pool_create_snapshot now fills in parallel** — the READY-pool fill
   restored VMs sequentially under the manager lock (~300ms each; 16 slots
   ≈ 4.8s). The daemon now builds the specs under the lock, restores +
