@@ -1,0 +1,94 @@
+name: e2e-kvm
+
+# Real-KVM gate: the suites that need /dev/kvm, NAT networking and the
+# full guest assets. Runs on a self-hosted runner labeled `kvm` (no
+# /dev/kvm on github-hosted runners).
+#
+# Runner requirements (see docs/ci.md):
+#   - /dev/kvm (plus /dev/vhost-vsock for the engine's vsock channel)
+#   - passwordless sudo for the runner user (daemon start needs root for
+#     NAT; the daemon self-elevates via sudo)
+#   - gcc (adversarial escape probe build), docker + runsc (baseline
+#     comparison — harness skips whichever are absent)
+#   - network access to the ubuntu rootfs download (terra setup ubuntu)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'sdk/python/**'
+      - 'images/**'
+      - 'docs/security-*.md'
+      - '.github/workflows/e2e.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    runs-on: [self-hosted, linux, kvm]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build PyO3 engine + SDK
+        run: |
+          pip install maturin pytest
+          cd crates/engine && maturin develop
+          cd ../.. && pip install -e sdk/python/
+
+      - name: Terra setup (kernel, rootfs, initramfs, ubuntu layer + guest binaries)
+        run: |
+          python -m terra setup ubuntu --force
+
+      - name: KVM device access for the runner user
+        run: |
+          sudo chmod 0666 /dev/kvm /dev/vhost-vsock || true
+          ls -l /dev/kvm /dev/vhost-vsock || true
+
+      - name: Start root daemon (NAT networking)
+        run: |
+          python -m terra daemon start
+          python -c "import time, socket
+          for _ in range(20):
+              try:
+                  s = socket.socket(socket.AF_UNIX); s.settimeout(1)
+                  s.connect('/tmp/terra.sock'); s.close(); print('daemon up'); break
+              except OSError: time.sleep(0.5)"
+
+      - name: e2e gate (real suites incl. adversarial isolation)
+        run: bash sdk/python/tests/run_e2e.sh
+
+      - name: Cross-baseline workload matrix
+        run: |
+          python sdk/python/tests/compare_baselines.py --out /tmp/baseline-compare.json
+        continue-on-error: true
+
+      - name: Density sweep (32 instances)
+        run: |
+          python sdk/python/tests/density_compare.py --instances 32 --parallel 8 \
+            --out /tmp/density-compare.json
+        continue-on-error: true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kvm-evidence
+          path: |
+            /tmp/baseline-compare.json
+            /tmp/density-compare.json
+            docs/benchmark-results-*.json
+          if-no-files-found: warn

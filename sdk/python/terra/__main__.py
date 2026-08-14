@@ -543,11 +543,15 @@ def cmd_setup(args) -> int:
             return _err(str(e))
         print(f"  {'extracted' if dest else 'already present'}: {layer_dir}")
 
-    # 6. guest binaries — bake sandlock (exec isolation) and the current
-    # guest-proxy agent into the system layer: cold-boot VMs switch_root
-    # into the composed layers and run the agent from there, so a layer
-    # built from an older rootfs serves a stale agent otherwise.
-    stage("guest binaries (sandlock + guest-proxy)")
+    # 6. guest binaries — bake sandlock (alternative L2), terra-confine
+    # (native L2, the default) and the current guest-proxy agent into the
+    # system layer: cold-boot VMs switch_root into the composed layers
+    # and run them from there, so a layer built from an older rootfs
+    # serves a stale agent otherwise.
+    stage("guest binaries (terra-confine + sandlock + guest-proxy)")
+    rc = _install_confine(system_layer, force=force)
+    if rc != EXIT_OK:
+        return rc
     rc = _install_sandlock(system_layer, force=force)
     if rc != EXIT_OK:
         return rc
@@ -663,6 +667,42 @@ def _install_sandlock(system_layer: str, *, force: bool = False) -> int:
         if r.returncode:
             return r.returncode
     dest = paths.layers_dir() / system_layer / "usr" / "bin" / "sandlock"
+    if dest.exists() and not force and _sha256_file(dest) == _sha256_file(src):
+        print(f"  already present: {dest}")
+        return EXIT_OK
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(src, dest)
+    dest.chmod(0o755)
+    print(f"  installed: {dest}")
+    return EXIT_OK
+
+
+def _install_confine(system_layer: str, *, force: bool = False) -> int:
+    """Install the native terra-confine binary into the system layer.
+
+    Builds the musl static binary from the repo checkout (guest-confine
+    crate), then installs it as <layer>/usr/bin/terra-confine (0755).
+    Idempotent (sha256); --force reinstalls. The guest-proxy probes for
+    this binary first and treats its absence as a hard error — without it
+    the default L2 backend is unavailable on fresh setups.
+    """
+    repo = _repo_root()
+    if repo is None:
+        return _err(
+            "terra-confine install needs a repo checkout",
+            cause="no Terrarium repo found",
+            fix="Run on a machine with the Terrarium repo checked out",
+        )
+    src = repo / "target" / "x86_64-unknown-linux-musl" / "release" / "terra-confine"
+    if not src.exists():
+        r = subprocess.run(
+            ["cargo", "build", "--release",
+             "--target", "x86_64-unknown-linux-musl", "-p", "guest-confine"],
+            cwd=str(repo),
+        )
+        if r.returncode:
+            return r.returncode
+    dest = paths.layers_dir() / system_layer / "usr" / "bin" / "terra-confine"
     if dest.exists() and not force and _sha256_file(dest) == _sha256_file(src):
         print(f"  already present: {dest}")
         return EXIT_OK
