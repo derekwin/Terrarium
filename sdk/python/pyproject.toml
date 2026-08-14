@@ -27,7 +27,7 @@ license = { text = "Apache-2.0" }
 # on first use (see terra.assets). Extras only pull pip-side companions.
 [project.optional-dependencies]
 ch = []
-sandlock = ["sandlock>=0.8"]
+sandlock = ["sandlock>=0.8.6"]
 
 [project.scripts]
 terra = "terra.__main__:main"
