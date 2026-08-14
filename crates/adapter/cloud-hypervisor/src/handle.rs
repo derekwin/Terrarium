@@ -484,7 +484,7 @@ impl ChVmHandle {
         let connect = Duration::from_secs(10);
         let stream = timeout(connect, tokio::net::UnixStream::connect(&path))
             .await
-            .map_err(|_| format!("vsock connect timeout: guest agent not ready"))?
+            .map_err(|_| "vsock connect timeout: guest agent not ready".to_string())?
             .map_err(|e| format!("connect guest vsock: {}", e))?;
         let (reader, mut writer) = stream.into_split();
         timeout(connect, writer.write_all(b"CONNECT 1024\n"))

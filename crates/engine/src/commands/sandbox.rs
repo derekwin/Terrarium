@@ -9,7 +9,9 @@ use std::sync::Arc;
 use super::{apply_system_base, build_spec, run_exec, DEFAULT_SYSTEM};
 use crate::manager::{SandboxRecord, VmManager};
 use crate::policy::default_sandbox_policy;
-use adapter_traits::{ResourceLimits, SandboxSpec, VmName};
+use adapter_traits::{
+    ExecOpts, ResourceLimits, SandboxAdapter, SandboxPolicy, SandboxSpec, VmHandle, VmName, VmSpec,
+};
 use terrarium_protocol::{Command, Response};
 
 /// Fresh sandbox id: `sb-<12 hex>` (48 bits, uuid v4, no new dependency).
@@ -36,22 +38,45 @@ fn record_json(r: &SandboxRecord) -> serde_json::Value {
     })
 }
 
-/// Resolve the tenant's VM, creating it if needed:
+/// The tenant's VM after resolution: an existing/claimed handle, or a
+/// cold-boot spec the caller must spawn and register under
+/// `tenant-<tenant>` (the daemon spawns it OUTSIDE the manager lock so
+/// concurrent sandbox_create calls boot VMs in parallel).
+pub(crate) enum TenantVm {
+    Existing {
+        vm_name: String,
+        pool_backed: bool,
+        handle: Arc<dyn VmHandle>,
+    },
+    ColdSpec {
+        vm_name: String,
+        spec: VmSpec,
+    },
+}
+
+/// Resolve the tenant's VM (cheap registry work only — no spawn):
 /// - a sandbox record for this tenant already exists → reuse its VM
 ///   (pooled VMs are named pool-N, so indexing is by tenant, not name);
 /// - else, if pooling is allowed and a matching idle slot exists → claim
 ///   it with the sandbox's layer set (ephemeral upper) and resize it when
 ///   the spec asks for cpus/memory;
-/// - else cold-boot `tenant-<tenant>` via the same path as `create`.
-///
-/// Returns (vm_name, pool_backed).
-async fn ensure_tenant_vm(
+/// - else return a cold-boot spec for `tenant-<tenant>` (same path as
+///   `create`) — the caller decides whether to spawn under or outside the
+///   manager lock.
+async fn resolve_tenant_vm(
     mgr: &mut VmManager,
     cmd: &Command,
     tenant: &str,
-) -> Result<(String, bool), Response> {
+) -> Result<TenantVm, Response> {
     if let Some(rec) = mgr.sandbox_list(Some(tenant)).into_iter().next() {
-        return Ok((rec.vm_name, rec.pool_backed));
+        let handle = mgr
+            .get_handle(&rec.vm_name)
+            .ok_or_else(|| Response::err(format!("VM '{}' not found", rec.vm_name)))?;
+        return Ok(TenantVm::Existing {
+            vm_name: rec.vm_name,
+            pool_backed: rec.pool_backed,
+            handle,
+        });
     }
 
     // Pool path. A pooled VM needs a layered fs attached, so an empty
@@ -104,7 +129,15 @@ async fn ensure_tenant_vm(
                     }
                 }
             }
-            return Ok((name, true));
+            let handle = match mgr.get_handle(&name) {
+                Some(h) => h,
+                None => return Err(Response::err(format!("VM '{}' not found", name))),
+            };
+            return Ok(TenantVm::Existing {
+                vm_name: name,
+                pool_backed: true,
+                handle,
+            });
         }
     }
 
@@ -120,11 +153,213 @@ async fn ensure_tenant_vm(
         if let Err(e) = spec.validate() {
             return Err(Response::err(e));
         }
-        if let Err(e) = mgr.spawn(spec).await {
-            return Err(Response::err(e.to_string()));
+        return Ok(TenantVm::ColdSpec { vm_name, spec });
+    }
+    let handle = mgr
+        .get_handle(&vm_name)
+        .ok_or_else(|| Response::err(format!("VM '{}' not found", vm_name)))?;
+    Ok(TenantVm::Existing {
+        vm_name,
+        pool_backed: false,
+        handle,
+    })
+}
+
+/// Everything `sandbox_create` needs that can be resolved under the
+/// manager lock, so the daemon can run the slow parts (VM boot, agent
+/// ready, workdir) outside it.
+pub(crate) struct PreparedSandboxCreate {
+    pub tenant: String,
+    pub vm: TenantVm,
+    pub sandbox_id: String,
+    pub workdir: String,
+    pub effective: SandboxPolicy,
+    pub user: Option<SandboxPolicy>,
+}
+
+/// Validate + resolve the tenant VM + allocate the sandbox id — all cheap,
+/// lock-appropriate work. The caller performs the actual spawn/bind.
+pub(crate) async fn prepare_sandbox_create(
+    mgr: &mut VmManager,
+    cmd: &Command,
+) -> Result<PreparedSandboxCreate, Response> {
+    let tenant = cmd
+        .tenant
+        .clone()
+        .ok_or_else(|| Response::err("Missing 'tenant' field"))?;
+    // Same whitelist as VmName — the tenant may be embedded in a VM name.
+    if let Err(e) = VmName::new(tenant.clone()) {
+        return Err(Response::err(format!("invalid tenant: {}", e)));
+    }
+    // Captured before `cmd` is consumed by the VM-create branch below.
+    let policy = cmd.policy.clone();
+    // Fail fast: an invalid stored policy would fail on every later exec.
+    if let Some(p) = policy.as_ref() {
+        if let Err(err) = p.validate() {
+            return Err(Response::err(err));
         }
     }
-    Ok((vm_name, false))
+
+    let vm = resolve_tenant_vm(mgr, cmd, &tenant).await?;
+
+    // G2: the two-layer invariant — sandbox limits ⊆ VM quota
+    // (policy-model.md §3.5). For an existing VM the policy is registered;
+    // for a cold boot it is exactly `spec.to_policy()` (what register_vm
+    // stores). No limits → trivially valid.
+    if let Some(user) = policy.as_ref() {
+        let quota_err = match &vm {
+            TenantVm::Existing { vm_name, .. } => mgr
+                .vm_policy(vm_name)
+                .map(|p| user.validate_with_vm(p)),
+            TenantVm::ColdSpec { spec, .. } => {
+                let p = spec.to_policy();
+                Some(user.validate_with_vm(&p))
+            }
+        };
+        if let Some(Err(err)) = quota_err {
+            return Err(Response::err(err));
+        }
+    }
+
+    // 48-bit suffix: a collision with a live record would silently drop
+    // its workdir mapping (bare HashMap::insert), so re-roll until free.
+    let mut id = new_sandbox_id();
+    while mgr.sandbox_get(&id).is_some() {
+        id = new_sandbox_id();
+    }
+    // The effective policy (engine default ∪ user) is fixed at create and
+    // carried by the returned handle; later per-call overrides union onto
+    // it (never a replace).
+    let effective = match policy.clone() {
+        Some(user) => default_sandbox_policy().merged_with(&user),
+        None => default_sandbox_policy(),
+    };
+    let workdir = format!("/workdir/{}", id);
+    Ok(PreparedSandboxCreate {
+        tenant,
+        vm,
+        sandbox_id: id,
+        workdir,
+        effective,
+        user: policy,
+    })
+}
+
+/// Bind the L2 session through the SandboxAdapter and ensure the workdir
+/// exists (slow: includes agent-boot vsock retries). Returns the sandbox
+/// record; the caller registers it under the manager lock.
+pub(crate) async fn bind_sandbox(
+    sb_adapter: &dyn SandboxAdapter,
+    handle: Arc<dyn VmHandle>,
+    prepared: &PreparedSandboxCreate,
+) -> Result<SandboxRecord, Response> {
+    let spec_name = match VmName::new(prepared.sandbox_id.clone()) {
+        Ok(n) => n,
+        Err(e) => return Err(Response::err(format!("invalid sandbox name: {}", e))),
+    };
+    let spec = SandboxSpec {
+        name: spec_name,
+        limits: ResourceLimits::default(),
+        policy: Some(prepared.effective.clone()),
+    };
+    let sb_handle = match sb_adapter.create(handle.clone(), &spec).await {
+        Ok(h) => h,
+        Err(e) => return Err(Response::err(e.to_string())),
+    };
+
+    // Ensure the workdir exists in the guest (unsandboxed). On failure
+    // return an honest error, best-effort tear down the bound session, and
+    // don't register a half-created sandbox.
+    let mkdir = vec!["mkdir".to_string(), "-p".to_string(), prepared.workdir.clone()];
+    let opts = ExecOpts::new(mkdir, 30).with_sandbox(false);
+    // The guest agent can still be booting right after CH reports ready —
+    // a slow layer (e.g. ubuntu) often needs a moment before the vsock
+    // listener is up. Retry the exec briefly on handshake/vsock failures
+    // (same pattern as attach_fs's agent-boot retry) so creation does not
+    // fail on a race.
+    let mut workdir_result = handle.exec(&opts).await;
+    for _ in 0..10 {
+        let retryable = matches!(&workdir_result, Err(e)
+            if e.to_string().contains("vsock") || e.to_string().contains("handshake"));
+        if !retryable {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        workdir_result = handle.exec(&opts).await;
+    }
+    let (vm_name, pool_backed) = match &prepared.vm {
+        TenantVm::Existing {
+            vm_name,
+            pool_backed,
+            ..
+        } => (vm_name.clone(), *pool_backed),
+        TenantVm::ColdSpec { vm_name, .. } => (vm_name.clone(), false),
+    };
+    match workdir_result {
+        Ok(r) if r.exit_code == 0 => {}
+        Ok(r) => {
+            let _ = sb_handle.destroy().await;
+            return Err(Response::err(format!(
+                "failed to create workdir {}: {}",
+                prepared.workdir,
+                r.stderr.trim()
+            )));
+        }
+        Err(e) => {
+            let _ = sb_handle.destroy().await;
+            return Err(Response::err(format!(
+                "failed to create workdir {}: {}",
+                prepared.workdir, e
+            )));
+        }
+    }
+    Ok(SandboxRecord {
+        id: prepared.sandbox_id.clone(),
+        tenant: prepared.tenant.clone(),
+        vm_name,
+        workdir: prepared.workdir.clone(),
+        created_at: now_secs(),
+        policy: prepared.user.clone(),
+        pool_backed,
+        handle: Some(Arc::from(sb_handle)),
+    })
+}
+
+/// Register the sandbox record + D-phase limits audit + build the
+/// response. Shared by the locked `execute` path and the daemon's
+/// lock-free fast path.
+pub(crate) fn finish_sandbox_create(
+    mgr: &mut VmManager,
+    prepared: &PreparedSandboxCreate,
+    record: SandboxRecord,
+) -> Response {
+    // D-phase audit: the declared resource limits are a resource
+    // declaration, recorded when the (stored user) policy asks for it.
+    // Limits only ever come from the user layer — the engine default
+    // carries none — so the stored user policy both carries and gates them.
+    if let Some(user) = prepared.user.as_ref() {
+        crate::audit::audit_resource(
+            Some(user),
+            &prepared.sandbox_id,
+            "limits",
+            &format!("{:?}", user.limits),
+        );
+    }
+    let (vm_name, pool_backed) = match &prepared.vm {
+        TenantVm::Existing {
+            vm_name,
+            pool_backed,
+            ..
+        } => (vm_name.clone(), *pool_backed),
+        TenantVm::ColdSpec { vm_name, .. } => (vm_name.clone(), false),
+    };
+    mgr.sandbox_insert(record);
+    Response::ok(serde_json::json!({
+        "id": prepared.sandbox_id,
+        "vm": vm_name,
+        "workdir": prepared.workdir,
+        "pool": pool_backed,
+    }))
 }
 
 /// {"command":"sandbox_create","tenant":"research", kernel/layers/...,
@@ -135,134 +370,29 @@ async fn ensure_tenant_vm(
 /// allocates a sandbox and creates its workdir in the guest.
 /// Response data: {id, vm, workdir, pool}.
 pub(crate) async fn cmd_sandbox_create(mgr: &mut VmManager, cmd: Command) -> Response {
-    let tenant = match cmd.tenant.clone() {
-        Some(t) => t,
-        None => return Response::err("Missing 'tenant' field"),
-    };
-    // Same whitelist as VmName — the tenant may be embedded in a VM name.
-    if let Err(e) = VmName::new(tenant.clone()) {
-        return Response::err(format!("invalid tenant: {}", e));
-    }
-    // Captured before `cmd` is consumed by the VM-create branch below.
-    let policy = cmd.policy.clone();
-    // Fail fast: an invalid stored policy would fail on every later exec.
-    if let Some(p) = policy.as_ref() {
-        if let Err(err) = p.validate() {
-            return Response::err(err);
-        }
-    }
-
-    let (vm_name, pool_backed) = match ensure_tenant_vm(mgr, &cmd, &tenant).await {
-        Ok(pair) => pair,
+    // Locked execute() path (tests + non-daemon callers): spawn the cold
+    // VM under the lock, same semantics as before the split.
+    let prepared = match prepare_sandbox_create(mgr, &cmd).await {
+        Ok(p) => p,
         Err(resp) => return resp,
     };
-
-    // G2: the two-layer invariant — sandbox limits ⊆ VM quota
-    // (policy-model.md §3.5). The tenant VM is registered by now (spawn
-    // stored its `VmPolicy`), so validate the user's requested limits
-    // against the VM's physical quota and reject the create on violation.
-    // No limits → trivially valid.
-    if let Some(user) = policy.as_ref() {
-        if let Some(vm_policy) = mgr.vm_policy(&vm_name) {
-            if let Err(err) = user.validate_with_vm(vm_policy) {
-                return Response::err(err);
+    let handle = match &prepared.vm {
+        TenantVm::Existing { handle, .. } => handle.clone(),
+        TenantVm::ColdSpec { vm_name, spec } => {
+            if let Err(e) = mgr.spawn(spec.clone()).await {
+                return Response::err(e.to_string());
+            }
+            match mgr.get_handle(vm_name) {
+                Some(h) => h,
+                None => return Response::err(format!("VM '{}' not found", vm_name)),
             }
         }
-    }
-
-    // 48-bit suffix: a collision with a live record would silently drop
-    // its workdir mapping (bare HashMap::insert), so re-roll until free.
-    let mut id = new_sandbox_id();
-    while mgr.sandbox_get(&id).is_some() {
-        id = new_sandbox_id();
-    }
-    let workdir = format!("/workdir/{}", id);
-
-    // C3: bind the L2 session through the SandboxAdapter before registering
-    // the record. The effective policy (engine default ∪ user) is fixed at
-    // create and carried by the returned handle; later per-call overrides
-    // union onto it (never a replace).
-    let spec_name = match VmName::new(id.clone()) {
-        Ok(n) => n,
-        Err(e) => return Response::err(format!("invalid sandbox name: {}", e)),
     };
-    let effective = match policy.clone() {
-        Some(user) => default_sandbox_policy().merged_with(&user),
-        None => default_sandbox_policy(),
+    let record = match bind_sandbox(mgr.sandbox_adapter(), handle, &prepared).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
     };
-    let spec = SandboxSpec {
-        name: spec_name,
-        limits: ResourceLimits::default(),
-        policy: Some(effective),
-    };
-    let vm_arc = match mgr.get_handle(&vm_name) {
-        Some(h) => h,
-        None => return Response::err(format!("VM '{}' not found", vm_name)),
-    };
-    let handle = match mgr.sandbox_adapter().create(vm_arc, &spec).await {
-        Ok(h) => h,
-        Err(e) => return Response::err(e.to_string()),
-    };
-
-    // Ensure the workdir exists in the guest (unsandboxed). On failure
-    // return an honest error, best-effort tear down the bound session, and
-    // don't register a half-created sandbox.
-    let mkdir = vec!["mkdir".to_string(), "-p".to_string(), workdir.clone()];
-    // The guest agent can still be booting right after CH reports ready —
-    // a slow layer (e.g. ubuntu) often needs a moment before the vsock
-    // listener is up. Retry the exec briefly on handshake/vsock failures
-    // (same pattern as attach_fs's agent-boot retry) so creation does not
-    // fail on a race.
-    let mut workdir_result = mgr.exec(&vm_name, &mkdir, 30, false, None, None).await;
-    for _ in 0..10 {
-        let retryable = matches!(&workdir_result, Err(e)
-            if e.to_string().contains("vsock") || e.to_string().contains("handshake"));
-        if !retryable {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        workdir_result = mgr.exec(&vm_name, &mkdir, 30, false, None, None).await;
-    }
-    match workdir_result {
-        Ok(r) if r.exit_code == 0 => {}
-        Ok(r) => {
-            let _ = handle.destroy().await;
-            return Response::err(format!(
-                "failed to create workdir {}: {}",
-                workdir,
-                r.stderr.trim()
-            ));
-        }
-        Err(e) => {
-            let _ = handle.destroy().await;
-            return Response::err(format!("failed to create workdir {}: {}", workdir, e));
-        }
-    }
-
-    let record = SandboxRecord {
-        id: id.clone(),
-        tenant,
-        vm_name: vm_name.clone(),
-        workdir: workdir.clone(),
-        created_at: now_secs(),
-        policy: policy.clone(),
-        pool_backed,
-        handle: Some(Arc::from(handle)),
-    };
-    mgr.sandbox_insert(record);
-    // D-phase audit: the declared resource limits are a resource
-    // declaration, recorded when the (stored user) policy asks for it.
-    // Limits only ever come from the user layer — the engine default
-    // carries none — so the stored user policy both carries and gates them.
-    if let Some(user) = policy.as_ref() {
-        crate::audit::audit_resource(Some(user), &id, "limits", &format!("{:?}", user.limits));
-    }
-    Response::ok(serde_json::json!({
-        "id": id,
-        "vm": vm_name,
-        "workdir": workdir,
-        "pool": pool_backed,
-    }))
+    finish_sandbox_create(mgr, &prepared, record)
 }
 
 /// {"command":"sandbox_exec","id":"sb-...","args":[...],"timeout_secs":N,

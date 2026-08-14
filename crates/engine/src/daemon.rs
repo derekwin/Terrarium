@@ -19,7 +19,9 @@ use crate::commands::{
     execute, prepare_blocking_exec, prepare_lifecycle, prepared_exec_audited, require_name,
     Command, PreparedBlockingExec, PreparedLifecycle,
 };
+use crate::commands::sandbox::{bind_sandbox, finish_sandbox_create, prepare_sandbox_create, TenantVm};
 use crate::manager::VmManager;
+use adapter_traits::{VmHandle, VmSpec};
 use terrarium_protocol::Response;
 
 /// Maximum size of a single JSON command line (64 KB).
@@ -217,6 +219,72 @@ async fn dispatch(
                         "pid": pid,
                     })),
                 };
+                return (resp, false);
+            }
+            Err(resp) => return (resp, false),
+        }
+    }
+
+    // sandbox_create is the other cold-boot path: VM boot + agent ready
+    // take ~1s. Resolve everything cheap under the lock, spawn + bind the
+    // session outside it, then re-register — so concurrent sandbox_create
+    // calls (the density/RL scenario) boot VMs in parallel instead of
+    // queuing ~1s each on the manager mutex.
+    if cmd.command == "sandbox_create" {
+        // `mgr` is the guard acquired at the top of dispatch — reuse it
+        // (the Mutex is not reentrant), then drop it around the slow
+        // spawn/bind and re-acquire for the registrations.
+        match prepare_sandbox_create(&mut mgr, &cmd).await {
+            Ok(prepared) => {
+                let vm_adapter = mgr.adapter();
+                let sb_adapter = mgr.sandbox_adapter_arc();
+                drop(mgr);
+
+                // Cold boot outside the lock (concurrent creates run in
+                // parallel; the existing-VM/pool path has no spawn).
+                let mut spawned: Option<(VmSpec, Box<dyn VmHandle>)> = None;
+                if let TenantVm::ColdSpec { spec, .. } = &prepared.vm {
+                    match vm_adapter.create(spec).await {
+                        Ok(h) => spawned = Some((spec.clone(), h)),
+                        Err(e) => return (Response::err(e.to_string()), false),
+                    }
+                }
+
+                // Brief re-lock: register a freshly booted VM + resolve
+                // the Arc handle for the session binding below.
+                let mut mgr = manager.lock().await;
+                let handle = match &prepared.vm {
+                    TenantVm::Existing { handle, .. } => handle.clone(),
+                    TenantVm::ColdSpec { vm_name, spec } => {
+                        let (_, h) = spawned
+                            .take()
+                            .expect("a ColdSpec must have been spawned above");
+                        if let Err(e) = mgr.register_vm(spec, h) {
+                            return (Response::err(e.to_string()), false);
+                        }
+                        match mgr.get_handle(vm_name) {
+                            Some(h) => h,
+                            None => {
+                                return (
+                                    Response::err(format!("VM '{}' not found", vm_name)),
+                                    false,
+                                )
+                            }
+                        }
+                    }
+                };
+                drop(mgr);
+
+                // Slow, lock-free: L2 session + workdir (agent-boot
+                // retries live in bind_sandbox).
+                let record = match bind_sandbox(&*sb_adapter, handle, &prepared).await {
+                    Ok(r) => r,
+                    Err(resp) => return (resp, false),
+                };
+
+                // Re-lock only to register the sandbox record + audit.
+                let mut mgr = manager.lock().await;
+                let resp = finish_sandbox_create(&mut mgr, &prepared, record);
                 return (resp, false);
             }
             Err(resp) => return (resp, false),

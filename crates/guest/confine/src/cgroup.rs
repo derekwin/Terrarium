@@ -15,9 +15,9 @@ fn ensure_mounted() -> Result<(), String> {
     fs::create_dir_all(CGROUP_ROOT).map_err(|e| format!("mkdir {CGROUP_ROOT}: {e}"))?;
     let ret = unsafe {
         libc::mount(
-            b"cgroup2\0".as_ptr() as *const libc::c_char,
-            b"/sys/fs/cgroup\0".as_ptr() as *const libc::c_char,
-            b"cgroup2\0".as_ptr() as *const libc::c_char,
+            c"cgroup2".as_ptr(),
+            c"/sys/fs/cgroup".as_ptr(),
+            c"cgroup2".as_ptr(),
             0,
             std::ptr::null(),
         )

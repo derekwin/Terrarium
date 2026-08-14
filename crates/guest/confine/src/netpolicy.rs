@@ -12,7 +12,7 @@ pub(crate) struct Rule {
 
 impl Rule {
     fn matches(&self, ip: IpAddr, port: u16) -> bool {
-        self.port.map_or(true, |p| p == port) && (self.ips.is_empty() || self.ips.contains(&ip))
+        self.port.is_none_or(|p| p == port) && (self.ips.is_empty() || self.ips.contains(&ip))
     }
 }
 

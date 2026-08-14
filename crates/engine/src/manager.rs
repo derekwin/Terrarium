@@ -33,7 +33,7 @@ pub struct VmManager {
     /// (create/exec/kill) routes through this adapter's handles; the
     /// default comes from [`crate::default_sandbox_adapter`] (guest-sandlock
     /// with the `sandlock` feature, an unavailable stub without it).
-    sandbox_adapter: Box<dyn SandboxAdapter>,
+    sandbox_adapter: Arc<dyn SandboxAdapter>,
     vms: HashMap<VmName, Arc<dyn VmHandle>>,
     /// Each VM's VM-layer policy (recorded at spawn via
     /// `VmSpec::to_policy`) — the physical quota that sandbox resource
@@ -61,7 +61,7 @@ impl VmManager {
     pub fn new(adapter: Arc<dyn VmAdapter>, snapshot_dir: String) -> Self {
         Self {
             adapter,
-            sandbox_adapter: crate::default_sandbox_adapter(),
+            sandbox_adapter: Arc::from(crate::default_sandbox_adapter()),
             vms: HashMap::new(),
             vm_policies: HashMap::new(),
             net_vms: HashSet::new(),
@@ -108,13 +108,19 @@ impl VmManager {
 
     /// Override the L2 sandbox backend (tests inject a mock adapter).
     pub fn with_sandbox_adapter(mut self, sandbox_adapter: Box<dyn SandboxAdapter>) -> Self {
-        self.sandbox_adapter = sandbox_adapter;
+        self.sandbox_adapter = Arc::from(sandbox_adapter);
         self
     }
 
     /// The configured L2 sandbox backend (`create` on this binds a session).
     pub fn sandbox_adapter(&self) -> &dyn SandboxAdapter {
         self.sandbox_adapter.as_ref()
+    }
+
+    /// Arc handle to the L2 backend, for lock-free session binding (the
+    /// daemon's `sandbox_create` fast path binds outside the manager lock).
+    pub fn sandbox_adapter_arc(&self) -> Arc<dyn SandboxAdapter> {
+        self.sandbox_adapter.clone()
     }
 
     /// Override the guest-agent readiness probe used by `pool_create`

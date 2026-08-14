@@ -18,7 +18,7 @@ const SECCOMP_FILTER_FLAG_NEW_LISTENER: u32 = 1 << 3;
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 const SECCOMP_RET_USER_NOTIF: u32 = 0x7fc0_0000;
 
-const SECCOMP_IOCTL_NOTIF_RECV: u64 = (3u32 << 30 | 80u32 << 16 | 0x21u32 << 8 | 0) as u64; // _IOWR('!',0,notif)
+const SECCOMP_IOCTL_NOTIF_RECV: u64 = (3u32 << 30 | 80u32 << 16 | 0x21u32 << 8) as u64; // _IOWR('!',0,notif)
 const SECCOMP_IOCTL_NOTIF_SEND: u64 = (3u32 << 30 | 24u32 << 16 | 0x21u32 << 8 | 1) as u64; // _IOWR('!',1,resp)
 const SECCOMP_IOCTL_NOTIF_ID_VALID: u64 = (2u32 << 30 | 8u32 << 16 | 0x21u32 << 8 | 2) as u64; // _IOR('!',2,u64)
                                                                                                // SECCOMP_USER_NOTIF_FLAG_CONTINUE — respond "proceed" without replaying
@@ -273,7 +273,7 @@ fn read_sockaddr(pid: u32, ptr: u64) -> Option<(std::net::IpAddr, u16)> {
         return None;
     }
     let mut buf = [0u8; 28];
-    let mut local = libc::iovec {
+    let local = libc::iovec {
         iov_base: buf.as_mut_ptr() as *mut libc::c_void,
         iov_len: buf.len(),
     };
@@ -281,7 +281,7 @@ fn read_sockaddr(pid: u32, ptr: u64) -> Option<(std::net::IpAddr, u16)> {
         iov_base: ptr as *mut libc::c_void,
         iov_len: buf.len(),
     };
-    let ret = unsafe { libc::process_vm_readv(pid as libc::pid_t, &mut local, 1, &remote, 1, 0) };
+    let ret = unsafe { libc::process_vm_readv(pid as libc::pid_t, &local, 1, &remote, 1, 0) };
     if ret < 0 {
         return None;
     }
@@ -380,7 +380,7 @@ fn read_msghdr_target(pid: u32, msghdr_ptr: u64) -> Option<Option<(std::net::IpA
         return None;
     }
     let mut buf = [0u8; 16];
-    let mut local = libc::iovec {
+    let local = libc::iovec {
         iov_base: buf.as_mut_ptr() as *mut libc::c_void,
         iov_len: buf.len(),
     };
@@ -388,7 +388,7 @@ fn read_msghdr_target(pid: u32, msghdr_ptr: u64) -> Option<Option<(std::net::IpA
         iov_base: msghdr_ptr as *mut libc::c_void,
         iov_len: buf.len(),
     };
-    let ret = unsafe { libc::process_vm_readv(pid as libc::pid_t, &mut local, 1, &remote, 1, 0) };
+    let ret = unsafe { libc::process_vm_readv(pid as libc::pid_t, &local, 1, &remote, 1, 0) };
     if ret < 0 {
         return None;
     }

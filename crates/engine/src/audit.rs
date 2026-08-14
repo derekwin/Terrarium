@@ -152,8 +152,8 @@ pub(crate) fn audit_history(
     records
         .into_iter()
         .rev()
-        .filter(|r| event.map_or(true, |e| r.event == e))
-        .filter(|r| sandbox_id.map_or(true, |s| r.sandbox_id == s))
+        .filter(|r| event.is_none_or(|e| r.event == e))
+        .filter(|r| sandbox_id.is_none_or(|s| r.sandbox_id == s))
         .take(limit)
         .collect()
 }
@@ -167,8 +167,8 @@ pub(crate) fn audit_list(
     let log = store().lock().unwrap_or_else(|e| e.into_inner());
     log.iter()
         .rev()
-        .filter(|r| event.map_or(true, |e| r.event == e))
-        .filter(|r| sandbox_id.map_or(true, |s| r.sandbox_id == s))
+        .filter(|r| event.is_none_or(|e| r.event == e))
+        .filter(|r| sandbox_id.is_none_or(|s| r.sandbox_id == s))
         .take(limit)
         .cloned()
         .collect()

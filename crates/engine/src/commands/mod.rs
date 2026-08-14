@@ -8,7 +8,7 @@ mod exec;
 mod fs;
 mod network;
 mod pool;
-mod sandbox;
+pub(crate) mod sandbox;
 mod session;
 mod snapshot;
 mod vm;
@@ -369,7 +369,7 @@ pub(crate) fn prepare_lifecycle(
             return Err(Response::err(format!("Unknown command: {}", other)));
         }
     };
-    if mgr.get(&spec.name.to_string()).is_some() {
+    if mgr.get(spec.name.as_ref()).is_some() {
         return Err(Response::err(format!("VM '{}' already exists", spec.name)));
     }
     Ok(match snapshot {

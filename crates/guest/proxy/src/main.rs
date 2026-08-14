@@ -278,16 +278,16 @@ fn exec_cmd<S: Read + Write>(stream: &mut S, cmd: &serde_json::Value) {
         let native_present = sandbox::NATIVE_PATHS.iter().any(|p| exists(p));
         let wrapped = match cmd["backend"].as_str() {
             Some("sandlock") => {
-                sandbox::wrap_for_sandbox(&args, work_dir, policy.as_ref(), &exists)
+                sandbox::wrap_for_sandbox(&args, work_dir, policy.as_ref(), exists)
             }
             // native is the default backend; probe for it when no explicit
             // backend came over the wire (older engine ↔ new guest-proxy).
             // "native" accepted for older engines that predate the rename.
             Some("confine") | Some("native") | None if native_present => {
-                sandbox::wrap_for_confine(&args, work_dir, policy.as_ref(), &exists)
+                sandbox::wrap_for_confine(&args, work_dir, policy.as_ref(), exists)
             }
             Some("confine") | Some("native") | None => {
-                sandbox::wrap_for_sandbox(&args, work_dir, policy.as_ref(), &exists)
+                sandbox::wrap_for_sandbox(&args, work_dir, policy.as_ref(), exists)
             }
             Some(other) => {
                 let resp = serde_json::json!({"status": "error", "message": format!("unknown sandbox backend: {other}")});
