@@ -342,3 +342,70 @@ pub fn remove_tap(tap: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+// ── tap pool ──────────────────────────────────────────────────────────────
+// `ip tuntap add` / `ip link set master` take the global RTNL lock, so
+// creating a tap per VM serialized VM launch under parallel load (measured:
+// net restores capped at ~274/s vs ~400/s without networking). The pool
+// pre-creates + pre-attaches taps once; a launch claims a name (zero kernel
+// ops) and release returns it for reuse.
+
+/// Initial pool size. Each tap is a lightweight device on the bridge; 256
+/// covers the host's practical launch concurrency.
+const TAP_POOL_INIT: usize = 256;
+/// Batch grown when the pool drains under a burst larger than the init size.
+const TAP_POOL_GROW: usize = 32;
+
+static TAP_POOL: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::VecDeque<String>>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(std::collections::VecDeque::new())
+});
+static TAP_POOL_FILLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static NEXT_POOL_TAP: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Fill the pool once (idempotent). Runs on a blocking thread from
+/// `tap_pool_claim`'s caller; the one-time RTNL cost (~10ms × 256) is paid
+/// at the first net VM, not per launch.
+fn fill_tap_pool() -> Result<(), String> {
+    if TAP_POOL_FILLED.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+    let mut pool = TAP_POOL.lock().unwrap();
+    if TAP_POOL_FILLED.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+    for _ in 0..TAP_POOL_INIT {
+        let i = NEXT_POOL_TAP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tap = format!("terra-pool-{i}");
+        ensure_tap(&tap, DEFAULT_BRIDGE)?;
+        pool.push_back(tap);
+    }
+    TAP_POOL_FILLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+/// Claim a ready tap (already created + attached to the bridge). Grows a
+/// small batch when the pool drains. Zero kernel ops in the common case.
+pub fn tap_pool_claim() -> Result<String, String> {
+    fill_tap_pool()?;
+    let mut pool = TAP_POOL.lock().unwrap();
+    if let Some(tap) = pool.pop_front() {
+        return Ok(tap);
+    }
+    for _ in 0..TAP_POOL_GROW {
+        let i = NEXT_POOL_TAP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tap = format!("terra-pool-{i}");
+        ensure_tap(&tap, DEFAULT_BRIDGE)?;
+        pool.push_back(tap);
+    }
+    pool.pop_front()
+        .ok_or_else(|| "tap pool exhausted".to_string())
+}
+
+/// Return a claimed tap to the pool (it stays created + attached).
+pub fn tap_pool_release(name: &str) {
+    TAP_POOL.lock().unwrap().push_back(name.to_string());
+}

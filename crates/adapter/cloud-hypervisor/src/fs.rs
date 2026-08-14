@@ -173,7 +173,11 @@ pub async fn compose_fs(
             let _ = child.wait();
             return Err("virtiofsd socket timeout".into());
         }
-        sleep(Duration::from_millis(100)).await;
+        // Sub-10ms poll: virtiofsd opens its socket a few ms after spawn,
+        // so a 100ms quantum added ~100ms of pure polling latency to every
+        // VM launch/restore (measured: compose_fs alone was ~106ms, most of
+        // it this sleep). This is the fast-create hot path.
+        sleep(Duration::from_millis(5)).await;
     }
 
     tracing::info!(name = %name, layers = ?fs_spec.layers, %persistent, "Layered rootfs composed");

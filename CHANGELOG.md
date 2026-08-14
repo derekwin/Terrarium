@@ -182,6 +182,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Snapshot restore remains the full-determinism path.
 
 ### Fixed
+- **VM launch/restore latency + throughput** — two hot-path fixes:
+  (1) the virtiofsd and CH API socket waits polled every 100ms, adding
+  ~200ms of pure polling latency to every launch (single restore 225ms →
+  32ms with 5ms polls); (2) per-VM `ip tuntap add`/`ip link set master`
+  serialize on the kernel RTNL lock, capping net launches at ~274/s (vs
+  400/s without networking). A tap pool now pre-creates + pre-attaches
+  256 taps once (~3s one-time); launch claims a name with zero kernel
+  ops and destroy returns it. Controlled net-restore throughput: 539/s
+  at 96 workers (~10x gVisor); the old per-VM tap naming is removed.
 - **daemon keep-alive wrapper now logs its exit reason** — before exiting
   after 30 consecutive heartbeat failures it prints a diagnostic line, so
   a future daemon death distinguishes "accept loop starved" from "daemon

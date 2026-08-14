@@ -1,0 +1,42 @@
+{
+  "instances": 100,
+  "create_mode": "snapshot",
+  "baselines": {
+    "terra": {
+      "baseline": "terra",
+      "instances": 100,
+      "create_wall_sec": 0.72,
+      "instances_per_sec": 138.76,
+      "host_memory_mb": {
+        "rss_mb": 6178.3,
+        "pss_mb": null
+      },
+      "per_instance_mb": 61.8,
+      "execs_per_sec": 2358.7
+    },
+    "docker": {
+      "baseline": "docker",
+      "instances": 100,
+      "create_wall_sec": 29.03,
+      "instances_per_sec": 3.44,
+      "host_memory_mb": {
+        "rss_mb": 57.9,
+        "pss_mb": null
+      },
+      "per_instance_mb": 0.6,
+      "execs_per_sec": 168.3
+    },
+    "gvisor": {
+      "baseline": "gvisor",
+      "instances": 100,
+      "create_wall_sec": 2.87,
+      "instances_per_sec": 34.9,
+      "host_memory_mb": {
+        "rss_mb": 8412.7,
+        "pss_mb": null
+      },
+      "per_instance_mb": 84.1,
+      "execs_per_sec": null
+    }
+  }
+}

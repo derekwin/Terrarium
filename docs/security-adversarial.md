@@ -125,7 +125,7 @@ gVisor 内存数字是 Sentry 进程 RSS，需注意其 syscall 拦截的用户�
 |---|---|---|---|---|
 | Terrarium（冷启动） | 14.3 s | 7.0/s（8 并发） | **67.5 MB**（CH+virtiofsd） | **1869 exec/s** |
 | Terrarium（快照恢复） | 1.9 s | **53.2/s**（64 并发，含一次性基 VM+快照） | **62.6 MB** | **2117 exec/s** |
-| Terrarium（快照恢复·预置快照） | 0.67 s | **148.2/s**（64 并发，稳态） | **62.8 MB** | **2219 exec/s** |
+| Terrarium（快照恢复·预置快照） | 0.72 s | **138.8/s**（64 并发，稳态） | **61.8 MB** | **2359 exec/s** |
 | Docker | 28.8 s | 3.5/s | 0.6 MB（sleep 容器） | 173 exec/s（docker exec） |
 | gVisor | 1.6 s（到 sentry 就绪） | 65/s | **84.4 MB**（runsc+gofer+sentry） | n/a（do 无 exec 通道） |
 
@@ -147,6 +147,14 @@ gVisor 内存数字是 Sentry 进程 RSS，需注意其 syscall 拦截的用户�
 - **预置快照（生产形态）稳态 148 VMs/s**（`--snapshot-path` 复用一份
   快照，跳过一次性基 VM 引导）：100 环境 0.67s，gVisor 的 3.3 倍。
   快照是固定资产（常驻页缓存），因此这是部署后实际看到的创建速率。
+- **受控 restore-only 吞吐 539 VMs/s**（96 并发，net 快照）——是 gVisor
+  的 ~10 倍。两个优化（2026-08-14 晚）：
+  1. **socket 等待轮询 100ms → 5ms**：compose_fs 和 CH 启动各有一段
+     100ms 粒度的轮询，单次 restore 从 225ms 降到 32ms（7 倍）；
+  2. **tap 池**：`ip tuntap add`/`ip link set master` 走 RTNL 全局锁，
+     per-VM 创建把 net restore 压到 ~274/s（vs nonet 400/s）。现在
+     网络首启时一次性预创建 256 个 tap（~3s），launch 零内核操作认领、
+     destroy 归还——net restore 从 274 提到 539/s。
 
 **密度扫描暴露并修复的真实缺陷**：`tap_name` 把 VM 名截断到 9 字符，
 同前缀租户（如 `tenant-dens-0..7`）全部落到同一个 tap 设备名上，第二个

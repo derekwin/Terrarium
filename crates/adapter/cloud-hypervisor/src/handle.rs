@@ -16,7 +16,7 @@ use crate::client::ChClient;
 use crate::config::ChConfig;
 use crate::fs::{compose_fs, copy_tree, teardown_fs, FsStack};
 use crate::process::{
-    ch_args, ch_restore_args, retry_get_info, spawn_ch, tap_name, wait_for_socket,
+    ch_args, ch_restore_args, retry_get_info, spawn_ch, wait_for_socket,
 };
 
 // ---------------------------------------------------------------------------
@@ -51,6 +51,9 @@ pub(crate) async fn restore_vm(
 
 struct ChVmHandle {
     name: VmName,
+    /// Tap claimed from the pre-created pool (net VMs); returned to the
+    /// pool on Drop instead of being deleted.
+    tap: Option<String>,
     /// Host-side vsock socket the guest agent listens through; restored
     /// VMs use the path written into the snapshot config (per-VM).
     vsock_path: String,
@@ -75,7 +78,11 @@ impl ChVmHandle {
     /// copy's device sockets to this VM's name-based paths. Each restore
     /// gets an isolated config, so parallel restores of one snapshot
     /// cannot race on the shared `config.json`.
-    fn prepare_restore_dir(snapshot: &Snapshot, name: &str) -> Result<String, AdapterError> {
+    fn prepare_restore_dir(
+        snapshot: &Snapshot,
+        name: &str,
+        tap: Option<&str>,
+    ) -> Result<String, AdapterError> {
         let restore_dir = format!("{}/restore-{}", snapshot.path, name);
         let _ = std::fs::remove_dir_all(&restore_dir);
         std::fs::create_dir_all(&restore_dir)
@@ -104,7 +111,6 @@ impl ChVmHandle {
             .map_err(|e| AdapterError::internal(format!("parse snapshot config: {}", e)))?;
         let fs_socket = format!("/tmp/terra-{}-fs.sock", name);
         let vsock_socket = format!("/tmp/terra-{}-vsock.sock", name);
-        let tap = format!("terra-{}", tap_name(name));
         if let Some(fs) = cfg.get_mut("fs").and_then(|f| f.as_array_mut()) {
             for entry in fs.iter_mut() {
                 if let Some(sock) = entry.get_mut("socket") {
@@ -121,10 +127,12 @@ impl ChVmHandle {
         // the snapshotted VM's tap, which is still owned by its live CH
         // ("Resource busy", observed on every net restore). Point it at
         // the fresh tap launch() created for this restored VM.
-        if let Some(net) = cfg.get_mut("net").and_then(|n| n.as_array_mut()) {
-            for entry in net.iter_mut() {
-                if let Some(t) = entry.get_mut("tap") {
-                    *t = serde_json::json!(tap);
+        if let Some(tap) = tap {
+            if let Some(net) = cfg.get_mut("net").and_then(|n| n.as_array_mut()) {
+                for entry in net.iter_mut() {
+                    if let Some(t) = entry.get_mut("tap") {
+                        *t = serde_json::json!(tap);
+                    }
                 }
             }
         }
@@ -150,12 +158,37 @@ impl ChVmHandle {
         let vsock = format!("/tmp/terra-{}-vsock.sock", name);
         let _ = std::fs::remove_file(&vsock);
 
+        // Networking: claim a tap from the pre-created pool (privileged;
+        // the pool fill runs BLOCKING `ip` subprocesses, so spawn_blocking
+        // keeps the tokio workers free). The pool avoids the per-VM
+        // `ip tuntap add` + `ip link set master` RTNL serialization that
+        // capped parallel launches at ~274/s (vs ~400/s without net).
+        let net_flag = spec.net;
+        let tap = if net_flag {
+            let claimed = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                terrarium_network::ensure_nat_bridge(
+                    terrarium_network::DEFAULT_BRIDGE,
+                    terrarium_network::DEFAULT_GATEWAY,
+                    terrarium_network::DEFAULT_PREFIX,
+                )?;
+                terrarium_network::tap_pool_claim()
+            })
+            .await
+            .map_err(|e| AdapterError::internal(format!("tap pool task: {e}")))?
+            .map_err(AdapterError::internal)?;
+            Some(claimed)
+        } else {
+            None
+        };
+
         // Restore: build a per-restore snapshot dir (isolated config, so
         // parallel restores of one snapshot don't race) and compose the
         // layered rootfs on the name-based socket the rewritten config
         // points at.
         let restore_dir = match restore {
-            Some(snapshot) => Some(Self::prepare_restore_dir(snapshot, name.as_ref())?),
+            Some(snapshot) => {
+                Some(Self::prepare_restore_dir(snapshot, name.as_ref(), tap.as_deref())?)
+            }
             None => None,
         };
         let fs_socket = format!("/tmp/terra-{}-fs.sock", name);
@@ -178,33 +211,6 @@ impl ChVmHandle {
                 }
             }
         }
-
-        // Networking: NAT bridge + per-VM tap (privileged; clear error).
-        // These run BLOCKING `ip`/`ebtables` subprocesses — under high
-        // parallel creation they must not occupy the tokio workers (that
-        // starves the daemon's accept loop and the keep-alive wrapper /
-        // SDK fallback take the wrong action). spawn_blocking keeps the
-        // async workers free while the subprocesses run.
-        let net_flag = spec.net;
-        let tap = if net_flag {
-            let name_for_tap = name.as_ref().to_string();
-            let setup = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
-                terrarium_network::ensure_nat_bridge(
-                    terrarium_network::DEFAULT_BRIDGE,
-                    terrarium_network::DEFAULT_GATEWAY,
-                    terrarium_network::DEFAULT_PREFIX,
-                )?;
-                let tap = format!("terra-{}", tap_name(&name_for_tap));
-                terrarium_network::ensure_tap(&tap, terrarium_network::DEFAULT_BRIDGE)?;
-                Ok(Some(tap))
-            })
-            .await
-            .map_err(|e| AdapterError::internal(format!("tap setup task: {e}")))?
-            .map_err(AdapterError::internal)?;
-            setup
-        } else {
-            None
-        };
 
         let args = match restore {
             Some(_) => ch_restore_args(
@@ -243,6 +249,7 @@ impl ChVmHandle {
 
         Ok(Self {
             name,
+            tap,
             vsock_path: vsock,
             restore_dir: restore_dir.map(PathBuf::from),
             child: Mutex::new(child),
@@ -568,8 +575,10 @@ impl Drop for ChVmHandle {
         if let Some(dir) = &self.restore_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
-        // Remove the per-VM tap if networking was enabled (best-effort).
-        let tap = format!("terra-{}", tap_name(self.name.as_ref()));
-        let _ = terrarium_network::remove_tap(&tap);
+        // Return the claimed tap to the pool (it stays created + attached;
+        // a later launch reuses it — no RTNL churn).
+        if let Some(tap) = &self.tap {
+            terrarium_network::tap_pool_release(tap);
+        }
     }
 }
