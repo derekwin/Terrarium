@@ -44,7 +44,7 @@ pub struct VmManager {
     /// Warm pool slots (idle agent VMs ready for hot-plug assignment).
     pool: Vec<PoolSlot>,
     /// Next pool VM id.
-    pool_next_id: u32,
+    pub(crate) pool_next_id: u32,
     /// Directory for snapshot artifacts (default: "/tmp").
     snapshot_dir: String,
     /// Background exec sessions.

@@ -5,7 +5,7 @@
 //! here because they only touch the pool plus the shared VM lifecycle
 //! (spawn/destroy/attach_fs on `self`).
 
-use adapter_traits::{AdapterError, FsSpec, UpperPolicy, VmName, VmSpec};
+use adapter_traits::{AdapterError, FsSpec, UpperPolicy, VmHandle, VmName, VmSpec};
 
 use super::VmManager;
 
@@ -139,6 +139,27 @@ impl VmManager {
         }
     }
 
+    /// Re-lock bookkeeping for the lock-free pool fill: register a
+    /// restored VM and slot it as READY (fs attached, agent pings pass).
+    pub fn pool_register_ready(
+        &mut self,
+        spec: &VmSpec,
+        handle: Box<dyn VmHandle>,
+        layers: Vec<String>,
+        net: bool,
+    ) -> Result<(), AdapterError> {
+        let name = spec.name.to_string();
+        self.register_vm(spec, handle)?;
+        self.pool.push(PoolSlot {
+            name,
+            claimed: false,
+            layers,
+            net,
+            ready: true,
+        });
+        Ok(())
+    }
+
     /// Claim an idle pool VM and hot-plug the given layers.
     /// Returns the claimed VM name.
     pub async fn pool_claim(&mut self, layers: Vec<String>) -> Result<String, AdapterError> {
@@ -212,70 +233,6 @@ impl VmManager {
             self.pool[idx].layers.clear();
         }
         Ok(())
-    }
-
-    /// Fill the pool with READY slots: `size` VMs pre-restored from a
-    /// snapshot with their layered fs attached and the guest agent ready.
-    /// Claiming one is a direct sandbox bind (no boot, no fs hot-plug);
-    /// releasing one resets it in place. The ready state must live in the
-    /// layer (the snapshot's upper is the ephemeral baseline; episode
-    /// writes are cleared by the in-place reset).
-    pub async fn pool_create_ready(
-        &mut self,
-        size: u32,
-        snapshot: &adapter_traits::Snapshot,
-        kernel: &str,
-        layers: Vec<String>,
-        net: bool,
-        memory_mb: u64,
-    ) -> Result<PoolCreateOutcome, AdapterError> {
-        let mut outcome = PoolCreateOutcome::default();
-        for _ in 0..size {
-            let name = format!("pool-{}", self.pool_next_id);
-            self.pool_next_id += 1;
-            let vm_name = VmName::new(name.clone())
-                .map_err(AdapterError::invalid_argument)?;
-            let spec = VmSpec {
-                name: vm_name,
-                kernel: Some(kernel.to_string()),
-                cmdline: None,
-                boot_vcpus: 1,
-                max_vcpus: Some(4),
-                memory_mb,
-                max_memory_mb: Some(1024),
-                initramfs: None,
-                net,
-                fs: Some(adapter_traits::FsSpec {
-                    layers: layers.clone(),
-                    upper: adapter_traits::UpperPolicy::Ephemeral,
-                }),
-            };
-            match self.restore(snapshot, spec).await {
-                Ok(()) => match self.wait_agent_ready(&name).await {
-                    Ok(()) => {
-                        self.pool.push(PoolSlot {
-                            name: name.clone(),
-                            claimed: false,
-                            layers: layers.clone(),
-                            net,
-                            ready: true,
-                        });
-                        outcome.ready.push(name);
-                    }
-                    Err(e) => {
-                        tracing::warn!(vm = %name, error = %e, "ready pool VM agent not ready; destroying");
-                        let _ = self.destroy(&name).await;
-                        outcome.failed.push((name, e.to_string()));
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(vm = %name, error = %e, "ready pool restore failed; destroying");
-                    let _ = self.destroy(&name).await;
-                    outcome.failed.push((name, e.to_string()));
-                }
-            }
-        }
-        Ok(outcome)
     }
 
     /// Atomically destroy up to *count* idle pool VMs (claimed slots are

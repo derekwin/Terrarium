@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`terra cleanup` command + daemon-start orphan warning** — reaps
+  cloud-hypervisor/virtiofsd/erofsfuse processes left by a crashed daemon
+  and removes stale `/tmp/terra-*` sockets (refuses while a daemon is
+  running; self-elevates via sudo). `daemon start` now warns when orphaned
+  host processes are detected — fixes the pool-N "API socket already in
+  use" collision after a crash (observed repeatedly during development).
 - **Unified hot pool (Ready slots)** — `pool_create_snapshot` pre-restores
   VMs from a snapshot with the layered fs attached and the agent running.
   `sandbox_create(pool=True)` prefers a Ready slot whose layer set matches
@@ -190,6 +196,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Snapshot restore remains the full-determinism path.
 
 ### Fixed
+- **pool_create_snapshot now fills in parallel** — the READY-pool fill
+  restored VMs sequentially under the manager lock (~300ms each; 16 slots
+  ≈ 4.8s). The daemon now builds the specs under the lock, restores +
+  pings all VMs in parallel (JoinSet), and registers the slots on re-lock
+  (16 slots ≈ 1.5s incl. the one-time tap-pool fill). Also fixed a
+  reentrant Mutex deadlock in the new daemon branch (third occurrence of
+  the same top-of-dispatch guard re-acquisition; a comment now guards the
+  pattern).
 - **tenant_destroy held the manager lock across the whole teardown** —
   session kills, sandbox destroys and the pool reset/detach/shutdown are
   vsock/CH round trips that serialized on `Mutex<VmManager>`, capping the

@@ -16,8 +16,11 @@ use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
 use crate::commands::{
-    execute, prepare_blocking_exec, prepare_lifecycle, prepared_exec_audited, require_name,
-    Command, PreparedBlockingExec, PreparedLifecycle,
+    execute, pool::{
+        finish_pool_create_snapshot, pool_create_snapshot_response, prepare_pool_create_snapshot,
+    },
+    prepare_blocking_exec, prepare_lifecycle, prepared_exec_audited, require_name, Command,
+    PreparedBlockingExec, PreparedLifecycle,
 };
 use crate::commands::sandbox::{
     bind_sandbox, finalize_tenant_destroy, finish_sandbox_create, finish_tenant_destroy,
@@ -39,6 +42,7 @@ const REAP_COMMANDS: &[&str] = &[
     "shutdown",
     "destroy",
     "pool_create",
+    "pool_create_snapshot",
     "pool_release",
     "sandbox_create",
     "tenant_destroy",
@@ -175,6 +179,10 @@ async fn dispatch(
         return (Response::ok_msg("daemon shutting down"), true);
     }
     let mut mgr = manager.lock().await;
+    // NOTE: `mgr` is the ONE manager-lock guard for this whole dispatch.
+    // Lock-free special branches REUSE it (never call manager.lock() again
+    // — tokio Mutex is not reentrant, and re-acquiring deadlocks). Drop it
+    // around the slow outside work, then re-acquire for the finalize.
     // Best-effort liveness scan, only before commands that can change VM
     // state — read-only commands skip the O(n) `Arc::get_mut` scan.
     if REAP_COMMANDS.contains(&cmd.command.as_str()) {
@@ -394,6 +402,49 @@ async fn dispatch(
                     "released_to_pool": released,
                     "status": if released { "released" } else { "destroyed" },
                 }));
+                return (resp, false);
+            }
+            Err(resp) => return (resp, false),
+        }
+    }
+
+    // pool_create_snapshot restores N VMs from a snapshot — the slow part.
+    // Build the specs under the lock, restore + ping in parallel outside,
+    // then register the READY slots on re-lock.
+    if cmd.command == "pool_create_snapshot" {
+        // reuse the guard acquired at the top of dispatch (the Mutex is
+        // not reentrant); drop it around the parallel restores.
+        match prepare_pool_create_snapshot(&mut mgr, &cmd) {
+            Ok(plan) => {
+                let adapter = mgr.adapter();
+                drop(mgr);
+                let results = finish_pool_create_snapshot(&plan, adapter).await;
+                let mut mgr = manager.lock().await;
+                let mut ready = Vec::new();
+                let mut failed = Vec::new();
+                for (spec, result) in results {
+                    match result {
+                        Some((handle, Ok(()))) => {
+                            match mgr.pool_register_ready(
+                                &spec,
+                                handle,
+                                plan.layers.clone(),
+                                plan.net,
+                            ) {
+                                Ok(()) => ready.push(spec.name.to_string()),
+                                Err(e) => failed.push((spec.name.to_string(), e.to_string())),
+                            }
+                        }
+                        Some((handle, Err(e))) => {
+                            drop(handle);
+                            failed.push((spec.name.to_string(), e));
+                        }
+                        None => {
+                            failed.push((spec.name.to_string(), "restore failed".to_string()));
+                        }
+                    }
+                }
+                let resp = pool_create_snapshot_response(ready, failed);
                 return (resp, false);
             }
             Err(resp) => return (resp, false),

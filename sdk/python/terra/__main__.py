@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import glob
 import json
 import os
 import shutil
@@ -1259,6 +1260,17 @@ def cmd_daemon_start(args) -> int:
         print("daemon already running — stop it first: terra daemon stop")
         return EXIT_ERROR
 
+    # Pre-flight: after a crash the previous daemon's CH/virtiofsd may
+    # still be running (and holding the pool-N sockets, so a fresh pool
+    # collides with "already in use"). Warn so the operator can clean.
+    orphans = _orphan_host_processes()
+    if orphans:
+        print(
+            f"WARN: {len(orphans)} orphaned Terrarium host processes detected "
+            "(leftover from a dead daemon) — run 'terra cleanup' to reap them",
+            file=sys.stderr,
+        )
+
     log_file = paths.run_dir() / "daemon.log"
 
     # The engine daemon runs on a Rust thread; when daemon_stop shuts
@@ -1320,6 +1332,94 @@ def cmd_daemon_start(args) -> int:
     time.sleep(1.5)
     sock = paths.default_socket()
     print(f"daemon started (pid={proc.pid}, socket={sock})")
+    return EXIT_OK
+
+
+def _orphan_host_processes() -> list[int]:
+    """PIDs of cloud-hypervisor / virtiofsd / erofsfuse processes whose
+    command line references Terrarium's /tmp/terra-* sockets. With no
+    daemon alive these are orphans of a crashed daemon."""
+    out: list[int] = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                cmdline = f.read().decode(errors="ignore")
+        except OSError:
+            continue
+        if "/tmp/terra-" not in cmdline:
+            continue
+        if any(n in cmdline for n in ("cloud-hypervisor", "virtiofsd", "erofsfuse")):
+            out.append(int(entry))
+    return out
+
+
+def cmd_cleanup(args) -> int:
+    """Reap orphaned Terrarium host processes and stale sockets.
+
+    Refuses while the daemon is running (a live daemon owns its VMs).
+    Self-elevates via sudo like ``daemon start``: the orphans are usually
+    root-owned (the daemon runs as root).
+    """
+    if _daemon_alive(paths.default_socket()):
+        return _err(
+            "daemon is running",
+            cause="cleanup would kill live tenant VMs",
+            fix="stop the daemon first: terra daemon stop",
+        )
+    if os.geteuid() != 0:
+        sudo = shutil.which("sudo")
+        if sudo is None:
+            return _err(
+                "cleanup needs root (orphans are daemon-owned)",
+                cause="not running as root and sudo unavailable",
+                fix="run it yourself: sudo python -m terra cleanup",
+            )
+        env_pairs = [
+            f"PATH={os.environ.get('PATH', '')}",
+            f"HOME={os.environ.get('HOME', '')}",
+        ]
+        env_pairs += [
+            f"{k}={v}" for k, v in os.environ.items() if k.startswith("TERRA_")
+        ]
+        os.execvp(
+            sudo,
+            [sudo, "env", *env_pairs, sys.executable, "-m", "terra", "cleanup"],
+        )
+
+    pids = _orphan_host_processes()
+    killed = 0
+    for pid in pids:
+        try:
+            os.kill(pid, 9)
+            killed += 1
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    removed = 0
+    for pattern in (
+        "/tmp/terra-*.sock",
+        "/tmp/terra-*.sock.lock",
+        "/tmp/terra-*-vsock.sock",
+        "/tmp/terra-*-fs.sock",
+        "/tmp/terra-*-fs.sock.pid",
+    ):
+        for p in glob.glob(pattern):
+            try:
+                os.unlink(p)
+                removed += 1
+            except FileNotFoundError:
+                pass
+    stale_daemon_socket = paths.default_socket()
+    if os.path.exists(stale_daemon_socket):
+        try:
+            os.unlink(stale_daemon_socket)
+            removed += 1
+        except FileNotFoundError:
+            pass
+
+    print(f"cleanup: killed {killed} orphan processes, removed {removed} stale files")
     return EXIT_OK
 
 
@@ -1784,6 +1884,13 @@ Common workflows:
     dmns.add_parser("stop", help="stop daemon gracefully").set_defaults(f=cmd_daemon_stop)
 
     dmns.add_parser("destroy", help="force-stop daemon").set_defaults(f=cmd_daemon_destroy)
+
+    # ── cleanup ───────────────────────────────────────────────────────
+    clean = sub.add_parser(
+        "cleanup",
+        help="reap orphaned host processes + stale sockets from a dead daemon",
+    )
+    clean.set_defaults(f=cmd_cleanup)
 
     # Parse and dispatch
     args = p.parse_args()

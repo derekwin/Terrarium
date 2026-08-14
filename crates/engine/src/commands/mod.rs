@@ -7,7 +7,7 @@ mod audit_cmd;
 mod exec;
 mod fs;
 mod network;
-mod pool;
+pub(crate) mod pool;
 pub(crate) mod sandbox;
 mod session;
 mod snapshot;

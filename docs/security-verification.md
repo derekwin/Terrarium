@@ -83,8 +83,9 @@ ebtables -A FORWARD -i terra-+ -o terra-+ -j DROP
 
 ## 已知缺口（跟踪中）
 
-1. **审计默认关闭**：`SandboxPolicy.audit` 默认全 false，生产部署需显式
-   开启，或把引擎默认策略的 deny 审计改为默认开。
+1. **审计默认开启 deny、exec/resource 默认关**：引擎默认策略
+   `SandboxPolicy.audit.deny = true`（2026-08 起），deny 事件默认落审计；
+   exec/resource 事件仍需显式开启。生产按需打开完整审计面。
 2. **公网出口依赖宿主网络**：网络测试用宿主内网目标（10.102.0.254:80）
    保持可复现；受限公网（宿主 443 不通）环境下 NAT 出公网未覆盖。
 

@@ -252,3 +252,8 @@ sandbox 销毁、reset/detach/shutdown 全在 manager 锁外执行，重入锁�
 |---|---|
 | 修复前（释放持锁） | ~68/s @16 槽 |
 | 修复后 | **462/s @16 槽**（301/s @8 槽） |
+
+运维：`terra cleanup` 可回收 daemon 崩溃残留的孤儿进程与 stale socket
+（拒绝在 daemon 运行时执行；`daemon start` 检测到孤儿时给出提示）。
+`pool_create_snapshot` 填充已并行化（16 槽 ~1.5s，含一次性 tap 池填充；
+此前顺序 ~4.8s）。
