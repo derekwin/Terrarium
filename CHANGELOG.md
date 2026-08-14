@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Unified hot pool (Ready slots)** — `pool_create_snapshot` pre-restores
+  VMs from a snapshot with the layered fs attached and the agent running.
+  `sandbox_create(pool=True)` prefers a Ready slot whose layer set matches
+  exactly: claim is a direct sandbox bind (~9ms vs ~950ms cold / ~617ms
+  warm-with-fs-attach). Release resets the VM in place (guest kill +
+  episode dirs back to the layer baseline) — verified no data leaks
+  between sequential claims. PoolSlot carries a `ready` flag; `pool_list`
+  reports it.
 - Adversarial isolation suite (`test_adversarial_isolation.py`, 31 real-KVM
   tests) with a static escape probe (`adversarial/probes/escape_probe.c`,
   gcc-built, chunked-upload to the guest): Landlock bypass attempts

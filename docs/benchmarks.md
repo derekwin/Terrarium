@@ -220,3 +220,30 @@ readiness) and is excluded from the measured sweep.
 - The engine also needs namespace privileges for virtiofsd (user/mount
   namespaces). On hosts where those are blocked the benchmark aborts with
   exit 3 and an honest message instead of emitting partial numbers.
+
+## Unified hot pool (快照 Ready 池，2026-08-14)
+
+`pool_create_snapshot` 把暖池升级为两层：原有的 Warm 槽（agent initramfs，
+claim 时热插 fs，~617ms）之外，新增 **Ready 槽**——从快照预恢复的 VM
+（层文件系统已挂载、guest agent 运行中）。`sandbox_create(pool=True)`
+优先认领 Ready 槽（层集合精确匹配），**零启动、零 fs 热插，直接绑
+sandbox**；释放走 in-place reset（清回层基线，快照的 ready 状态必须在层
+里）。实测：
+
+| 路径 | 单次创建/认领延迟 |
+|---|---|
+| 冷启动 | ~950 ms |
+| 旧暖池（claim + fs 热插） | ~617 ms |
+| **Ready 池认领** | **~9 ms** |
+
+隔离验证：A 租户在槽里写标记 → tenant_destroy（reset）→ B 租户认领同一
+槽 → 标记已清除（无跨租户数据泄漏）。对抗套件在 8 槽热池上从 11s 降到
+1.5s（认领代替冷启动）。
+
+RL 场景注意：episode 循环**不走池**——单租户反复跑任务用 in-place reset
+（`reset_vm`，32 环境 ~34ms/episode，见上文），热池服务于动态租户创建
+（agent 生产/CI 的并发租户）。
+
+已知后续项：`tenant_destroy` 的释放（含 reset）仍持 manager 锁，高并发
+claim/release 循环（~68 episodes/s @16 槽）受其限制；与 sandbox_create
+锁修复同模式，待做。

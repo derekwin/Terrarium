@@ -20,6 +20,13 @@ pub struct PoolSlot {
     pub layers: Vec<String>,
     /// Whether this VM was booted with networking (claim matching).
     pub net: bool,
+    /// Ready slot: pre-restored from a snapshot with its layered fs ALREADY
+    /// attached and the guest agent running. Claiming one skips the fs
+    /// hot-plug (the slow part of a warm-pool claim); releasing it resets
+    /// the VM in place instead of detaching the fs. The ready state must
+    /// live in the LAYER (episode writes go to the ephemeral upper, which
+    /// the in-place reset clears).
+    pub ready: bool,
 }
 
 /// Outcome of `pool_create`: which VMs became ready and which failed
@@ -64,12 +71,13 @@ impl VmManager {
             self.spawn(spec).await?;
             match self.wait_agent_ready(&name).await {
                 Ok(()) => {
-                    self.pool.push(PoolSlot {
-                        name: name.clone(),
-                        claimed: false,
-                        layers: Vec::new(),
-                        net,
-                    });
+            self.pool.push(PoolSlot {
+                name: name.clone(),
+                claimed: false,
+                layers: Vec::new(),
+                net,
+                ready: false,
+            });
                     outcome.ready.push(name);
                 }
                 Err(e) => {
@@ -118,17 +126,31 @@ impl VmManager {
 
     /// Claim an idle pool VM, optionally requiring a networking match
     /// (`Some(true)` needs a net-enabled slot, `Some(false)` a plain one).
-    /// The upper is always ephemeral — no data may leak between sequential
-    /// claims of one slot.
+    /// READY slots (pre-restored, fs attached) are preferred and claim
+    /// with zero fs work — the slot's layer set must match exactly. Warm
+    /// slots fall back to hot-plugging the requested layers. The upper is
+    /// always ephemeral — no data may leak between sequential claims.
     pub async fn pool_claim_matching(
         &mut self,
         layers: Vec<String>,
         net: Option<bool>,
     ) -> Result<String, AdapterError> {
+        let ready_idx = self.pool.iter().position(|s| {
+            !s.claimed
+                && s.ready
+                && s.layers == layers
+                && net.is_none_or(|n| s.net == n)
+        });
+        if let Some(idx) = ready_idx {
+            let name = self.pool[idx].name.clone();
+            self.pool[idx].claimed = true;
+            tracing::info!(vm = %name, layers = ?layers, "ready pool slot claimed (fs already attached)");
+            return Ok(name);
+        }
         let idx = self
             .pool
             .iter()
-            .position(|s| !s.claimed && net.is_none_or(|n| s.net == n))
+            .position(|s| !s.claimed && !s.ready && net.is_none_or(|n| s.net == n))
             .ok_or_else(|| AdapterError::internal("warm pool exhausted".to_string()))?;
         let name = self.pool[idx].name.clone();
         let fs = FsSpec {
@@ -149,11 +171,90 @@ impl VmManager {
             .iter()
             .position(|s| s.name == name && s.claimed)
             .ok_or_else(|| AdapterError::not_found(format!("no claimed pool VM '{}'", name)))?;
-        self.detach_fs(name).await?;
+        let ready = self.pool[idx].ready;
+        if ready {
+            // In-place reset back to the LAYER baseline (the ready state
+            // must live in the layer; episode writes land in the ephemeral
+            // upper, which the guest reset clears). The fs stays attached,
+            // so the next claim is a direct bind.
+            let handle = self
+                .get_handle(name)
+                .ok_or_else(|| AdapterError::not_found(format!("VM '{}' not found", name)))?;
+            handle.reset_fs().await?;
+            tracing::info!(vm = %name, "ready pool slot released (in-place reset)");
+        } else {
+            self.detach_fs(name).await?;
+            tracing::info!(vm = %name, "pool VM released to idle");
+        }
         self.pool[idx].claimed = false;
-        self.pool[idx].layers.clear();
-        tracing::info!(vm = %name, "pool VM released to idle");
+        if !ready {
+            self.pool[idx].layers.clear();
+        }
         Ok(())
+    }
+
+    /// Fill the pool with READY slots: `size` VMs pre-restored from a
+    /// snapshot with their layered fs attached and the guest agent ready.
+    /// Claiming one is a direct sandbox bind (no boot, no fs hot-plug);
+    /// releasing one resets it in place. The ready state must live in the
+    /// layer (the snapshot's upper is the ephemeral baseline; episode
+    /// writes are cleared by the in-place reset).
+    pub async fn pool_create_ready(
+        &mut self,
+        size: u32,
+        snapshot: &adapter_traits::Snapshot,
+        kernel: &str,
+        layers: Vec<String>,
+        net: bool,
+        memory_mb: u64,
+    ) -> Result<PoolCreateOutcome, AdapterError> {
+        let mut outcome = PoolCreateOutcome::default();
+        for _ in 0..size {
+            let name = format!("pool-{}", self.pool_next_id);
+            self.pool_next_id += 1;
+            let vm_name = VmName::new(name.clone())
+                .map_err(AdapterError::invalid_argument)?;
+            let spec = VmSpec {
+                name: vm_name,
+                kernel: Some(kernel.to_string()),
+                cmdline: None,
+                boot_vcpus: 1,
+                max_vcpus: Some(4),
+                memory_mb,
+                max_memory_mb: Some(1024),
+                initramfs: None,
+                net,
+                fs: Some(adapter_traits::FsSpec {
+                    layers: layers.clone(),
+                    upper: adapter_traits::UpperPolicy::Ephemeral,
+                }),
+            };
+            match self.restore(snapshot, spec).await {
+                Ok(()) => match self.wait_agent_ready(&name).await {
+                    Ok(()) => {
+                        self.pool.push(PoolSlot {
+                            name: name.clone(),
+                            claimed: false,
+                            layers: layers.clone(),
+                            net,
+                            ready: true,
+                        });
+                        outcome.ready.push(name);
+                    }
+                    Err(e) => {
+                        tracing::warn!(vm = %name, error = %e, "ready pool VM agent not ready; destroying");
+                        let _ = self.destroy(&name).await;
+                        outcome.failed.push((name, e.to_string()));
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(vm = %name, error = %e, "ready pool restore failed; destroying");
+                    let _ = self.destroy(&name).await;
+                    outcome.failed.push((name, e.to_string()));
+                }
+            }
+        }
+        Ok(outcome)
     }
 
     /// Atomically destroy up to *count* idle pool VMs (claimed slots are

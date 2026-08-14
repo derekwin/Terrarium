@@ -590,6 +590,7 @@ pub async fn execute(mgr: &mut VmManager, cmd: Command) -> Response {
         "net_down" => network::cmd_net_down(mgr),
         "net_up" => network::cmd_net_up(),
         "pool_create" => pool::cmd_pool_create(mgr, cmd).await,
+        "pool_create_snapshot" => pool::cmd_pool_create_snapshot(mgr, cmd).await,
         "pool_list" => pool::cmd_pool_list(mgr),
         "pool_claim" => pool::cmd_pool_claim(mgr, cmd).await,
         "pool_release" => pool::cmd_pool_release(mgr, cmd).await,

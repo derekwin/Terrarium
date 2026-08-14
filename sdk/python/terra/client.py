@@ -347,6 +347,34 @@ class TerraClient:
             cmd["net"] = True
         return self._send(cmd)
 
+    def pool_create_snapshot(
+        self,
+        size: int,
+        snapshot_path: str,
+        *,
+        kernel: str | None = None,
+        layers: list[str] | None = None,
+        memory_mb: int = 256,
+        net: bool = False,
+    ) -> dict:
+        """Fill the pool with READY slots: VMs pre-restored from a snapshot
+        with the layered fs attached and the guest agent running. A later
+        ``sandbox_create(pool=True)`` claims one with a direct sandbox bind
+        (no boot, no fs hot-plug); release resets it in place."""
+        cmd: dict = {
+            "command": "pool_create_snapshot",
+            "pool_size": size,
+            "snapshot_path": snapshot_path,
+            "memory_mb": memory_mb,
+        }
+        if kernel:
+            cmd["kernel"] = kernel
+        if layers:
+            cmd["layers"] = list(layers)
+        if net:
+            cmd["net"] = True
+        return self._send(cmd)
+
     def pool_list(self) -> dict:
         """List warm-pool slots and their claim state."""
         return self._send({"command": "pool_list"})
