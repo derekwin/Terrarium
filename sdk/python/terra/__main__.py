@@ -1289,6 +1289,8 @@ def cmd_daemon_start(args) -> int:
         "        # daemon_stop teardown closes the socket permanently.\n"
         "        fails += 1\n"
         "        if fails >= 30:\n"
+        "            print('daemon heartbeat: 30 consecutive failures —'\n"
+        "                  ' wrapper exiting (daemon thread likely dead)', flush=True)\n"
         "            break\n" % (args.tcp,),
     ]
 

@@ -182,6 +182,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Snapshot restore remains the full-determinism path.
 
 ### Fixed
+- **daemon keep-alive wrapper now logs its exit reason** — before exiting
+  after 30 consecutive heartbeat failures it prints a diagnostic line, so
+  a future daemon death distinguishes "accept loop starved" from "daemon
+  thread crashed". No death reproduced across 4 heavy-load rounds after
+  the spawn_blocking/bridge-cache/SDK-guard fixes.
 - **net restores failed with tap "Resource busy"** — CH restore re-attaches
   devices from the snapshot's config.json, whose net device still pointed
   at the source VM's tap; `prepare_restore_dir` now rewrites the tap to the

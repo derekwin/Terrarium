@@ -125,6 +125,7 @@ gVisor 内存数字是 Sentry 进程 RSS，需注意其 syscall 拦截的用户�
 |---|---|---|---|---|
 | Terrarium（冷启动） | 14.3 s | 7.0/s（8 并发） | **67.5 MB**（CH+virtiofsd） | **1869 exec/s** |
 | Terrarium（快照恢复） | 1.9 s | **53.2/s**（64 并发，含一次性基 VM+快照） | **62.6 MB** | **2117 exec/s** |
+| Terrarium（快照恢复·预置快照） | 0.67 s | **148.2/s**（64 并发，稳态） | **62.8 MB** | **2219 exec/s** |
 | Docker | 28.8 s | 3.5/s | 0.6 MB（sleep 容器） | 173 exec/s（docker exec） |
 | gVisor | 1.6 s（到 sentry 就绪） | 65/s | **84.4 MB**（runsc+gofer+sentry） | n/a（do 无 exec 通道） |
 
@@ -142,7 +143,10 @@ gVisor 内存数字是 Sentry 进程 RSS，需注意其 syscall 拦截的用户�
 - **Terrarium 快照恢复创建 53.2/s，反超 gVisor**（同轮 40.8/s）：一份
   基 VM 快照（~1.3s 一次性成本）后，100 个环境从快照并行恢复 + 绑定
   sandbox 仅 1.9s。这是 P1 快照快速重置在"创建"语义上的直接兑现；
-  手动拆解 restore+bind 在 64 路下实测 ~101 VMs/s。
+  手动拆解 restore+bind 在 64/128 路下实测 176/183 VMs/s（暖页缓存）。
+- **预置快照（生产形态）稳态 148 VMs/s**（`--snapshot-path` 复用一份
+  快照，跳过一次性基 VM 引导）：100 环境 0.67s，gVisor 的 3.3 倍。
+  快照是固定资产（常驻页缓存），因此这是部署后实际看到的创建速率。
 
 **密度扫描暴露并修复的真实缺陷**：`tap_name` 把 VM 名截断到 9 字符，
 同前缀租户（如 `tenant-dens-0..7`）全部落到同一个 tap 设备名上，第二个
@@ -170,6 +174,13 @@ keep-alive wrapper 在瞬时心跳失败时自杀的问题（连续 8 次失败�
   包进 `spawn_blocking`。另修复 SDK 在 daemon 忙时静默起内嵌 daemon
   抢占 socket 的问题（socket 存在但不响应时明确报错，不再自动接管），
   并把 keep-alive wrapper 的心跳容错从 8 次放宽到 30 次。
+
+**daemon 偶发死亡的排查结论**：历史上观察到一次负载后 daemon 无响应
+（accept 循环饿死 → wrapper 退出），后续 4 轮重负载（100 实例快照扫描
++ 空载 90s + 完整 e2e×2 + 128 路并发）均未复现，daemon 全程存活。根因
+指向异步运行时上同步子进程调用（已用桥缓存 + spawn_blocking 缓解）；
+wrapper 退出前现在会写诊断日志（30 次连续心跳失败），下次发生可立即
+定位是"饿死退出"还是"daemon 线程崩溃"。
 
 ## 6. 已知功能取舍（产品决策项）
 

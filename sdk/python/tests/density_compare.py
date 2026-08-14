@@ -19,7 +19,9 @@ Creation modes (``--create-mode``):
   workers overlap them — the sandbox_create lock-free path).
 * ``snapshot`` — one base VM is booted + snapshotted once, then N VMs are
   restored from that snapshot (P1 fast-reset) and bound as sandboxes;
-  restore is the RL/density fast-create path.
+  restore is the RL/density fast-create path. Pass ``--snapshot-path`` to
+  reuse a pre-baked snapshot and skip the one-time base boot (measures the
+  steady-state restore+bind rate a warm deployment sees).
 
 Baselines missing on the host are skipped. The sweep cleans up every
 instance it created, on every exit path.
@@ -138,7 +140,7 @@ class DensityBaseline:
 class TerraDensity(DensityBaseline):
     name = "terra"
 
-    def __init__(self, mode: str = "cold") -> None:
+    def __init__(self, mode: str = "cold", snapshot_path: str | None = None) -> None:
         sys.path.insert(0, str(REPO / "sdk" / "python"))
         from terra.client import TerraClient
         from terra import images
@@ -149,7 +151,7 @@ class TerraDensity(DensityBaseline):
         self.images = images
         self.prefix = f"dens-{uuid4().hex[:6]}"
         self.mode = mode
-        self._snapshot_path: str | None = None
+        self._snapshot_path: str | None = snapshot_path
         self._base_vm: str | None = None
 
     def create(self, n: int, parallel: int) -> list[str]:
@@ -447,12 +449,15 @@ def main() -> int:
     ap.add_argument("--instances", type=int, default=100)
     ap.add_argument("--parallel", type=int, default=8)
     ap.add_argument("--create-mode", choices=["cold", "snapshot"], default="cold")
+    ap.add_argument("--snapshot-path", default=None,
+                    help="pre-baked snapshot dir to restore from (snapshot mode; "
+                         "skips the one-time base VM boot + capture)")
     ap.add_argument("--baselines", default="terra,docker,gvisor")
     ap.add_argument("--out", default="/tmp/density-compare.json")
     args = ap.parse_args()
 
     classes: dict[str, type[DensityBaseline]] = {
-        "terra": lambda: TerraDensity(mode=args.create_mode),
+        "terra": lambda: TerraDensity(mode=args.create_mode, snapshot_path=args.snapshot_path),
         "docker": DockerDensity,
         "gvisor": GvisorDensity,
     }
