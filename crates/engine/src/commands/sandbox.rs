@@ -10,7 +10,8 @@ use super::{apply_system_base, build_spec, run_exec, DEFAULT_SYSTEM};
 use crate::manager::{SandboxRecord, VmManager};
 use crate::policy::default_sandbox_policy;
 use adapter_traits::{
-    ExecOpts, ResourceLimits, SandboxAdapter, SandboxPolicy, SandboxSpec, VmHandle, VmName, VmSpec,
+    ExecOpts, ResourceLimits, SandboxAdapter, SandboxHandle, SandboxPolicy, SandboxSpec, VmHandle,
+    VmName, VmSpec,
 };
 use terrarium_protocol::{Command, Response};
 
@@ -526,13 +527,30 @@ pub(crate) async fn cmd_sandbox_kill(mgr: &mut VmManager, cmd: Command) -> Respo
 /// for a pool-backed tenant VM — releases the VM back to the pool (fs
 /// detached, slot idle again), else destroys the VM (same semantics as
 /// `destroy`). All of the tenant's sandbox records are dropped either way.
-pub(crate) async fn cmd_tenant_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
-    let tenant = match cmd.tenant {
-        Some(t) => t,
-        None => return Response::err("Missing 'tenant' field"),
-    };
+/// Everything `tenant_destroy` needs resolved under the manager lock; the
+/// caller runs the vsock/CH work outside it and finalizes on re-lock.
+pub(crate) struct TenantDestroyPlan {
+    pub tenant: String,
+    pub vm_name: String,
+    pub pool_backed: bool,
+    pub pool_ready: bool,
+    pub session_ids: Vec<String>,
+    pub sandbox_handles: Vec<Arc<dyn SandboxHandle>>,
+    pub vm_handle: Arc<dyn VmHandle>,
+    pub removed: usize,
+}
+
+/// Resolve the tenant teardown plan (cheap registry work only).
+pub(crate) fn prepare_tenant_destroy(
+    mgr: &mut VmManager,
+    cmd: &Command,
+) -> Result<TenantDestroyPlan, Response> {
+    let tenant = cmd
+        .tenant
+        .clone()
+        .ok_or_else(|| Response::err("Missing 'tenant' field"))?;
     if let Err(e) = VmName::new(tenant.clone()) {
-        return Response::err(format!("invalid tenant: {}", e));
+        return Err(Response::err(format!("invalid tenant: {}", e)));
     }
 
     // Resolve the tenant VM from the registry (pooled VMs are pool-N);
@@ -543,54 +561,103 @@ pub(crate) async fn cmd_tenant_destroy(mgr: &mut VmManager, cmd: Command) -> Res
         None => (format!("tenant-{}", tenant), false),
     };
     if mgr.get(&vm_name).is_none() {
-        return Response::err(format!("VM '{}' not found", vm_name));
+        return Err(Response::err(format!("VM '{}' not found", vm_name)));
     }
 
-    // Kill live sessions of this tenant's sandboxes (best effort: the VM
-    // teardown below is the real cleanup, so log and continue).
-    let sb_ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
-    let live: Vec<_> = mgr
+    let sb_ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
+    let session_ids: Vec<String> = mgr
         .session_list()
         .into_iter()
         .filter(|s| {
-            s.status == "running" && s.sandbox.as_deref().is_some_and(|id| sb_ids.contains(&id))
+            s.status == "running"
+                && s.sandbox
+                    .as_deref()
+                    .is_some_and(|id| sb_ids.iter().any(|x| x == id))
         })
+        .map(|s| s.session_id)
         .collect();
-    for s in &live {
-        if let Err(e) = mgr.session_kill(&s.session_id).await {
-            tracing::warn!(session = %s.session_id, error = %e, "session kill failed during tenant_destroy");
-        }
-    }
-
-    // C3: best-effort teardown through each bound session handle (the VM
-    // teardown/release below is the real cleanup).
-    for rec in &records {
-        if let Some(handle) = &rec.handle {
-            if let Err(e) = handle.destroy().await {
-                tracing::warn!(sandbox = %rec.id, error = %e, "handle.destroy failed during tenant_destroy");
-            }
-        }
-    }
-
-    // Captured up front: a cold `destroy` already cascades the records
-    // (vm_name match), so counting afterwards would read 0.
+    let sandbox_handles: Vec<Arc<dyn SandboxHandle>> =
+        records.iter().filter_map(|r| r.handle.clone()).collect();
+    let vm_handle = mgr
+        .get_handle(&vm_name)
+        .ok_or_else(|| Response::err(format!("VM '{}' not found", vm_name)))?;
+    let pool_ready = pool_backed && mgr.pool_slot_ready(&vm_name);
     let removed = records.len();
-    let released_to_pool = if pool_backed {
-        match mgr.pool_release(&vm_name).await {
-            Ok(()) => true,
-            Err(e) => return Response::err(e.to_string()),
+
+    // Cold (non-pool) VMs: unregister under the lock; the handle's
+    // shutdown runs lock-free (same as the daemon's destroy path).
+    if !pool_backed {
+        mgr.unregister(&vm_name);
+    }
+    Ok(TenantDestroyPlan {
+        tenant,
+        vm_name,
+        pool_backed,
+        pool_ready,
+        session_ids,
+        sandbox_handles,
+        vm_handle,
+        removed,
+    })
+}
+
+/// Run the slow teardown WITHOUT the manager lock: guest session kills,
+/// sandbox session destroys, then the VM reset/detach/shutdown. Returns
+/// `true` when the VM was released to the pool.
+pub(crate) async fn finish_tenant_destroy(
+    plan: &TenantDestroyPlan,
+) -> Result<bool, String> {
+    // Kill live sessions of this tenant's sandboxes (best effort: the VM
+    // teardown below is the real cleanup, so log and continue).
+    for sid in &plan.session_ids {
+        if let Err(e) = plan.vm_handle.kill_exec(sid).await {
+            tracing::warn!(session = %sid, error = %e, "session kill failed during tenant_destroy");
         }
+    }
+    // C3: best-effort teardown through each bound session handle.
+    for h in &plan.sandbox_handles {
+        if let Err(e) = h.destroy().await {
+            tracing::warn!(error = %e, "sandbox handle.destroy failed during tenant_destroy");
+        }
+    }
+    if plan.pool_backed {
+        if plan.pool_ready {
+            // In-place reset back to the LAYER baseline (ready state lives
+            // in the layer; episode writes land in the ephemeral upper).
+            plan.vm_handle.reset_fs().await.map_err(|e| e.to_string())?;
+        } else {
+            plan.vm_handle.detach_fs().await.map_err(|e| e.to_string())?;
+        }
+        Ok(true)
     } else {
-        match mgr.destroy(&vm_name).await {
-            Ok(()) => false,
-            Err(e) => return Response::err(e.to_string()),
-        }
+        plan.vm_handle.shutdown().await.map_err(|e| e.to_string())?;
+        Ok(false)
+    }
+}
+
+/// Shared finalize: session statuses, pool slot bookkeeping, tenant records.
+pub(crate) fn finalize_tenant_destroy(mgr: &mut VmManager, plan: &TenantDestroyPlan) {
+    mgr.sessions_mark_killed(&plan.session_ids);
+    if plan.pool_backed {
+        mgr.pool_mark_released(&plan.vm_name, plan.pool_ready);
+    }
+    mgr.sandbox_remove_tenant(&plan.tenant);
+}
+
+pub(crate) async fn cmd_tenant_destroy(mgr: &mut VmManager, cmd: Command) -> Response {
+    let plan = match prepare_tenant_destroy(mgr, &cmd) {
+        Ok(p) => p,
+        Err(resp) => return resp,
     };
-    mgr.sandbox_remove_tenant(&tenant);
+    let released_to_pool = match finish_tenant_destroy(&plan).await {
+        Ok(r) => r,
+        Err(e) => return Response::err(e),
+    };
+    finalize_tenant_destroy(mgr, &plan);
     Response::ok(serde_json::json!({
-        "tenant": tenant,
-        "vm": vm_name,
-        "sandboxes_removed": removed,
+        "tenant": plan.tenant,
+        "vm": plan.vm_name,
+        "sandboxes_removed": plan.removed,
         "released_to_pool": released_to_pool,
         "status": if released_to_pool { "released" } else { "destroyed" },
     }))

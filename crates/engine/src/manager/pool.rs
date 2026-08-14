@@ -118,6 +118,27 @@ impl VmManager {
         self.pool.clone()
     }
 
+    /// Whether a pool slot is a READY (snapshot pre-restored) slot.
+    pub fn pool_slot_ready(&self, name: &str) -> bool {
+        self.pool
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.ready)
+            .unwrap_or(false)
+    }
+
+    /// Post-teardown release bookkeeping (the slow reset/detach already ran
+    /// outside the manager lock): mark the slot idle; clear the layer set
+    /// for warm slots only (ready slots keep theirs for exact matching).
+    pub fn pool_mark_released(&mut self, name: &str, ready: bool) {
+        if let Some(slot) = self.pool.iter_mut().find(|s| s.name == name) {
+            slot.claimed = false;
+            if !ready {
+                slot.layers.clear();
+            }
+        }
+    }
+
     /// Claim an idle pool VM and hot-plug the given layers.
     /// Returns the claimed VM name.
     pub async fn pool_claim(&mut self, layers: Vec<String>) -> Result<String, AdapterError> {

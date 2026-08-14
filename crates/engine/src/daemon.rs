@@ -19,7 +19,10 @@ use crate::commands::{
     execute, prepare_blocking_exec, prepare_lifecycle, prepared_exec_audited, require_name,
     Command, PreparedBlockingExec, PreparedLifecycle,
 };
-use crate::commands::sandbox::{bind_sandbox, finish_sandbox_create, prepare_sandbox_create, TenantVm};
+use crate::commands::sandbox::{
+    bind_sandbox, finalize_tenant_destroy, finish_sandbox_create, finish_tenant_destroy,
+    prepare_sandbox_create, prepare_tenant_destroy, TenantVm,
+};
 use crate::manager::VmManager;
 use adapter_traits::{VmHandle, VmSpec};
 use terrarium_protocol::Response;
@@ -363,6 +366,37 @@ async fn dispatch(
                 )
             }
             Err(e) => return (Response::err(e.to_string()), false),
+        }
+    }
+
+    // tenant_destroy is the pool-return path: session kills + sandbox
+    // destroys + reset/detach/shutdown are vsock/CH round trips that must
+    // NOT serialize on the manager lock (the high-churn claim/release
+    // loop). Resolve the plan under the lock, run the teardown outside,
+    // finalize bookkeeping on re-lock.
+    if cmd.command == "tenant_destroy" {
+        // `mgr` is the guard acquired at the top of dispatch (the Mutex is
+        // not reentrant) — reuse it, drop it around the slow teardown,
+        // then re-acquire for the finalize.
+        match prepare_tenant_destroy(&mut mgr, &cmd) {
+            Ok(plan) => {
+                drop(mgr);
+                let released = match finish_tenant_destroy(&plan).await {
+                    Ok(r) => r,
+                    Err(e) => return (Response::err(e), false),
+                };
+                let mut mgr = manager.lock().await;
+                finalize_tenant_destroy(&mut mgr, &plan);
+                let resp = Response::ok(serde_json::json!({
+                    "tenant": plan.tenant,
+                    "vm": plan.vm_name,
+                    "sandboxes_removed": plan.removed,
+                    "released_to_pool": released,
+                    "status": if released { "released" } else { "destroyed" },
+                }));
+                return (resp, false);
+            }
+            Err(resp) => return (resp, false),
         }
     }
 

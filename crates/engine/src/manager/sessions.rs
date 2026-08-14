@@ -161,6 +161,16 @@ impl VmManager {
         self.sessions.lock().unwrap().values().cloned().collect()
     }
 
+    /// Mark background sessions killed (post lock-free kill_exec).
+    pub fn sessions_mark_killed(&self, ids: &[String]) {
+        let mut sessions = self.sessions.lock().unwrap();
+        for id in ids {
+            if let Some(info) = sessions.get_mut(id) {
+                info.status = "killed".to_string();
+            }
+        }
+    }
+
     /// Mark every running session on `vm_name` terminated. Called by
     /// `VmManager::unregister`: the VM is gone, so those sessions can
     /// never complete — the completion task never overwrites a

@@ -190,6 +190,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Snapshot restore remains the full-determinism path.
 
 ### Fixed
+- **tenant_destroy held the manager lock across the whole teardown** —
+  session kills, sandbox destroys and the pool reset/detach/shutdown are
+  vsock/CH round trips that serialized on `Mutex<VmManager>`, capping the
+  claim/release churn at ~68 episodes/s (16 slots). The daemon now
+  resolves a teardown plan under the lock, runs the slow work outside it
+  and finalizes bookkeeping on re-lock (same pattern as the earlier
+  sandbox_create lock fix). Measured: 462 episodes/s at 16 slots (~7x),
+  pool count stays stable across claim/release cycles.
 - **VM launch/restore latency + throughput** — two hot-path fixes:
   (1) the virtiofsd and CH API socket waits polled every 100ms, adding
   ~200ms of pure polling latency to every launch (single restore 225ms →

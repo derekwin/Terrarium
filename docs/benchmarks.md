@@ -244,6 +244,11 @@ RL 场景注意：episode 循环**不走池**——单租户反复跑任务用 i
 （`reset_vm`，32 环境 ~34ms/episode，见上文），热池服务于动态租户创建
 （agent 生产/CI 的并发租户）。
 
-已知后续项：`tenant_destroy` 的释放（含 reset）仍持 manager 锁，高并发
-claim/release 循环（~68 episodes/s @16 槽）受其限制；与 sandbox_create
-锁修复同模式，待做。
+`tenant_destroy` 的释放已锁外化（与 sandbox_create 同模式）：会话 kill、
+sandbox 销毁、reset/detach/shutdown 全在 manager 锁外执行，重入锁只做
+簿记。高并发 claim/release 循环实测（2026-08-14）：
+
+| 配置 | episodes/s |
+|---|---|
+| 修复前（释放持锁） | ~68/s @16 槽 |
+| 修复后 | **462/s @16 槽**（301/s @8 槽） |
