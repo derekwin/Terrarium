@@ -21,3 +21,5 @@ sdk/python/*.so
 
 # Built adversarial escape probe (rebuilt by build-probes.sh)
 sdk/python/tests/adversarial/probes/escape_probe
+# Built workload probe (rebuilt by build-workload.sh)
+sdk/python/tests/adversarial/probes/workload_probe

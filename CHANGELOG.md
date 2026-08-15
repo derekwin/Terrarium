@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Workload overhead harness + evidence** — `workload_overhead.py` runs
+  the same static C workload probe (fileio/subproc/cpu/mixed) on bare /
+  Terrarium VM (unsandboxed) / Terrarium VM + confine / docker(exec) /
+  gVisor. Findings: governance overhead ≈ 0 (±10% noise); VM boundary
+  ~1.5-2× on pure CPU, neutral-to-faster on IO/process workloads (guest
+  tmpfs); exec-path overhead Terrarium (~5ms) ≪ docker-exec (~80-100ms) ≪
+  gVisor one-shot. Results in docs/workload-overhead-2026-08-15.json +
+  docs/workload-overhead.md.
 - **RL protocol via MCP (P1 #3)** — five new tools: `terra_pool_create_snapshot`
   (ready-pool fill), `terra_batch_create` / `terra_batch_exec` /
   `terra_batch_recycle` (one-command N-env create / task injection +

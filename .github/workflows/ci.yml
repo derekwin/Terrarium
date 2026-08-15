@@ -52,13 +52,16 @@ jobs:
       - run: pip install -e sdk/python/
       - run: python -c "import terra; print('SDK OK')"
       - name: Build adversarial escape probe
-        run: bash sdk/python/tests/adversarial/probes/build-probes.sh
+        run: |
+          bash sdk/python/tests/adversarial/probes/build-probes.sh
+          bash sdk/python/tests/adversarial/probes/build-workload.sh
       - name: Harness import/compile checks (KVM suites run on e2e-kvm)
         run: |
           python -m py_compile \
             sdk/python/tests/test_adversarial_isolation.py \
             sdk/python/tests/compare_baselines.py \
-            sdk/python/tests/density_compare.py
+            sdk/python/tests/density_compare.py \
+            sdk/python/tests/workload_overhead.py
       - name: Run non-e2e Python tests
         run: |
           pip install pytest
