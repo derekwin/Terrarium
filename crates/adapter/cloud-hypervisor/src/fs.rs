@@ -4,6 +4,9 @@
 
 use adapter_traits::{AdapterError, FsSpec, UpperPolicy};
 use std::collections::HashSet;
+use std::ffi::CString;
+use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -11,6 +14,8 @@ use std::time::Duration;
 use terrarium_fs::layer::{resolve_layer, validate_layer_name};
 use terrarium_fs::LayerConfig;
 use tokio::time::{sleep, Instant};
+
+use crate::config::VmUser;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,6 +33,11 @@ pub struct FsConfig {
     /// EROFS layer images already mounted (shared across VMs; layers are
     /// immutable, mounts live for the daemon's lifetime).
     pub mounted_layers: Arc<Mutex<HashSet<String>>>,
+    /// Plain layer dirs already chowned to the vmm user (lazy, once per
+    /// daemon lifetime — chown -R on a large layer is not per-VM work).
+    pub chowned_layers: Arc<Mutex<HashSet<String>>>,
+    /// Privilege-drop target for virtiofsd (None = legacy root mode).
+    pub vmm: Option<VmUser>,
 }
 
 /// A composed layered rootfs: overlayfs mount + virtiofsd. As non-root
@@ -47,6 +57,31 @@ pub struct FsStack {
     pub persistent: bool,
     /// True when composed inside a private namespace (non-root path).
     pub in_namespace: bool,
+}
+
+/// Recursively chown a path (symlinks via lchown). Used to hand managed
+/// layer/upper/work trees to the vmm user so a non-root virtiofsd can
+/// serve them. Read-only EROFS mounts are skipped by callers.
+pub(crate) fn chown_r(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    let cpath = CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))?;
+    // SAFETY: cpath is a valid NUL-terminated path; lchown/chown have no
+    // other preconditions beyond a valid path.
+    let rc = if meta.file_type().is_symlink() {
+        unsafe { libc::lchown(cpath.as_ptr(), uid, gid) }
+    } else {
+        unsafe { libc::chown(cpath.as_ptr(), uid, gid) }
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            chown_r(&entry?.path(), uid, gid)?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +130,38 @@ pub async fn compose_fs(
         std::fs::create_dir_all(d).map_err(|e| format!("mkdir {}: {}", d, e))?;
     }
 
+    // Privilege-drop mode: hand the per-VM overlay dirs to the vmm user so
+    // virtiofsd (running as that user) can serve the tree. Layer dirs are
+    // chowned lazily once per daemon lifetime (large; not per-VM work);
+    // read-only EROFS mounts are left alone (contents are packed
+    // world-readable or force-owned by the vmm user at pack time).
+    if let Some(vmm) = &config.vmm {
+        for d in [&upper, &work, &merged] {
+            chown_r(Path::new(d), vmm.uid, vmm.gid)
+                .map_err(|e| format!("chown {} to {}: {}", d, vmm.name, e))?;
+        }
+        for lower in &lowers {
+            if terrarium_fs::is_mounted(lower) {
+                continue;
+            }
+            let already = config
+                .chowned_layers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(lower);
+            if already {
+                continue;
+            }
+            chown_r(Path::new(lower), vmm.uid, vmm.gid)
+                .map_err(|e| format!("chown layer {lower} to {}: {}", vmm.name, e))?;
+            config
+                .chowned_layers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(lower.clone());
+        }
+    }
+
     let socket = format!("/tmp/terra-{}-fs.sock", name);
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(format!("{}.pid", socket));
@@ -140,13 +207,41 @@ pub async fn compose_fs(
             )
             .into());
         }
-        Command::new(&config.virtiofsd_binary)
-            .args([
-                &format!("--socket-path={}", socket),
-                &format!("--shared-dir={}", merged),
-                "--sandbox=none",
-                &format!("--cache={}", config.virtiofsd_cache),
-            ])
+        let mut virtiofsd = Command::new(&config.virtiofsd_binary);
+        virtiofsd.args([
+            &format!("--socket-path={}", socket),
+            &format!("--shared-dir={}", merged),
+            "--sandbox=none",
+            &format!("--cache={}", config.virtiofsd_cache),
+        ]);
+        // Non-root virtiofsd: translate the vmm user's ownership back to
+        // guest root so the exported rootfs keeps normal root-owned
+        // semantics (the vmm user is the sole owner of the export tree).
+        if let Some(vmm) = &config.vmm {
+            virtiofsd.args([
+                &format!("--translate-uid=host:{}:0:1", vmm.uid),
+                &format!("--translate-gid=host:{}:0:1", vmm.gid),
+            ]);
+            // SAFETY: pre_exec runs in the child after fork; setgroups/
+            // setgid/setuid are async-signal-safe. Capture ids by value.
+            let (uid, gid) = (vmm.uid, vmm.gid);
+            unsafe {
+                virtiofsd.pre_exec(move || {
+                    // SAFETY: standard libc calls; no locks touched.
+                    if libc::setgroups(0, std::ptr::null()) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if libc::setgid(gid) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if libc::setuid(uid) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        virtiofsd
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

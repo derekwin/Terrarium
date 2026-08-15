@@ -1,5 +1,6 @@
 //! Host-level NAT networking for VMs: tap devices, bridge, DHCP, masquerade.
 
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::process::Command;
 
 // ---------------------------------------------------------------------------
@@ -182,7 +183,10 @@ pub fn ensure_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<(), 
     // Tenant L2 isolation (drop frames between VM tap ports).
     ensure_vm_isolation()?;
 
-    BRIDGE_STATE.lock().unwrap().insert(bridge.to_string(), true);
+    BRIDGE_STATE
+        .lock()
+        .unwrap()
+        .insert(bridge.to_string(), true);
     tracing::info!(%bridge, %gateway, "NAT bridge ready");
     Ok(())
 }
@@ -327,8 +331,9 @@ pub fn teardown_nat_bridge(bridge: &str, gateway: &str, prefix: u8) -> Result<()
 }
 
 /// Daemon-lifetime NAT bridge readiness cache (see `ensure_nat_bridge`).
-static BRIDGE_STATE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static BRIDGE_STATE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, bool>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Remove a tap device (best-effort on missing).
 pub fn remove_tap(tap: &str) -> Result<(), String> {
@@ -350,21 +355,51 @@ pub fn remove_tap(tap: &str) -> Result<(), String> {
 // pre-creates + pre-attaches taps once; a launch claims a name (zero kernel
 // ops) and release returns it for reuse.
 
+/// Open an existing tap device by name and return a file descriptor.
+///
+/// The daemon holds the fd only to hand it to Cloud Hypervisor (which
+/// dup's it and attaches the device as the virtio-net backend). This is
+/// what lets CH run as a non-root user: the tap is created and enslaved
+/// by the root daemon, and CH never needs CAP_NET_ADMIN or `/dev/net/tun`.
+pub fn tap_open_fd(name: &str) -> Result<OwnedFd, String> {
+    const TUNSETIFF: libc::c_ulong = 0x4004_54CA; // _IOW('T', 202, int)
+    const IFF_TAP: libc::c_short = 0x0002;
+    const IFF_NO_PI: libc::c_short = 0x1000;
+
+    let fd = unsafe { libc::open(c"/dev/net/tun".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(format!(
+            "open /dev/net/tun: {} (need CAP_NET_ADMIN — run the daemon as root)",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if name.len() >= 16 {
+        unsafe { libc::close(fd) };
+        return Err(format!("tap name too long: {name}"));
+    }
+    // struct ifreq: 16-byte ifr_name + 2-byte ifr_flags (+ padding).
+    let mut ifr = [0u8; 40];
+    ifr[..name.len()].copy_from_slice(name.as_bytes());
+    ifr[16..18].copy_from_slice(&(IFF_TAP | IFF_NO_PI).to_ne_bytes());
+    let rc = unsafe { libc::ioctl(fd, TUNSETIFF, ifr.as_mut_ptr() as *mut libc::c_void) };
+    if rc < 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(format!("TUNSETIFF {name}: {e}"));
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 /// Initial pool size. Each tap is a lightweight device on the bridge; 256
 /// covers the host's practical launch concurrency.
 const TAP_POOL_INIT: usize = 256;
 /// Batch grown when the pool drains under a burst larger than the init size.
 const TAP_POOL_GROW: usize = 32;
 
-static TAP_POOL: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::VecDeque<String>>,
-> = std::sync::LazyLock::new(|| {
-    std::sync::Mutex::new(std::collections::VecDeque::new())
-});
-static TAP_POOL_FILLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static NEXT_POOL_TAP: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static TAP_POOL: std::sync::LazyLock<std::sync::Mutex<std::collections::VecDeque<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+static TAP_POOL_FILLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static NEXT_POOL_TAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Fill the pool once (idempotent). Runs on a blocking thread from
 /// `tap_pool_claim`'s caller; the one-time RTNL cost (~10ms × 256) is paid
@@ -387,13 +422,19 @@ fn fill_tap_pool() -> Result<(), String> {
     Ok(())
 }
 
-/// Claim a ready tap (already created + attached to the bridge). Grows a
-/// small batch when the pool drains. Zero kernel ops in the common case.
-pub fn tap_pool_claim() -> Result<String, String> {
+/// Claim a ready tap (already created + attached to the bridge), opening
+/// an fd for Cloud Hypervisor to attach. Grows a small batch when the pool
+/// drains. Zero kernel ops in the common case (the fd open is a single
+/// ioctl on an existing device).
+pub fn tap_pool_claim() -> Result<(String, OwnedFd), String> {
     fill_tap_pool()?;
     let mut pool = TAP_POOL.lock().unwrap();
     if let Some(tap) = pool.pop_front() {
-        return Ok(tap);
+        return tap_open_fd(&tap)
+            .map(|fd| (tap.clone(), fd))
+            .inspect_err(|_e| {
+                pool.push_back(tap);
+            });
     }
     for _ in 0..TAP_POOL_GROW {
         let i = NEXT_POOL_TAP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -401,8 +442,14 @@ pub fn tap_pool_claim() -> Result<String, String> {
         ensure_tap(&tap, DEFAULT_BRIDGE)?;
         pool.push_back(tap);
     }
-    pool.pop_front()
-        .ok_or_else(|| "tap pool exhausted".to_string())
+    let tap = pool
+        .pop_front()
+        .ok_or_else(|| "tap pool exhausted".to_string())?;
+    tap_open_fd(&tap)
+        .map(|fd| (tap.clone(), fd))
+        .inspect_err(|_e| {
+            pool.push_back(tap);
+        })
 }
 
 /// Return a claimed tap to the pool (it stays created + attached).

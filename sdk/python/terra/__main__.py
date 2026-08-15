@@ -560,7 +560,14 @@ def cmd_setup(args) -> int:
     if rc != EXIT_OK:
         return rc
 
-    # 7. template (same code path as `template create`)
+    # 7. dedicated vmm user — CH/virtiofsd drop privileges when the
+    # daemon runs as root (L1 降权). Needs sudo; best-effort otherwise.
+    stage("vmm user (CH/virtiofsd privilege drop)")
+    rc = _ensure_vmm_user()
+    if rc != EXIT_OK:
+        return rc
+
+    # 8. template (same code path as `template create`)
     stage(f"template ({distro})")
     t = Template(name=distro, base=distro, layers=[system_layer], kernel="default")
     path = t.save()
@@ -645,6 +652,44 @@ def _sha256_file(p: Path) -> str:
     import hashlib
 
     return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _ensure_vmm_user() -> int:
+    """Create the dedicated unprivileged VMM user and hand managed dirs to it.
+
+    Privilege-drop mode (L1): with the daemon running as root, Cloud
+    Hypervisor and virtiofsd run as this user instead of root. Needs
+    sudo (or root). Best-effort: when sudo is unavailable, warn and
+    continue — the daemon falls back to legacy root mode.
+    """
+    user = "terra-vmm"
+
+    def run(cmd: list[str]) -> bool:
+        if os.geteuid() == 0:
+            r = subprocess.run(cmd, capture_output=True)
+        else:
+            sudo = shutil.which("sudo")
+            if sudo is None:
+                return False
+            r = subprocess.run([sudo, *cmd], capture_output=True)
+        return r.returncode == 0
+
+    exists = (
+        subprocess.run(["getent", "passwd", user], capture_output=True).returncode == 0
+    )
+    if not exists and not run(
+        ["useradd", "--system", "--no-create-home", "--shell", "/usr/sbin/nologin", user]
+    ):
+        print("  (skip vmm user — no sudo; daemon keeps legacy root mode)")
+        return EXIT_OK
+    if subprocess.run(["getent", "group", "kvm"], capture_output=True).returncode == 0:
+        run(["usermod", "-aG", "kvm", user])
+    # Managed roots the vmm user must reach (read the export tree, write
+    # per-VM upperdirs and snapshot files).
+    for root in (paths.images_dir(), paths.layers_dir(), paths.state_dir()):
+        run(["chown", "-R", f"{user}:{user}", str(root)])
+    print("  vmm user ready: terra-vmm (CH/virtiofsd run unprivileged)")
+    return EXIT_OK
 
 
 def _install_sandlock(system_layer: str, *, force: bool = False) -> int:

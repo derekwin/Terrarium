@@ -5,4 +5,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+libc = "0.2"
 tracing = { workspace = true }

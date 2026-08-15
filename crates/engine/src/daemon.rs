@@ -15,21 +15,22 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::{Mutex, MutexGuard};
 
+use crate::commands::sandbox::{
+    bind_sandbox, finalize_tenant_destroy, finish_sandbox_create, finish_tenant_destroy,
+    prepare_sandbox_create, prepare_tenant_destroy, TenantVm,
+};
 use crate::commands::{
     batch::{
         batch_create_response, batch_recycle_rows, bind_batch_envs, prepare_batch_create,
         prepare_batch_exec, prepare_batch_recycle, run_batch_execs, run_batch_recycle,
         spawn_batch_vms, BatchRecycleItem,
     },
-    execute, pool::{
+    execute,
+    pool::{
         finish_pool_create_snapshot, pool_create_snapshot_response, prepare_pool_create_snapshot,
     },
     prepare_blocking_exec, prepare_lifecycle, prepared_exec_audited, require_name, Command,
     PreparedBlockingExec, PreparedLifecycle,
-};
-use crate::commands::sandbox::{
-    bind_sandbox, finalize_tenant_destroy, finish_sandbox_create, finish_tenant_destroy,
-    prepare_sandbox_create, prepare_tenant_destroy, TenantVm,
 };
 use crate::manager::VmManager;
 use adapter_traits::{VmHandle, VmSpec};
@@ -79,7 +80,15 @@ pub async fn run(
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!(socket = %socket_path, "Daemon listening");
 
-    let manager = Arc::new(Mutex::new(VmManager::new(adapter, "/tmp".to_string())));
+    // Must match the adapter's TERRA_SNAPSHOT_DIR: the snapshot dir is
+    // both the engine-side default destination AND the CH Landlock
+    // whitelist root. A mismatch silently sends CH to a path outside its
+    // whitelist (Landlock EPERM on every snapshot).
+    let snapshot_dir = std::env::var("TERRA_SNAPSHOT_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/tmp".to_string());
+    let manager = Arc::new(Mutex::new(VmManager::new(adapter, snapshot_dir)));
     let token: Option<String> = std::env::var("TERRA_TOKEN").ok().filter(|s| !s.is_empty());
 
     // Shutdown signal: SIGTERM/SIGINT flip the watch channel; the main
@@ -254,9 +263,7 @@ async fn dispatch(
         "batch_create" => handle_batch_create(&mut lock, &cmd).await,
         "batch_exec" => handle_batch_exec(&mut lock, &cmd).await,
         "batch_recycle" => handle_batch_recycle(&mut lock, &cmd).await,
-        "exec" | "sandbox_exec"
-            if cmd.exec_mode.as_deref().unwrap_or("blocking") == "blocking" =>
-        {
+        "exec" | "sandbox_exec" if cmd.exec_mode.as_deref().unwrap_or("blocking") == "blocking" => {
             handle_blocking_exec(&mut lock, &cmd).await
         }
         _ => {
@@ -276,7 +283,9 @@ async fn handle_create_restore(lock: &mut LockGuard<'_>, cmd: &Command) -> (Resp
             drop(mgr);
             let handle = match &prepared {
                 PreparedLifecycle::Create(spec) => adapter.create(spec).await,
-                PreparedLifecycle::Restore { snapshot, spec } => adapter.restore(snapshot, spec).await,
+                PreparedLifecycle::Restore { snapshot, spec } => {
+                    adapter.restore(snapshot, spec).await
+                }
             };
             let handle = match handle {
                 Ok(h) => h,
@@ -336,7 +345,9 @@ async fn handle_sandbox_create(lock: &mut LockGuard<'_>, cmd: &Command) -> (Resp
             let handle = match &prepared.vm {
                 TenantVm::Existing { handle, .. } => handle.clone(),
                 TenantVm::ColdSpec { vm_name, spec } => {
-                    let (_, h) = spawned.take().expect("a ColdSpec must have been spawned above");
+                    let (_, h) = spawned
+                        .take()
+                        .expect("a ColdSpec must have been spawned above");
                     if let Err(e) = mgr.register_vm(spec, h) {
                         return (Response::err(e.to_string()), false);
                     }
@@ -376,9 +387,8 @@ async fn handle_teardown(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, 
     let handle = match mgr.unregister(&name) {
         Some(h) => h,
         None => {
-            let err =
-                adapter_traits::AdapterError::not_found(format!("VM '{}' not found", name))
-                    .to_string();
+            let err = adapter_traits::AdapterError::not_found(format!("VM '{}' not found", name))
+                .to_string();
             return (Response::err(err), false);
         }
     };
@@ -419,15 +429,17 @@ async fn handle_reset_vm(lock: &mut LockGuard<'_>, cmd: &Command) -> (Response, 
     let handle = match mgr.get_handle(&name) {
         Some(h) => h,
         None => {
-            let err =
-                adapter_traits::AdapterError::not_found(format!("VM '{}' not found", name))
-                    .to_string();
+            let err = adapter_traits::AdapterError::not_found(format!("VM '{}' not found", name))
+                .to_string();
             return (Response::err(err), false);
         }
     };
     drop(mgr);
     match handle.reset_fs().await {
-        Ok(()) => (Response::ok(serde_json::json!({"name": name, "status": "reset"})), false),
+        Ok(()) => (
+            Response::ok(serde_json::json!({"name": name, "status": "reset"})),
+            false,
+        ),
         Err(e) => (Response::err(e.to_string()), false),
     }
 }
@@ -471,7 +483,8 @@ async fn handle_pool_create_snapshot(lock: &mut LockGuard<'_>, cmd: &Command) ->
             for (spec, result) in results {
                 match result {
                     Some((handle, Ok(()))) => {
-                        match mgr.pool_register_ready(&spec, handle, plan.layers.clone(), plan.net) {
+                        match mgr.pool_register_ready(&spec, handle, plan.layers.clone(), plan.net)
+                        {
                             Ok(()) => ready.push(spec.name.to_string()),
                             Err(e) => failed.push((spec.name.to_string(), e.to_string())),
                         }

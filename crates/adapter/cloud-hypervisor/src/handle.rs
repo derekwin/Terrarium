@@ -3,6 +3,7 @@
 //! Wires together fs (filesystem composition), process (CH spawning), and
 //! config to implement the full VmHandle contract.
 
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, Mutex};
@@ -13,11 +14,10 @@ use async_trait::async_trait;
 use tokio::time::sleep;
 
 use crate::client::ChClient;
-use crate::config::ChConfig;
+use crate::config::{ChConfig, VmUser};
+use crate::fs::chown_r;
 use crate::fs::{compose_fs, copy_tree, teardown_fs, FsStack};
-use crate::process::{
-    ch_args, ch_restore_args, retry_get_info, spawn_ch, wait_for_socket,
-};
+use crate::process::{ch_args, ch_restore_args, retry_get_info, spawn_ch, wait_for_socket};
 
 // ---------------------------------------------------------------------------
 // Public API — called from the adapter
@@ -54,6 +54,10 @@ struct ChVmHandle {
     /// Tap claimed from the pre-created pool (net VMs); returned to the
     /// pool on Drop instead of being deleted.
     tap: Option<String>,
+    /// The daemon's fd for the claimed tap, handed to CH via `--net fd=`.
+    /// CH dups it; keeping the fd until Drop guarantees the device stays
+    /// attached for the VM's lifetime.
+    tap_fd: Option<OwnedFd>,
     /// Host-side vsock socket the guest agent listens through; restored
     /// VMs use the path written into the snapshot config (per-VM).
     vsock_path: String,
@@ -81,7 +85,7 @@ impl ChVmHandle {
     fn prepare_restore_dir(
         snapshot: &Snapshot,
         name: &str,
-        tap: Option<&str>,
+        vmm: Option<&VmUser>,
     ) -> Result<String, AdapterError> {
         let restore_dir = format!("{}/restore-{}", snapshot.path, name);
         let _ = std::fs::remove_dir_all(&restore_dir);
@@ -122,24 +126,20 @@ impl ChVmHandle {
             *sock = serde_json::json!(vsock_socket);
         }
         // The restored config.json carries the ORIGINAL VM's net device
-        // (including its tap name). CH restore re-attaches devices from
-        // config.json — without this rewrite the restored VM would open
-        // the snapshotted VM's tap, which is still owned by its live CH
-        // ("Resource busy", observed on every net restore). Point it at
-        // the fresh tap launch() created for this restored VM.
-        if let Some(tap) = tap {
-            if let Some(net) = cfg.get_mut("net").and_then(|n| n.as_array_mut()) {
-                for entry in net.iter_mut() {
-                    if let Some(t) = entry.get_mut("tap") {
-                        *t = serde_json::json!(tap);
-                    }
-                }
-            }
-        }
+        // (fd-backed, stable id `net0`). CH restore replaces the fds from
+        // `--restore net_fds=[net0@fd]` — no rewrite needed here.
         let out = serde_json::to_string_pretty(&cfg)
             .map_err(|e| AdapterError::internal(format!("serialize snapshot config: {}", e)))?;
         std::fs::write(&cfg_path, out)
             .map_err(|e| AdapterError::internal(format!("write snapshot config: {}", e)))?;
+        // Hand the whole restore dir to the vmm user AFTER the copies:
+        // std::fs::copy preserves the source file's 0600 mode, so a chown
+        // before the copy would leave root-owned 0600 files that the vmm
+        // user (CH on restore) cannot read (EACCES).
+        if let Some(vmm) = vmm {
+            chown_r(Path::new(&restore_dir), vmm.uid, vmm.gid)
+                .map_err(|e| AdapterError::internal(format!("chown restore dir: {}", e)))?;
+        }
         Ok(restore_dir)
     }
 
@@ -164,21 +164,23 @@ impl ChVmHandle {
         // `ip tuntap add` + `ip link set master` RTNL serialization that
         // capped parallel launches at ~274/s (vs ~400/s without net).
         let net_flag = spec.net;
-        let tap = if net_flag {
-            let claimed = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                terrarium_network::ensure_nat_bridge(
-                    terrarium_network::DEFAULT_BRIDGE,
-                    terrarium_network::DEFAULT_GATEWAY,
-                    terrarium_network::DEFAULT_PREFIX,
-                )?;
-                terrarium_network::tap_pool_claim()
-            })
-            .await
-            .map_err(|e| AdapterError::internal(format!("tap pool task: {e}")))?
-            .map_err(AdapterError::internal)?;
-            Some(claimed)
+        let (tap, tap_fd) = if net_flag {
+            let claimed =
+                tokio::task::spawn_blocking(move || -> Result<(String, OwnedFd), String> {
+                    terrarium_network::ensure_nat_bridge(
+                        terrarium_network::DEFAULT_BRIDGE,
+                        terrarium_network::DEFAULT_GATEWAY,
+                        terrarium_network::DEFAULT_PREFIX,
+                    )?;
+                    terrarium_network::tap_pool_claim()
+                })
+                .await
+                .map_err(|e| AdapterError::internal(format!("tap pool task: {e}")))?
+                .map_err(AdapterError::internal)?;
+            let (name, fd) = claimed;
+            (Some(name), Some(fd))
         } else {
-            None
+            (None, None)
         };
 
         // Restore: build a per-restore snapshot dir (isolated config, so
@@ -186,9 +188,11 @@ impl ChVmHandle {
         // layered rootfs on the name-based socket the rewritten config
         // points at.
         let restore_dir = match restore {
-            Some(snapshot) => {
-                Some(Self::prepare_restore_dir(snapshot, name.as_ref(), tap.as_deref())?)
-            }
+            Some(snapshot) => Some(Self::prepare_restore_dir(
+                snapshot,
+                name.as_ref(),
+                config.vmm.as_ref(),
+            )?),
             None => None,
         };
         let fs_socket = format!("/tmp/terra-{}-fs.sock", name);
@@ -216,13 +220,17 @@ impl ChVmHandle {
             Some(_) => ch_restore_args(
                 &socket,
                 &format!("file://{}", restore_dir.as_deref().unwrap()),
+                tap_fd
+                    .as_ref()
+                    .map(|fd| format!("net0@{}", fd.as_raw_fd()))
+                    .as_deref(),
             ),
             None => ch_args(
                 spec,
                 &socket,
                 fs.as_ref().map(|f| f.socket.as_str()),
                 &vsock,
-                tap.as_deref(),
+                tap_fd.as_ref().map(|fd| fd.as_raw_fd()),
                 &config.snapshot_dir,
             ),
         };
@@ -236,7 +244,14 @@ impl ChVmHandle {
         );
 
         let log_dir = format!("{}/logs", config.fs_root);
-        let mut child = spawn_ch(&args, &config.ch_binary, &log_dir, name.as_ref())?;
+        let mut child = spawn_ch(
+            &args,
+            &config.ch_binary,
+            &log_dir,
+            name.as_ref(),
+            config.vmm.as_ref(),
+            tap_fd.as_ref().map(|fd| fd.as_raw_fd()),
+        )?;
 
         if let Err(e) = wait_for_socket(&socket, Duration::from_secs(15)).await {
             let _ = child.kill();
@@ -250,6 +265,7 @@ impl ChVmHandle {
         Ok(Self {
             name,
             tap,
+            tap_fd,
             vsock_path: vsock,
             restore_dir: restore_dir.map(PathBuf::from),
             child: Mutex::new(child),
@@ -427,6 +443,14 @@ impl VmHandle for ChVmHandle {
         // ensure it exists before pausing/capturing.
         std::fs::create_dir_all(path)
             .map_err(|e| AdapterError::internal(format!("mkdir snapshot dir: {}", e)))?;
+        // Privilege-drop mode: CH writes the memory/state files as the vmm
+        // user, so the freshly created (root-owned) snapshot dir must be
+        // handed over before pausing.
+        if let Some(vmm) = &self.config.vmm {
+            chown_r(Path::new(path), vmm.uid, vmm.gid).map_err(|e| {
+                AdapterError::internal(format!("chown snapshot dir {}: {}", path, e))
+            })?;
+        }
         // CH only snapshots a paused VM. After capture the VM is LEFT
         // PAUSED: resume-after-snapshot leaves the guest unresponsive in
         // the CH builds we support, and the P1 reset flow (snapshot the
@@ -580,5 +604,8 @@ impl Drop for ChVmHandle {
         if let Some(tap) = &self.tap {
             terrarium_network::tap_pool_release(tap);
         }
+        // Close the daemon's handle on the tap fd (CH already dup'ed it
+        // and is dead by now; the device itself stays in the pool).
+        drop(self.tap_fd.take());
     }
 }

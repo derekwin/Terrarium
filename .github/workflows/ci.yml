@@ -59,6 +59,7 @@ jobs:
         run: |
           python -m py_compile \
             sdk/python/tests/test_adversarial_isolation.py \
+            sdk/python/tests/test_e2e_privilege_drop.py \
             sdk/python/tests/compare_baselines.py \
             sdk/python/tests/density_compare.py \
             sdk/python/tests/workload_overhead.py

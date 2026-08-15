@@ -121,12 +121,25 @@ sentry 逃逸（sentry 是用户态进程，但仍需攻破一个巨大的 sysca
 
 ## 8. 为论文/产品需要补的工程项
 
-- **CH 降权**：以专用非 root uid 运行（当前 root）；自身加 Landlock/
-  seccomp——把 VMM 进程变成受限进程（Firecracker 的
-  “VMM 不需 root”原则）。
-- **virtiofsd 降权 + 沙箱化**：最大自定义数据面，同样降权。
+- **CH 降权**（已完成）：daemon 以 root 启动时，CH 以专用系统用户
+  `terra-vmm` 运行（`terra setup` 自动创建）；tap 由 daemon 预建并
+  以 fd 传入（`--net fd=N,id=net0`），CH 不再需要 CAP_NET_ADMIN 或
+  `/dev/net/tun`；加上 CH 自带的 Landlock 路径域，VMM 进程变成
+  “非 root + 路径受限”的受限进程（Firecracker 的“VMM 不需 root”
+  原则）。restore 走 `net_fds=[net0@fd]` 同样降权。
+- **virtiofsd 降权 + 沙箱化**（已完成）：以 `terra-vmm` 运行，导出树
+  （per-VM upper/work/merged + 普通目录层）chown 给该用户，
+  `--translate-uid/gid host:<vmm>:0:1` 保持 guest 侧 root 属主语义，
+  保留 virtiofsd 自带 seccomp。guest 逃逸进 virtiofsd 只能拿到
+  `terra-vmm` 的权限（该用户只拥有导出树），不再直接是宿主 root。
+  现有 EROFS 镜像内容世界可读，新打包用 `mkfs.erofs --force-uid/
+  --force-gid` 对准 vmm 用户。
 - **宿主配置文档**：`mitigations=auto,nosmt`、微码要求、IOMMU
   （VT-d）可选启用。
+
+降权后的诚实表述：**CH/virtiofsd 不是宿主 root**——即使 guest 逃逸
+打入这两个进程，也先要在一个专用受限用户内继续提权才能影响宿主。
+这是 L1“爆炸半径有界”声明在工程上的落地。
 
 ## 9. 引用清单（提交前需逐条核验）
 

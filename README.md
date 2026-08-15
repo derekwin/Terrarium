@@ -133,6 +133,13 @@ terra daemon status                            # engine state at a glance
 `terra setup ubuntu` does the same for ubuntu. Tool layers (python3 and
 friends) are built on a distro template:
 
+`terra setup` also creates the dedicated `terra-vmm` system user: with the
+daemon running as root, Cloud Hypervisor and virtiofsd drop to that
+unprivileged user (tap fds are passed by the daemon; guest-visible root
+ownership is preserved via virtiofsd uid translation), so a guest escape
+into the host-side data planes no longer immediately means host root.
+Skip it (legacy root mode) if the machine has no sudo during setup.
+
 ```bash
 terra tool create -n python312 --template alpine --script images/examples/python312.sh
 terra tool ls

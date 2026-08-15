@@ -2,7 +2,10 @@
 
 use crate::api;
 use crate::client::ChClient;
+use crate::config::VmUser;
 use adapter_traits::{AdapterError, VmSpec};
+use std::io;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -17,7 +20,7 @@ pub(crate) fn ch_args(
     socket: &str,
     fs_socket: Option<&str>,
     vsock: &str,
-    tap: Option<&str>,
+    tap_fd: Option<i32>,
     snapshot_dir: &str,
 ) -> Vec<String> {
     let mut args = vec!["--api-socket".into(), socket.into()];
@@ -64,23 +67,12 @@ pub(crate) fn ch_args(
     // Always on — zero-size balloon, no guest-visible semantics change.
     args.push("--balloon".into());
     args.push("size=0,free_page_reporting=on".into());
-    if let Some(tap) = tap {
+    // fd-backed tap (privilege-drop mode): the root daemon opens the tap
+    // and hands CH the fd, so CH never needs CAP_NET_ADMIN or /dev/net/tun.
+    // The `id` is what restore's `net_fds=[net0@fd]` matches against.
+    if let Some(fd) = tap_fd {
         args.push("--net".into());
-        args.push(format!("tap={}", tap));
-    }
-    // Landlock whitelists only cmdline paths; CH opens /dev/net/tun to
-    // attach tap devices, so it must be granted explicitly when
-    // networking is enabled (otherwise CH dies right after boot).
-    if tap.is_some() {
-        // CH opens /dev/net/tun to create/attach taps and reads the tap
-        // flags from sysfs (/sys/class/net is a symlink farm into
-        // /sys/devices/virtual/net — grant both, read-only).
-        args.push("--landlock-rules".into());
-        args.push("path=/dev/net/tun,access=rw".into());
-        args.push("--landlock-rules".into());
-        args.push("path=/sys/class/net,access=r".into());
-        args.push("--landlock-rules".into());
-        args.push("path=/sys/devices/virtual/net,access=r".into());
+        args.push(format!("fd={},id=net0", fd));
     }
     // vsock for host→guest control (guest-proxy); unique CID per VM.
     let cid = NEXT_VSOCK_CID.fetch_add(1, Ordering::Relaxed);
@@ -110,12 +102,21 @@ pub(crate) fn ch_args(
 /// `.requires("vm-payload")`, and `VmBoot` wins the if/else-if over
 /// `VmRestore` whenever a payload is present). So the command line is
 /// ONLY the api socket + `--restore`.
-pub(crate) fn ch_restore_args(socket: &str, source_url: &str) -> Vec<String> {
+pub(crate) fn ch_restore_args(
+    socket: &str,
+    source_url: &str,
+    net_fds: Option<&str>,
+) -> Vec<String> {
+    let mut restore = format!("source_url={source_url}");
+    if let Some(fds) = net_fds {
+        restore.push_str(&format!(",net_fds=[{fds}]"));
+    }
+    restore.push_str(",resume=true");
     vec![
         "--api-socket".into(),
         socket.into(),
         "--restore".into(),
-        format!("source_url={},resume=true", source_url),
+        restore,
     ]
 }
 
@@ -145,18 +146,60 @@ pub(crate) fn spawn_ch(
     ch_binary: &str,
     log_dir: &str,
     name: &str,
+    vmm: Option<&VmUser>,
+    tap_fd: Option<i32>,
 ) -> Result<Child, AdapterError> {
     let _ = std::fs::create_dir_all(log_dir);
     let log_path = format!("{}/{}.log", log_dir, name);
     let log_file = std::fs::File::create(&log_path)
         .map_err(|e| AdapterError::internal(format!("create CH log {}: {}", log_path, e)))?;
 
-    Command::new(ch_binary)
-        .args(args)
+    let mut cmd = Command::new(ch_binary);
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(log_file))
-        .spawn()
+        .stderr(Stdio::from(log_file));
+    if let Some(vmm) = vmm {
+        // The per-VM log file is created by the root daemon; hand it to
+        // the vmm user so CH can keep writing diagnostics after dropping.
+        let log_c = std::ffi::CString::new(log_path.as_str())
+            .map_err(|_| AdapterError::internal("NUL in log path"))?;
+        // SAFETY: log_c is a valid NUL-terminated path.
+        if unsafe { libc::chown(log_c.as_ptr(), vmm.uid, vmm.gid) } != 0 {
+            return Err(AdapterError::internal(format!(
+                "chown CH log {} to {}: {}",
+                log_path,
+                vmm.name,
+                io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: pre_exec runs in the child after fork; fcntl/setgroups/
+        // setgid/setuid are async-signal-safe. Values captured by copy.
+        let (uid, gid) = (vmm.uid, vmm.gid);
+        let fd = tap_fd;
+        unsafe {
+            cmd.pre_exec(move || {
+                // Hand the inherited tap fd to CH: clear CLOEXEC so the
+                // fd survives exec with the same number CH was told to use.
+                if let Some(fd) = fd {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                if libc::setgroups(0, std::ptr::null()) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::setgid(gid) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::setuid(uid) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    cmd.spawn()
         .map_err(|e| AdapterError::internal(format!("spawn CH: {}", e)))
 }
 
@@ -233,12 +276,43 @@ mod tests {
         assert_eq!(arg_after(&args, "--memory"), Some("size=512M,shared=on"));
     }
 
+    /// fd-backed tap: CH gets the fd number + a stable device id for
+    /// restore, and no longer needs /dev/net/tun or /sys in its Landlock
+    /// domain (it never opens them).
+    #[test]
+    fn net_uses_fd_with_stable_id() {
+        let mut s = spec(None);
+        s.net = true;
+        let args = ch_args(&s, "/s", None, "/v", Some(7), "/tmp/snaps");
+        assert_eq!(
+            arg_after(&args, "--net"),
+            Some("fd=7,id=net0"),
+            "args: {:?}",
+            args
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("/dev/net/tun")),
+            "fd-backed net must not whitelist /dev/net/tun: {:?}",
+            args
+        );
+    }
+
+    /// Restore with networking supplies net_fds matched by the stable id.
+    #[test]
+    fn restore_net_fds_shape() {
+        let args = ch_restore_args("/s", "file:///tmp/terra-snap-env", Some("net0@7"));
+        assert_eq!(
+            arg_after(&args, "--restore"),
+            Some("source_url=file:///tmp/terra-snap-env,net_fds=[net0@7],resume=true")
+        );
+    }
+
     /// Restore mode (P1 fast reset) is a restore-ONLY invocation: passing
     /// any vm-config option would make CH boot fresh instead (CH v53 clap
     /// quirk). The snapshot's config.json supplies everything else.
     #[test]
     fn restore_args_are_restore_only() {
-        let args = ch_restore_args("/s", "file:///tmp/terra-snap-env");
+        let args = ch_restore_args("/s", "file:///tmp/terra-snap-env", None);
         assert_eq!(arg_after(&args, "--api-socket"), Some("/s"));
         assert_eq!(
             arg_after(&args, "--restore"),

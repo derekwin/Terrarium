@@ -50,6 +50,22 @@ root 即可查阅。
 **实现状态**：audit JSONL 落盘 + fchown 到原用户（D4 落地）；systemd
 单元为后续包装。
 
+## D4a. 宿主侧数据面降权：CH/virtiofsd 以专用用户运行
+
+**决策**：daemon 保持 root（L1 管理面），但 Cloud Hypervisor 与
+virtiofsd 这两个解析 guest 输入的数据面进程降为专用系统用户
+`terra-vmm`（`terra setup` 创建）。tap 由 daemon 预建并以 fd 传入
+（`--net fd=N,id=net0`），CH 不再需要 CAP_NET_ADMIN/`/dev/net/tun`；
+virtiofsd 导出树 chown 给该用户，`--translate-uid/gid host:<vmm>:0:1`
+保持 guest 侧 root 属主语义。restore 走 `net_fds=[net0@fd]` 同样降权。
+
+**理由**：guest 逃逸首先要打的就是 CH/virtiofsd；若它们以 root 运行，
+逃逸即宿主 root，“爆炸半径有界”的 L1 声明名不副实。降权后逃逸者先
+拿到一个专用受限用户（只拥有导出树），还需二次提权才能影响宿主。
+
+**实现状态**：已落地（含 snapshot/restore、fd 传递、translate-uid）；
+rootless 模式（daemon 非 root）保持原 `unshare -Urm` 路径不变。
+
 ## D5. 策略可编程（平台级方向）
 
 **决策**：策略从静态 JSON 演进为"策略即代码"——SDK 构造器、可继承、
