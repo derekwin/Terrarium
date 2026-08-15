@@ -1,11 +1,21 @@
-# Density Benchmarks
+# 密度基准：方法与历史数据档案
 
-> **Status: harness ready, numbers pending.** The benchmark script is
-> committed and import/compile-verified. First real measurements exist
-> (2026-08-03, below); they require a KVM-capable host with guest assets
-> (`terra setup <distro>`) and user/mount-namespace privileges for
-> virtiofsd. The script refuses to run (exit 2) when KVM is absent rather
-> than reporting fake numbers.
+> **地位**：本文是密度基准的**方法与历史数据档案**。面向读者的性能
+> 结论汇总在 [performance.md](performance.md)（exec 路径、治理开销、
+> 降权 A/B、最新密度对比）。本文记录：
+>
+> - **8-14 至今（最新）**：统一快照热池（Ready 槽 ~9ms 认领）、
+>   批量编排 API、tenant_destroy 锁外化；8-15 的 100 实例快照路径
+>   对比（59.2/s）见 performance.md。
+> - **8-03/8-04（历史环境）**：12 租户内存共享、快照并发恢复、
+>   RL episode 循环——当时的宿主是嵌套 KVM + 特权容器，绝对数字与
+>   当前环境不可直接比，方法学仍然有效。
+>
+> 原始数据文件与章节的对应关系见 [docs/README.md](README.md)。
+>
+> 基准要求：KVM 宿主、guest assets（`terra setup <distro>`）、
+> virtiofsd 的 user/mount namespace 权限；缺 KVM 时脚本拒绝运行
+> （exit 2/3），不输出假数字。
 
 ## Results — 2026-08-03 (12-tenant sweeps)
 

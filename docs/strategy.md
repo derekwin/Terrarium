@@ -8,8 +8,10 @@
 
 现有沙箱方案在两个极端之间：容器（Docker/gVisor）密度高但隔离弱；微虚拟机
 （Firecracker/Cloud Hypervisor）隔离硬但每实例开销大。Terrarium 用
-**KVM 租户隔离 + 会话内 sandlock** 的两层模型，把每 VM 成本压到 ~56-65MB、
-冷启动 ~850ms、暖池认领 ~620ms——落在中间带：真 VM 隔离，容器级密度。
+**KVM 租户隔离 + 会话内治理（terra-confine）** 的两层模型，把每 VM 成本
+压到 ~62-68MB、快照创建 59/s、热池认领 ~9ms（冷启动 ~40ms/VM 基线，
+详见 [performance.md](performance.md)）——落在中间带：真 VM 隔离，
+容器级密度。
 
 当前实测数据（2026-08-03，12 租户采样）：
 
@@ -86,7 +88,8 @@ agent 产出代码后，需要在隔离环境里跑测试/构建再决定合入�
    后续）。
 5. **策略/配额管理**：租户配额、任务策略模板、网络出口加固。
 6. **安全验证闭环**：逃逸/加固测试；在真实 KVM 宿主上完成 sandlock deny
-   通道与 fsgrant 的运行时验证（当前仅编译级）。
+   通道与 fsgrant 的运行时验证（✅ 已完成，31 项对抗测试 + 安全验证，
+   见 [security-adversarial.md](security-adversarial.md)）。
 
 ### P3 —— 规模化
 

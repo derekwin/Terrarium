@@ -1,5 +1,8 @@
 # 真实负载下的治理/隔离开销（2026-08-15，vmm 降权后重测）
 
+> 面向读者的汇总与图表见 [performance.md](performance.md) §1-2；本文是
+> 方法学细节与论文原始证据。
+
 > 论文核心证据：Terrarium 的治理（L2 confine）对真实 agent 风格负载的
 > 开销是多少？VM 边界（L1）的开销是多少？与 docker / gVisor 相比如何？
 > 原始数据：`docs/workload-overhead-2026-08-15-vmm.json`（CH/virtiofsd

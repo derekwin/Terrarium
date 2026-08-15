@@ -117,7 +117,8 @@ terrarium/
 │   └── mcp/                  # MCP server (stdio JSON-RPC, 21 user-facing tools)
 ├── sdk/python/               # Python SDK (terra package: Sandbox, Pool, Template, client, daemon, assets, images)
 ├── images/                   # Guest kernel / rootfs / initramfs build scripts and examples
-└── docs/                     # Protocol, SDK, MCP docs and design ADRs
+└── docs/                     # Index (docs/README.md), SDK/MCP/protocol, design,
+                              # security, performance+benchmarks, paper, CI
 ```
 
 ## Quick Start
@@ -239,11 +240,14 @@ passes (42 passed), broken patch rejected (1 failed), ~1.5s per check.
 
 ## Documentation
 
+- [docs/README.md](docs/README.md) — **full documentation index** (usage, design, security, performance, paper, ops)
+- [docs/tutorial-real-agent.md](docs/tutorial-real-agent.md) — real-agent tutorial (MCP, LangGraph/Claude SDK)
 - [docs/protocol.md](docs/protocol.md) — engine wire protocol (commands, transports, semantics)
 - [docs/sdk.md](docs/sdk.md) — Python SDK and CLI reference
 - [docs/mcp.md](docs/mcp.md) — MCP server tools
-- [docs/design/](docs/design/) — design ADRs and decisions
 - [docs/performance.md](docs/performance.md) — measured performance vs docker / gVisor
+- [docs/security-threat-model.md](docs/security-threat-model.md) — L1/L2 threat model
+- [docs/design/decisions.md](docs/design/decisions.md) — design ADRs and decisions
 
 ## Roadmap
 
