@@ -337,6 +337,36 @@ impl Command {
         self.audit_history = Some(true);
         self
     }
+
+    /// Batch: number of environments.
+    pub fn with_count(mut self, count: u32) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Batch: tenant-name prefix (`{prefix}-0..N-1`).
+    pub fn with_prefix(mut self, prefix: &str) -> Self {
+        self.prefix = Some(prefix.to_string());
+        self
+    }
+
+    /// Batch: sandbox ids to run the same command on.
+    pub fn with_sandboxes(mut self, ids: Vec<String>) -> Self {
+        self.sandboxes = ids;
+        self
+    }
+
+    /// Batch: tenant names to recycle.
+    pub fn with_tenants(mut self, tenants: Vec<String>) -> Self {
+        self.tenants = tenants;
+        self
+    }
+
+    /// Batch recycle mode ("destroy" | "reset").
+    pub fn with_mode(mut self, mode: &str) -> Self {
+        self.mode = Some(mode.to_string());
+        self
+    }
 }
 
 /// Response sent from the engine daemon back to the client.

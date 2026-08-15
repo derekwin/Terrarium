@@ -400,6 +400,26 @@ pub(crate) async fn run_batch_recycle(
     out
 }
 
+/// Shared recycle-result rows: destroy-mode reports "released"/"destroyed",
+/// reset-mode reports "reset".
+pub(crate) fn batch_recycle_rows(
+    results: Vec<(String, Result<bool, String>)>,
+    mode: &str,
+) -> Vec<serde_json::Value> {
+    results
+        .into_iter()
+        .map(|(tenant, r)| {
+            let status = match &r {
+                Ok(released) if *released => "released",
+                Ok(_) if mode == "destroy" => "destroyed",
+                Ok(_) => "reset",
+                Err(_) => "error",
+            };
+            serde_json::json!({"tenant": tenant, "status": status, "error": r.err()})
+        })
+        .collect()
+}
+
 pub(crate) async fn cmd_batch_recycle(mgr: &mut VmManager, cmd: Command) -> Response {
     let items = match prepare_batch_recycle(mgr, &cmd) {
         Ok(i) => i,
@@ -412,16 +432,7 @@ pub(crate) async fn cmd_batch_recycle(mgr: &mut VmManager, cmd: Command) -> Resp
             finalize_tenant_destroy(mgr, plan);
         }
     }
-    let rows: Vec<_> = results
-        .into_iter()
-        .map(|(tenant, r)| {
-            let status = match &r {
-                Ok(released) if *released => "released",
-                Ok(_) => "reset",
-                Err(_) => "error",
-            };
-            serde_json::json!({"tenant": tenant, "status": status, "error": r.err()})
-        })
-        .collect();
+    let mode = cmd.mode.clone().unwrap_or_else(|| "destroy".to_string());
+    let rows = batch_recycle_rows(results, &mode);
     Response::ok(serde_json::json!({"results": rows, "count": rows.len()}))
 }

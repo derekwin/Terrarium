@@ -75,7 +75,9 @@ agent 产出代码后，需要在隔离环境里跑测试/构建再决定合入�
    `batch_recycle` 单命令批量原语 + 锁外并行，2026-08-14；密度报表随
    density harness 走。）
 3. **RL 协议接入**：以 MCP 为统一入口，提供环境重置、任务注入、
-   结果采集的原语。
+   结果采集的原语。（✅ `terra_pool_create_snapshot` / `terra_batch_create` /
+   `terra_batch_exec` / `terra_batch_recycle` / `terra_vm_reset` 已入 MCP
+   工具面，2026-08-15；episode 循环 = 三次 MCP 调用。）
 
 ### P2 —— 生产执行治理
 

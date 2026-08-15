@@ -30,7 +30,24 @@ Terrarium 的用户面工具。管理员操作（daemon 启停、镜像构建、
 协议细节：notification（无 `id`）不产生响应；日志只写 stderr，
 stdout 仅承载 JSON-RPC 消息。
 
-## 工具（21 个，全为用户面）
+## 工具（28 个，全为用户面）
+
+### RL / 批量编排（P1 #3，2026-08-15）
+
+RL 训练循环（或密度评测）以三个调用完成：预热池 → 批量建环境 → 注入
+任务 + 采集 → 重置/回收。
+
+| 工具 | 参数 | 语义 |
+|---|---|---|
+| `terra_pool_create_snapshot` | `size`, `snapshot_path`, `layers`, `net?`, `memory_mb?` | 从快照预恢复 READY 槽（fs 已挂、agent 就绪），后续批量认领零启动 |
+| `terra_batch_create` | `prefix`, `count`, `layers`, `net?`, `kernel?`, `initramfs?`, `cpus?`, `memory_mb?`, `pool?` | 一次建 N 个环境：Ready 池认领 + 冷启动补齐，并行绑定；返回 `{tenant, id, vm}` |
+| `terra_batch_exec` | `sandboxes` (array), `args` (array), `timeout_secs?` | 同一命令并行跑在 N 个沙箱（任务注入 + 结果采集），返回每沙箱 `{id, status, data}` |
+| `terra_batch_recycle` | `tenants` (array), `mode` ("destroy"/"reset") | 并行回收：`reset` 原地重置保留环境（episode 循环）；`destroy` 释放回池 |
+| `terra_vm_reset` | `name` | 单环境原地重置（guest 杀进程 + 运行时目录清回层基线，~10-20ms） |
+
+episode 循环：`terra_pool_create_snapshot`（一次性预热）→
+`terra_batch_create` → `terra_batch_exec` → `terra_batch_recycle(reset)`；
+重置后环境可复用。
 
 ### 会话式执行（推荐入口）
 

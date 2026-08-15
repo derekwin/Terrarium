@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **RL protocol via MCP (P1 #3)** — five new tools: `terra_pool_create_snapshot`
+  (ready-pool fill), `terra_batch_create` / `terra_batch_exec` /
+  `terra_batch_recycle` (one-command N-env create / task injection +
+  collect / recycle), and `terra_vm_reset` (in-place episode reset). The
+  RL episode loop is now three MCP calls. Protocol Command gains
+  count/prefix/sandboxes/tenants/mode builders; recycle results report
+  released/destroyed/reset accurately.
 - **Batch lifecycle API (P1 #2)** — `batch_create(prefix, N)` /
   `batch_exec(ids, args)` / `batch_recycle(tenants, mode)` run N
   environments in one daemon command: prepare under the lock, spawn/bind/

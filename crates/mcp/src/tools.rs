@@ -211,6 +211,66 @@ pub fn tools_list() -> Vec<serde_json::Value> {
             vec![("name", "string", "VM name")],
         ),
         tool(
+            "terra_pool_create_snapshot",
+            "Fill the pool with READY slots: VMs pre-restored from a snapshot with the layered fs attached and the guest agent running. A later batch_create claims one with a direct sandbox bind (no boot, no fs hot-plug).",
+            vec![
+                ("size", "number", "Number of ready slots (1..=32)"),
+                ("snapshot_path", "string", "Snapshot directory"),
+                ("layers", "array", "Layer names (must match the snapshot)"),
+                ("net", "boolean", "Attach NAT networking (optional)"),
+                (
+                    "memory_mb",
+                    "number",
+                    "Guest memory in MB (default 256; must match the snapshot)",
+                ),
+            ],
+        ),
+        tool(
+            "terra_batch_create",
+            "Create N sandbox environments in ONE command (RL/density cadence): tenants {prefix}-0..N-1 are claimed from the ready pool (shortfall cold-boots) and bound in parallel. Returns per-env {tenant, id, vm}.",
+            vec![
+                ("prefix", "string", "Tenant-name prefix"),
+                ("count", "number", "Number of environments (1..=256)"),
+                ("layers", "array", "Layer names"),
+                ("net", "boolean", "Attach NAT networking (optional)"),
+                ("kernel", "string", "Kernel path (cold-boot shortfall, optional)"),
+                (
+                    "initramfs",
+                    "string",
+                    "Initramfs path (cold-boot shortfall, optional)",
+                ),
+                ("cpus", "number", "vCPU count (default 1)"),
+                ("memory_mb", "number", "Memory in MB (default 256)"),
+                ("pool", "boolean", "Claim from the warm/ready pool first (default true)"),
+            ],
+        ),
+        tool(
+            "terra_batch_exec",
+            "Run the same command on N sandboxes in parallel (task injection + result collection). Returns per-sandbox {id, status, data}.",
+            vec![
+                ("sandboxes", "array", "Sandbox ids from terra_batch_create"),
+                ("args", "array", "Command argv"),
+                (
+                    "timeout_secs",
+                    "number",
+                    "Per-exec timeout in seconds (default 60, max 3600)",
+                ),
+            ],
+        ),
+        tool(
+            "terra_batch_recycle",
+            "Recycle N tenants in parallel. mode=\"reset\" resets each tenant VM in place and keeps it (RL episode cadence); mode=\"destroy\" releases pool-backed tenants back to the pool.",
+            vec![
+                ("tenants", "array", "Tenant names from terra_batch_create"),
+                ("mode", "string", "\"destroy\" (default) or \"reset\""),
+            ],
+        ),
+        tool(
+            "terra_vm_reset",
+            "In-place episode reset of one VM: guest processes killed and runtime dirs cleared back to the layer baseline (~10-20ms).",
+            vec![("name", "string", "VM name")],
+        ),
+        tool(
             "terra_attach_fs",
             "Hot-plug a layered filesystem into a running VM.",
             vec![
@@ -356,6 +416,117 @@ pub fn call_tool(name: &str, args: &serde_json::Value, sessions: &mut SessionReg
         "terra_pool_release" => {
             let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
             send_to_engine(&Command::new("pool_release").with_name(name))
+        }
+        "terra_pool_create_snapshot" => {
+            let size = args.get("size").and_then(|a| a.as_u64()).unwrap_or(1) as u32;
+            let path = args
+                .get("snapshot_path")
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
+            let layers: Vec<String> = args
+                .get("layers")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let net = args.get("net").and_then(|a| a.as_bool()).unwrap_or(false);
+            let mut c = Command::new("pool_create_snapshot")
+                .with_pool_size(size)
+                .with_snapshot_path(path)
+                .with_layers(layers)
+                .with_net(net);
+            if let Some(mb) = args.get("memory_mb").and_then(|a| a.as_u64()) {
+                c = c.with_memory_mb(mb);
+            }
+            send_to_engine(&c)
+        }
+        "terra_batch_create" => {
+            let prefix = args
+                .get("prefix")
+                .and_then(|a| a.as_str())
+                .unwrap_or("rl");
+            let count = args.get("count").and_then(|a| a.as_u64()).unwrap_or(1) as u32;
+            let layers: Vec<String> = args
+                .get("layers")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let net = args.get("net").and_then(|a| a.as_bool()).unwrap_or(false);
+            let pool = args.get("pool").and_then(|a| a.as_bool()).unwrap_or(true);
+            let mut c = Command::new("batch_create")
+                .with_prefix(prefix)
+                .with_count(count)
+                .with_layers(layers)
+                .with_net(net)
+                .with_pool(pool);
+            if let Some(k) = args.get("kernel").and_then(|a| a.as_str()) {
+                c = c.with_kernel(k);
+            }
+            if let Some(i) = args.get("initramfs").and_then(|a| a.as_str()) {
+                c = c.with_initramfs(i);
+            }
+            if let Some(v) = args.get("cpus").and_then(|a| a.as_u64()) {
+                c = c.with_cpus(v as u8);
+            }
+            if let Some(mb) = args.get("memory_mb").and_then(|a| a.as_u64()) {
+                c = c.with_memory_mb(mb);
+            }
+            send_to_engine(&c)
+        }
+        "terra_batch_exec" => {
+            let sandboxes: Vec<String> = args
+                .get("sandboxes")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let argv: Vec<String> = args
+                .get("args")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut c = Command::new("batch_exec")
+                .with_sandboxes(sandboxes)
+                .with_args(argv);
+            if let Some(t) = args.get("timeout_secs").and_then(|a| a.as_u64()) {
+                c = c.with_timeout_secs(t);
+            }
+            send_to_engine(&c)
+        }
+        "terra_batch_recycle" => {
+            let tenants: Vec<String> = args
+                .get("tenants")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mode = args.get("mode").and_then(|a| a.as_str()).unwrap_or("destroy");
+            send_to_engine(
+                &Command::new("batch_recycle")
+                    .with_tenants(tenants)
+                    .with_mode(mode),
+            )
+        }
+        "terra_vm_reset" => {
+            let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");
+            send_to_engine(&Command::new("reset_vm").with_name(name))
         }
         "terra_attach_fs" => {
             let name = args.get("name").and_then(|a| a.as_str()).unwrap_or("");

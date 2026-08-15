@@ -17,9 +17,9 @@ use tokio::sync::{Mutex, MutexGuard};
 
 use crate::commands::{
     batch::{
-        batch_create_response, bind_batch_envs, prepare_batch_create, prepare_batch_exec,
-        prepare_batch_recycle, run_batch_execs, run_batch_recycle, spawn_batch_vms,
-        BatchRecycleItem,
+        batch_create_response, batch_recycle_rows, bind_batch_envs, prepare_batch_create,
+        prepare_batch_exec, prepare_batch_recycle, run_batch_execs, run_batch_recycle,
+        spawn_batch_vms, BatchRecycleItem,
     },
     execute, pool::{
         finish_pool_create_snapshot, pool_create_snapshot_response, prepare_pool_create_snapshot,
@@ -590,17 +590,8 @@ async fn handle_batch_recycle(lock: &mut LockGuard<'_>, cmd: &Command) -> (Respo
                     crate::commands::sandbox::finalize_tenant_destroy(&mut mgr, plan);
                 }
             }
-            let rows: Vec<_> = results
-                .into_iter()
-                .map(|(tenant, r)| {
-                    let status = match &r {
-                        Ok(released) if *released => "released",
-                        Ok(_) => "reset",
-                        Err(_) => "error",
-                    };
-                    serde_json::json!({"tenant": tenant, "status": status, "error": r.err()})
-                })
-                .collect();
+            let mode = cmd.mode.clone().unwrap_or_else(|| "destroy".to_string());
+            let rows = batch_recycle_rows(results, &mode);
             (
                 Response::ok(serde_json::json!({"results": rows, "count": rows.len()})),
                 false,
