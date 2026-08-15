@@ -50,6 +50,7 @@ jobs:
           pip install maturin
           cd crates/engine && maturin develop
       - run: pip install -e sdk/python/
+      - run: pip install matplotlib
       - run: python -c "import terra; print('SDK OK')"
       - name: Build adversarial escape probe
         run: |
@@ -60,9 +61,11 @@ jobs:
           python -m py_compile \
             sdk/python/tests/test_adversarial_isolation.py \
             sdk/python/tests/test_e2e_privilege_drop.py \
+            sdk/python/tests/bench_privilege_drop.py \
             sdk/python/tests/compare_baselines.py \
             sdk/python/tests/density_compare.py \
             sdk/python/tests/workload_overhead.py
+          python docs/scripts/plot_performance.py
       - name: Run non-e2e Python tests
         run: |
           pip install pytest

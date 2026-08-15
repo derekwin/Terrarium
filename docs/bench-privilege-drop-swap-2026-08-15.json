@@ -1,0 +1,42 @@
+{
+  "method": "A/B same-host same-code; TERRA_VMM_USER flips vmm/legacy",
+  "host": "sdu-232",
+  "results": {
+    "legacy": {
+      "exec_latency": {
+        "p50_ms": 2.87,
+        "p95_ms": 3.1,
+        "mean_ms": 2.89
+      },
+      "exec_throughput": 737.2,
+      "cold_create": {
+        "p50_ms": 22.1,
+        "p95_ms": 25.4,
+        "mean_ms": 22.5
+      },
+      "restore": {
+        "p50_ms": 23.5,
+        "p95_ms": 24.1,
+        "mean_ms": 23.4
+      }
+    },
+    "vmm": {
+      "exec_latency": {
+        "p50_ms": 2.89,
+        "p95_ms": 3.15,
+        "mean_ms": 2.9
+      },
+      "exec_throughput": 774.1,
+      "cold_create": {
+        "p50_ms": 42.3,
+        "p95_ms": 47.4,
+        "mean_ms": 41.1
+      },
+      "restore": {
+        "p50_ms": 43.2,
+        "p95_ms": 46.3,
+        "mean_ms": 42.8
+      }
+    }
+  }
+}

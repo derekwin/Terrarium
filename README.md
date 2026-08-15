@@ -16,6 +16,41 @@ Terrarium is a scheduling and control layer for agent execution environments. It
 | Environments | OCI image | Disk image | **Composable named layers** |
 | Backends | — | — | **CH microVMs + in-guest Sandlock (`SandboxAdapter` trait for future backends)** |
 
+## Performance
+
+Real measurements (same host, 2026-08-15; full methodology and raw data in
+[docs/performance.md](docs/performance.md)):
+
+| Agent-relevant metric | Terrarium | docker exec | gVisor runsc do |
+|---|---:|---:|---:|
+| One tool call (p50) | **~3 ms** | ~89 ms | ~293 ms |
+| fileio workload (1500 files) | 15.5 ms | 136.3 ms | 619.9 ms |
+| subproc workload (150 forks) | 122.2 ms | 172.2 ms | 1094.7 ms |
+| mixed workload (write→build→read) | 37.5 ms | 117.1 ms | 564.7 ms |
+
+![exec path latency](docs/perf/exec-path-latency.png)
+
+![workload overhead](docs/perf/workload-overhead.png)
+
+Why it matters for agents: Terrarium VMs are long-lived and the agent
+reuses a single vsock channel, so every tool call is one ~3 ms round trip.
+docker exec pays a ~90 ms CLI/runc round trip per call, and gVisor's
+one-shot `runsc do` pays ~300 ms of sandbox startup per call — over
+thousands of calls per episode, that is the difference between training
+throughput and timeouts.
+
+Governance (the L2 in-guest sandbox, `terra-confine`) is **zero-cost on
+real workloads** (0.87–1.04× across file/process/cpu/mixed loads): Landlock
+is a static kernel verdict, seccomp only filters low-frequency network
+syscalls, and cgroup is passive accounting. VM isolation is workload
+dependent — ~1.3–2× on pure CPU, at parity on I/O and process-heavy agent
+work. The host-side data planes (Cloud Hypervisor, virtiofsd) run under a
+dedicated unprivileged user with no measurable cost on the exec path.
+
+Also see: [density benchmarks](docs/benchmarks.md) (per-VM host cost
+~52–65 MB Pss with shared layer page cache; snapshot→restore ~26–39 ms;
+net restores at 539 VMs/s from the warm tap pool).
+
 ## Architecture
 
 ```

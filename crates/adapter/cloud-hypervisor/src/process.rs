@@ -159,6 +159,22 @@ pub(crate) fn spawn_ch(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file));
+    // The tap fd is opened with O_CLOEXEC (daemon hygiene); CH must
+    // inherit it with the SAME fd number the --net fd=N arg references.
+    // Clear CLOEXEC in the child, unconditionally — fd-backed taps are
+    // the only net mode now (vmm or legacy root).
+    if let Some(fd) = tap_fd {
+        // SAFETY: pre_exec runs in the child after fork; fcntl is
+        // async-signal-safe. The fd number is valid in the child.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     if let Some(vmm) = vmm {
         // The per-VM log file is created by the root daemon; hand it to
         // the vmm user so CH can keep writing diagnostics after dropping.
@@ -176,16 +192,8 @@ pub(crate) fn spawn_ch(
         // SAFETY: pre_exec runs in the child after fork; fcntl/setgroups/
         // setgid/setuid are async-signal-safe. Values captured by copy.
         let (uid, gid) = (vmm.uid, vmm.gid);
-        let fd = tap_fd;
         unsafe {
             cmd.pre_exec(move || {
-                // Hand the inherited tap fd to CH: clear CLOEXEC so the
-                // fd survives exec with the same number CH was told to use.
-                if let Some(fd) = fd {
-                    if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
                 if libc::setgroups(0, std::ptr::null()) != 0 {
                     return Err(io::Error::last_os_error());
                 }
