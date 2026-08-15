@@ -1,7 +1,7 @@
 """Batch environment orchestration (P1-2) — RL/eval episode scaling.
 
 A :class:`Batch` is a set of environments restored from one snapshot (the
-P1 fast-reset primitive — docs/plans/2026-08-03-snapshot-reset.md):
+P1 fast-reset primitive — see docs/benchmarks.md fast-reset section):
 
     with Batch("/tmp/env-ready", 16, layers=["base"]) as envs:
         results = envs.collect(["run-task", "--input", "x"])

@@ -2,9 +2,9 @@
 
 > **原则**:完备性不迎合任何 VM/沙箱实现,而是锚定 **agent 执行环境的真实需求**。
 > 契约定义"agent 需要什么样的执行环境",实现(VM/沙箱)是契约的满足者。
-> 当前阶段:定义契约 + 设计策略模型 + 规划 SandboxAdapter 接入引擎(统一 L2 边界)。
-> 演进:E(可替换性)已实证——契约层(engine 零后端 + 注入测试)证明可插;
-> 运行时第二后端验证受部署环境限制(mount ns 被禁),延后。
+> 当前阶段:契约已落地——SandboxAdapter 接入引擎(统一 L2 边界),默认
+> 后端为 native terra-confine,sandlock 为 alternative;策略模型以
+> `docs/design/policy-model.md` 为准(本文件的类型草稿是历史形态)。
 
 ---
 
@@ -50,7 +50,7 @@ LLM 驱动的自主程序,循环为 观察 → 推理 → 行动。从使用中�
 - D1→`VmAdapter`(L1)/`SandboxAdapter`(L2)
 - D2→`exec`/`attach_fs`
 - D3→生命周期方法(创建/检查/销毁) + 会话状态持久(workdir 随 VM 存活;R1"可恢复"= 会话状态连续性,非 VM 级快照恢复);
-  snapshot = 平台扩展(非 agent 会话契约);restore = P1 快速重置原语(RL/episode 回收,见 docs/plans/2026-08-03-snapshot-reset.md);
+  snapshot = 平台扩展(非 agent 会话契约);restore = P1 快速重置原语(RL/episode 回收,见 docs/benchmarks.md 快照/热池章节);
   pause/resume = 无 agent 需求依据,已从契约移除(实现遗产纠偏)
 - D4→`VmSpec` 配额 + `resize` + 回收
 - D5→`net` + `net_allow`
@@ -75,7 +75,7 @@ LLM 驱动的自主程序,循环为 观察 → 推理 → 行动。从使用中�
 - 资源类能力(内存/进程)不是"访问权"而是"配额"——需辅助机制
 
 **结论:能力为主 + 配额辅助的混合模型**:
-- 访问类(文件/网络/设备)→ 能力(Capability)
+- 访问类(文件/网络)→ 能力(Capability);设备访问不授予(见 §3.2 注)
 - 资源类(内存/进程/fd/带宽)→ 配额(Limit)
 - 默认拒绝;显式授予;支持继承与单次覆盖
 
@@ -89,12 +89,13 @@ pub enum PathPattern {
     Prefix(PathBuf),
 }
 
-/// 文件访问操作(最小权限的操作粒度)
+/// 文件访问操作(最小权限的操作粒度)。
+/// 注:FileAccess::Execute 已从契约移除——执行位由 exec 通道整体授权,
+/// 不做"只读可执行"的细粒度拆分(实现层 guest-proxy 对 Execute 显式拒绝)。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum FileAccess {
     Read,
     ReadWrite,
-    Execute,
 }
 
 /// 网络端点(host:port;端口省略=任意)
@@ -104,18 +105,20 @@ pub struct Endpoint {
     pub port: Option<u16>,
 }
 
+/// 注:Inbound(入站监听)已从契约移除——agent 环境不做对外暴露端口,
+/// 网络只允许出站白名单(实现层对 Inbound 显式拒绝)。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Direction {
     Outbound,
-    Inbound,
 }
 
 /// 一个能力:主体被授予的单一访问许可(不可伪造的边界内授权记录)
+/// 注:Capability::Device 已从契约移除——不向 agent 暴露宿主/guest 设备
+/// (实现层对 Device 显式拒绝)。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Capability {
     File { path: PathPattern, access: FileAccess },
     Network { endpoint: Endpoint, direction: Direction },
-    Device { path: PathBuf },
 }
 
 /// 资源配额(与访问控制正交——分离职责)

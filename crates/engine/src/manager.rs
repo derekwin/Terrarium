@@ -3,7 +3,7 @@
 //! Owns all running VM handles. Lifecycle semantics: shutdown/kill/destroy
 //! all mean "stop + deregister" and never touch any persistent data —
 //! storage has its own lifecycle, managed outside VM commands (see
-//! docs/plans/ for the filesystem design).
+//! docs/design/ for the filesystem design).
 //!
 //! The pool, background-session and sandbox responsibilities live in the
 //! private submodules [`pool`], [`sessions`] and [`sandboxes`] (impl blocks

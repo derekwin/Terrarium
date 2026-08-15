@@ -1,4 +1,4 @@
-"""Manual real-KVM e2e verification of the function-completion features.
+"""Manual real-KVM e2e verification of lifecycle/P1/guest features.
 
 REQUIRES: a running daemon with root/NAT privileges (sudo terra daemon
 start) and KVM + guest assets. Not part of CI (no KVM runner).

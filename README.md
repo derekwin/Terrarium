@@ -230,7 +230,8 @@ passes (42 passed), broken patch rejected (1 failed), ~1.5s per check.
 - [docs/protocol.md](docs/protocol.md) — engine wire protocol (commands, transports, semantics)
 - [docs/sdk.md](docs/sdk.md) — Python SDK and CLI reference
 - [docs/mcp.md](docs/mcp.md) — MCP server tools
-- [docs/plans/](docs/plans/) — design ADRs
+- [docs/design/](docs/design/) — design ADRs and decisions
+- [docs/performance.md](docs/performance.md) — measured performance vs docker / gVisor
 
 ## Roadmap
 

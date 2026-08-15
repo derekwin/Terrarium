@@ -6,8 +6,8 @@ plus parallel collect throughput: the RL episode-scaling numbers.
 
 REQUIRES: /dev/kvm, guest assets, daemon privileges (run in the same
 privileged container as the other real-KVM benchmarks). The engine's VM
-lifecycle runs lock-free (see docs/plans/2026-08-03-snapshot-reset.md),
-so restores genuinely overlap.
+lifecycle runs lock-free (see docs/benchmarks.md fast-reset section), so
+restores genuinely overlap.
 
 Run::
 
