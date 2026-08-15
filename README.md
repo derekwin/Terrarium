@@ -1,10 +1,24 @@
 # Terrarium Engine
 
-**Production-grade agent sandboxing — secure, isolated execution environments with high single-node density.**
+**KVM-isolated execution environments for LLM agents, at container-class
+single-node density.**
 
-Terrarium is a scheduling and control layer for agent execution environments. It pairs hardware-level VM isolation (Cloud Hypervisor) with a composable layered filesystem (EROFS + OverlayFS + virtiofs) and a warm pool, so untrusted agent code runs in real VMs that start in well under a second and share read-only environment layers across the host.
+Terrarium is a scheduling and control layer for agent execution
+environments. It pairs hardware-level VM isolation (Cloud Hypervisor) with
+a composable layered filesystem (EROFS + OverlayFS + virtiofs) and a warm
+pool, so untrusted agent code runs in real VMs (cold boot ~40 ms, warm-pool
+claim ~9 ms; the guest agent comes online shortly after the VM) that
+share read-only environment layers across the host.
 
 **Tenant-first model:** VMs are tenant isolation boundaries. A `Sandbox` is a session inside a VM, not a VM itself. Multiple sandboxes in the same tenant share one VM with isolated workdirs. This gives you both strong security isolation (between tenants) and high density (within a tenant).
+
+> **Status.** Self-hosted, single-node research/engineering prototype.
+> No multi-host orchestration, no managed service, no third-party
+> verification yet — the numbers in this README are our own measurements
+> on one host. It targets teams that need real per-tenant VM isolation
+> with environment reuse (RL training, isolated CI, sandboxed agent
+> execution). See [docs/strategy.md](docs/strategy.md) for the scope and
+> [docs/performance.md](docs/performance.md) for what is measured.
 
 ## Why Terrarium
 
@@ -14,7 +28,7 @@ Terrarium is a scheduling and control layer for agent execution environments. It
 | Density | High | Low | **High (shared page-cache layers)** |
 | Provisioning | Fast | ~1s | **Warm pool (pre-booted VMs)** |
 | Environments | OCI image | Disk image | **Composable named layers** |
-| Backends | — | — | **CH microVMs + in-guest Sandlock (`SandboxAdapter` trait for future backends)** |
+| Backends | — | — | **CH microVMs + in-guest confine (default) / sandlock (alternative)** |
 
 ## Performance
 
@@ -56,7 +70,8 @@ snapshots at **59.2 instances/s** (docker 3.2/s, gVisor empty shells
 35.3/s), costs **61.6 MB host memory per real VM** (vs gVisor 85.8 MB),
 and sustains **1787 execs/s** aggregate (vs docker 165/s). Cold boot of
 a full VM is ~9/s — the snapshot restore path is the RL/density fast
-create, and it beats gVisor even though gVisor provisions nothing.
+create; it beats gVisor's empty shells while provisioning a complete
+environment (layers + guest agent + networking).
 Shared read-only layer page cache keeps per-VM cost flat as tenants grow
 (~52 MB Pss at 12 VMs; a 99 MB layer adds only ~2 MB/VM). Warm-pool
 claim ~9 ms; net restores at 539 VMs/s. Full detail in
@@ -92,8 +107,8 @@ claim ~9 ms; net restores at 539 VMs/s. Full detail in
 ```
 
 The engine is decoupled from backends via two trait families:
-`VmAdapter` (Cloud Hypervisor) and `SandboxAdapter` (Sandlock today;
-the trait is kept as the extension point for future sandbox backends).
+`VmAdapter` (Cloud Hypervisor) and `SandboxAdapter` (default:
+terra-confine; sandlock kept as an alternative backend).
 
 ## Repository Structure
 
@@ -114,7 +129,7 @@ terrarium/
 │   ├── fs/                   # Independent filesystem crate: EROFS, cpio, layer build/list/remove (PyO3 bindings)
 │   ├── protocol/             # Shared Command / Response types (single source of truth)
 │   ├── network/              # Tap / NAT / dnsmasq DHCP, tc QoS
-│   └── mcp/                  # MCP server (stdio JSON-RPC, 21 user-facing tools)
+│   └── mcp/                  # MCP server (stdio JSON-RPC, 28 user-facing tools)
 ├── sdk/python/               # Python SDK (terra package: Sandbox, Pool, Template, client, daemon, assets, images)
 ├── images/                   # Guest kernel / rootfs / initramfs build scripts and examples
 └── docs/                     # Index (docs/README.md), SDK/MCP/protocol, design,
@@ -231,7 +246,7 @@ passes (42 passed), broken patch rejected (1 failed), ~1.5s per check.
 - **High-level Sandbox API** — `terra.Sandbox` / `terra.AsyncSandbox` with tenant-first model: VMs are tenant isolation boundaries, sandboxes are sessions within a VM. Sandboxes are engine-level entities — the engine keeps the registry (tenant → VM, sandbox → workdir), so every client shares one view. Multiple sandboxes in the same tenant share one VM with isolated workdirs. Automatic daemon start, context-manager cleanup, file operations (read/write/upload/download/list), metrics, and online resize.
 - **Two-layer isolation** — between tenants, KVM microVMs; within a tenant VM, every `Sandbox.exec` is confined by the default `terra-confine` backend (Landlock fs + seccomp network supervision + cgroup; sandlock remains an alternative), baked into the layers. Default policy: read-only system dirs, read-write only the session workdir and `/tmp`, sibling sessions' workdirs unreachable; egress denied by default. The policy is user-controllable via a capability-based `SandboxPolicy` (default deny, explicit grant): file grants (`File` `Read`/`ReadWrite` capabilities), an egress allowlist (`Network` `Outbound` capabilities), and memory/process/fd/cpu limits — set at sandbox create or overridden per exec (`Sandbox(policy={...})`). A given policy is self-contained (replaces the engine default; omit it to get the injected default, so sandboxed exec always carries a complete policy). Opt out per call with `sandboxed=False` / `--no-sandbox`.
 - **Layered filesystem** — read-only EROFS layers star-composed on the host (arbitrary combinations, shared page cache), exposed via virtiofs. Distro base layers come from a config-driven pipeline (alpine and ubuntu ship today; more are a 3-line config). Tool layers are built by configuring a real VM and packing the delta, so environments are runnable by construction.
-- **Warm pool** — pre-booted idle VMs as shared tenant containers; acquiring returns a sandbox session within a pool VM. Multiple acquires from the same pool share the same VM with isolated workdirs. Pool VMs release back to idle for reuse. Dynamic `grow()` / `scale` for live size adjustment.
+- **Warm pool** — pre-booted idle VMs as shared tenant containers; acquiring returns a sandbox session within a pool VM. Two slot kinds: warm (agent initramfs, layers hot-plugged on claim) and ready (restored from a snapshot — filesystem mounted, agent running, ~9 ms claim). Manual `grow()`/`scale()` adjust size; auto-scaling is deliberately not planned (fixed, operator-configured resource).
 - **Named templates** — `terra.template.Template` persists kernel + base distro + tool layer compositions, written by `terra setup` or the SDK.
 - **In-guest exec** — blocking and background execution inside VMs through the guest agent, per-command timeouts, and structured `ExecResult`. Background sessions are tracked at the protocol level (`session_status`, `session_kill`, `session_list`) and exposed by all three clients: the Python SDK (`Sandbox.exec(background=True)` returns an engine-tracked `Session` handle), the CLI (`sandbox exec --detach`, `sandbox session status|kill|ls`), and the MCP server (`terra_exec_background`, `terra_session_status`, `terra_session_kill`).
 - **Networking** — one-flag NAT networking (`--net`) with DHCP; lifecycle managed via `terra net`.
@@ -256,20 +271,20 @@ passes (42 passed), broken patch rejected (1 failed), ~1.5s per check.
 - ✅ High-level Sandbox / Pool / Template API, exception hierarchy, async support
 - ✅ Warm-pool-backed tenant sandboxes (claim on create, release on destroy); MCP session-scoped exec
 - ✅ Audit observability (per-policy tracing events; structured deny signal)
-- ✅ Density benchmarks (harness + first 12-tenant data in
-  `sdk/python/tests/manual_density_bench.py`; see `docs/benchmarks.md`)
+- ✅ Performance & density measurement — exec path ~3 ms/call (vs docker
+  ~89 ms, gVisor ~293 ms), governance ≈ 0 overhead, 100-instance density
+  sweep, snapshot-restore create at 59.2/s, shared-layer memory curve
+  (see `docs/performance.md`, `docs/benchmarks.md`)
 - ✅ P1: fast sandbox reset (snapshot/restore, verified ~200 ms on real KVM,
   deterministic rollback) + batch lifecycle orchestration
   (`terra.batch.Batch` — parallel restore/recycle/collect + density report;
   VM lifecycle runs lock-free: 8 concurrent restores in 232 ms)
-- 🟡 P2: security verification loop — real-KVM escape/deny suite
-  (`docs/security-verification.md`), default-deny networking, L2 tenant
-  isolation (ebtables), audit JSONL persistence (`terra audit ls
-  --history`), resource limits (procs via cgroup pids, fds, cpu_shares on
-  the default confine backend; sandlock -P incl. busybox fork(2) bypass
-  fix), e2e gate (`sdk/python/tests/run_e2e.sh`) all done; policy/quota
-  management still open.
-- 🔲 P3: multi-host orchestration
+- ✅ P2: security verification loop — real-KVM escape/deny suite (31
+  adversarial tests, 4 real defects fixed), default-deny networking, L2
+  tenant isolation (ebtables), audit persistence, resource limits; see
+  `docs/security-verification.md` and `docs/security-adversarial.md`
+- 🔲 P3: multi-host orchestration; policy/quota management (tenant
+  quotas, task policy templates)
 
 Strategy and scenario focus: `docs/strategy.md`.
 
