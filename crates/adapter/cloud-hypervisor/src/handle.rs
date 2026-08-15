@@ -212,6 +212,17 @@ impl ChVmHandle {
                     copy_tree(Path::new(&snap_upper), Path::new(&fs.upper)).map_err(|e| {
                         AdapterError::internal(format!("seed restore upper: {}", e))
                     })?;
+                    // copy_tree runs as the (root) daemon, so the seeded
+                    // upper is root-owned. The vmm user's virtiofsd serves
+                    // this tree and must be able to write it — without the
+                    // chown, guest writes through the restored overlay hit
+                    // EACCES (observed: sandbox workdir mkdir on restored
+                    // VMs under the privilege-drop build).
+                    if let Some(vmm) = &config.vmm {
+                        chown_r(Path::new(&fs.upper), vmm.uid, vmm.gid).map_err(|e| {
+                            AdapterError::internal(format!("chown seeded upper: {}", e))
+                        })?;
+                    }
                 }
             }
         }

@@ -73,20 +73,25 @@ create/restore 的差异来自 virtiofsd/CH 以非 root 启动的一次性初始
 
 ## 4. 密度：VM 隔离，容器级内存成本
 
-2026-08-15 同宿主 100 个长驻实例扫描（原始数据
-[density-compare-2026-08-15.json](density-compare-2026-08-15.json)）：
+2026-08-15 同宿主 100 个长驻实例扫描。Terrarium 有两条创建路径：
+冷启动（完整 VM boot，~9/s）和**快照恢复**（P1 快速重置，RL/密度场景
+的主路径）。下表用快照路径（原始数据
+[density-compare-snapshot-2026-08-15.json](density-compare-snapshot-2026-08-15.json)，
+冷启动对照 [density-compare-2026-08-15.json](density-compare-2026-08-15.json)）：
 
 | 指标 | Terrarium | docker | gVisor |
 |---|---:|---:|---:|
-| 创建速率（instances/s） | 9.07 | 3.19 | 29.81* |
-| 宿主内存/实例（MB） | 68.0 | 0.6† | 86.1 |
-| 聚合 exec 吞吐（execs/s） | 1936 | 166.5 | n/a |
+| 创建速率（instances/s） | **59.24**（快照；冷启动 9.07） | 3.17 | 35.34* |
+| 宿主内存/实例（MB） | 61.6 | 0.6† | 85.8 |
+| 聚合 exec 吞吐（execs/s） | 1787 | 165.2 | n/a |
 
 ![density-compare](perf/density-compare.png)
 
-\* gVisor 的 `runsc do` 是空壳一次性沙箱（无预置环境），创建快但
-单实例内存比 Terrarium 还高 27%；† docker 的 0.6 MB 是共享内核的
-容器壳，隔离由宿主内核承担，不是可比对象。
+\* gVisor 的 `runsc do` 是空壳一次性沙箱（无预置环境），但即便如此
+快照恢复仍比它快 1.7×；冷启动慢是公平的——Terrarium 冷启动要给每个
+租户 boot 完整 VM（kernel + 层文件系统 + guest agent + 网络），gVisor
+空壳没有这些。† docker 的 0.6 MB 是共享内核的容器壳，隔离由宿主内核
+承担，不是可比对象。
 
 **层共享**：同一份只读层页缓存在所有 VM 间共享——12 个租户时
 per-VM Pss 稳定在 ~52 MB（RSS 63-65 MB 中约 17-21% 是共享页），99 MB

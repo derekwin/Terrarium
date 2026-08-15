@@ -51,13 +51,16 @@ dedicated unprivileged user with no measurable cost on the exec path.
 
 ![memory sharing](docs/perf/memory-sharing.png)
 
-Density: 100 long-lived instances on one host — Terrarium runs **9.07
-instances/s** (vs docker 3.19/s), costs **68 MB host memory per real VM**
-(vs gVisor 86.1 MB), and sustains **1936 execs/s** aggregate (vs docker
-166.5/s). Shared read-only layer page cache keeps per-VM cost flat as
-tenants grow (~52 MB Pss at 12 VMs; a 99 MB layer adds only ~2 MB/VM).
-Snapshot→restore ~26–39 ms; warm-pool claim ~9 ms; net restores at
-539 VMs/s. Full detail in [docs/performance.md](docs/performance.md) and
+Density: 100 long-lived instances on one host — Terrarium restores
+snapshots at **59.2 instances/s** (docker 3.2/s, gVisor empty shells
+35.3/s), costs **61.6 MB host memory per real VM** (vs gVisor 85.8 MB),
+and sustains **1787 execs/s** aggregate (vs docker 165/s). Cold boot of
+a full VM is ~9/s — the snapshot restore path is the RL/density fast
+create, and it beats gVisor even though gVisor provisions nothing.
+Shared read-only layer page cache keeps per-VM cost flat as tenants grow
+(~52 MB Pss at 12 VMs; a 99 MB layer adds only ~2 MB/VM). Warm-pool
+claim ~9 ms; net restores at 539 VMs/s. Full detail in
+[docs/performance.md](docs/performance.md) and
 [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Architecture

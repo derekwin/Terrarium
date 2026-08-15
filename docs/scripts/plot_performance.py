@@ -8,6 +8,9 @@ Inputs (raw measurements, committed):
   docs/density-compare-2026-08-15.json    — 100-instance sweep, terra vs
                                             docker vs gVisor (creation rate,
                                             host memory, exec throughput)
+  docs/density-compare-snapshot-2026-08-15.json — same sweep, terra via
+                                            snapshot restore (the RL/density
+                                            fast-create path)
   docs/benchmark-results-2026-08-03-{base,ubuntu}-12.json — per-VM RSS/Pss
                                             memory-sharing curves
 
@@ -162,7 +165,9 @@ def fig_privdrop_ab() -> None:
 
 
 def fig_density_compare() -> None:
-    data = _load("density-compare-2026-08-15.json")["baselines"]
+    data = _load("density-compare-snapshot-2026-08-15.json")["baselines"]
+    cold = _load("density-compare-2026-08-15.json")["baselines"]["terra"]
+    cold_rate = cold["instances_per_sec"]
     order = ["terra", "docker", "gvisor"]
     labels = {"terra": "Terrarium", "docker": "docker", "gvisor": "gVisor"}
     colors = {"terra": "#2ca02c", "docker": "#ff7f0e", "gvisor": "#d62728"}
@@ -186,6 +191,7 @@ def fig_density_compare() -> None:
         ax.grid(axis="y", linestyle=":", alpha=0.4)
     fig.suptitle(
         "Density, 100 long-lived instances on one host (2026-08-15, vmm drop)\n"
+        f"Terrarium via snapshot restore ({cold_rate:.1f}/s cold boot); "
         "Terrarium: real KVM per tenant. docker: shared kernel (0.6 MB/instance "
         "is the container shell, no isolation). gVisor: one-shot sandboxes.",
         fontsize=10,

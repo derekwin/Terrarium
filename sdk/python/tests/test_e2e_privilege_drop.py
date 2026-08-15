@@ -256,19 +256,30 @@ def main() -> int:
         created.remove("drop1")
         _wait_for(lambda: not _ch_pids(), 10, "CH cleanup after destroy")
         client.vm_restore(
-            "drop1r", snap_path,
+            "tenant-drop1r", snap_path,
             layers=["marker", "base"],
             net=True,
         )
-        created.append("drop1r")
-        _wait_for(lambda: _guest_exec_ok("drop1r", ["echo", "ok"]), 25, "restored guest exec")
-        ch_pid = _find_proc("terra-drop1r.sock")
-        fsd_pid = _find_proc("terra-drop1r-fs.sock")
+        created.append("tenant-drop1r")
+        _wait_for(lambda: _guest_exec_ok("tenant-drop1r", ["echo", "ok"]), 25, "restored guest exec")
+        ch_pid = _find_proc("terra-tenant-drop1r.sock")
+        fsd_pid = _find_proc("terra-tenant-drop1r-fs.sock")
         assert ch_pid and fsd_pid, "restored CH/virtiofsd not found"
         assert _proc_uid(ch_pid) == vmm_uid, "restored CH not under vmm user"
         assert _proc_uid(fsd_pid) == vmm_uid, "restored virtiofsd not under vmm user"
-        out = _guest_exec("drop1r", ["cat", "/usr/bin/hello.py"])
+        out = _guest_exec("tenant-drop1r", ["cat", "/usr/bin/hello.py"])
         assert "marker layer" in out, out
+        # Regression (vmm drop): sandbox_create on a RESTORED VM must be
+        # able to write its workdir — the seeded upper used to be
+        # root-owned, so virtiofsd (vmm user) hit EACCES on mkdir.
+        sb = client.sandbox_create(
+            "drop1r", layers=["marker", "base"],
+            kernel=str(KERNEL), initramfs=str(IRFS_VIRTIOFS),
+            cpus=1, memory_mb=256, net=True, pool=False,
+        )
+        assert sb.get("status") == "ok" or sb.get("workdir"), sb
+        out = _guest_exec("tenant-drop1r", ["sh", "-c", f"echo x > {sb['workdir']}/probe"])
+        assert "Permission" not in out, out
         print("  snapshot+restore OK (both processes still under vmm)")
     except BaseException as e:  # noqa: BLE001
         import traceback
