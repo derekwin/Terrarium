@@ -94,7 +94,7 @@ CLOEXEC，被继承进 terra-confine 再进入被约束命令：进程内可见 
 | CapEff 可读 | 放行 | 放行 | 放行 | 放行 | **拒**(/proc 默认拒) |
 | /proc pid 可见 | 放行 | 放行 | 放行 | 放行 | **拒** |
 
-读法（诚实）：
+读法：
 - Docker 默认与 gVisor 给的是**隔离**：容器内 root 可以改 /etc/passwd、
   开 raw socket、出网，但改动落在容器自己的 overlay/命名空间里；
 - Terrarium 给的是**治理**：同一操作被策略直接拒绝（共享层不可污染、

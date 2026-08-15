@@ -219,7 +219,7 @@ readiness) and is excluded from the measured sweep.
 - `sandbox_in_tenant_ms` should be orders of magnitude below
   `cold_create_ms` — that is the tenant-first density model.
 
-## Honest limitations
+## Known limitations
 
 - Memory is measured from the host side only; guest-side workdirs and
   per-sandbox state are small and not isolated in the numbers.
@@ -229,7 +229,7 @@ readiness) and is excluded from the measured sweep.
   configurations — use the same host for A/B comparisons.
 - The engine also needs namespace privileges for virtiofsd (user/mount
   namespaces). On hosts where those are blocked the benchmark aborts with
-  exit 3 and an honest message instead of emitting partial numbers.
+  exit 3 and a clear message instead of emitting partial numbers.
 
 ## Unified hot pool (快照 Ready 池，2026-08-14)
 

@@ -211,7 +211,7 @@ async fn test_pool_claim_resize_updates_recorded_policy() {
     );
 }
 
-/// `record_resize` on a VM that is not registered → honest error, no
+/// `record_resize` on a VM that is not registered → explicit error, no
 /// panic, no silent success: the caller must never believe the quota
 /// synced when it did not.
 #[tokio::test]
@@ -222,7 +222,7 @@ async fn test_record_resize_unregistered_vm_errors() {
         .unwrap_err();
     assert!(
         err.to_string().contains("not found"),
-        "honest not-found error expected: {}",
+        "explicit not-found error expected: {}",
         err
     );
 }

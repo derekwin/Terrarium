@@ -210,7 +210,7 @@ write_paths / net_allow）已移除，一律拒绝：
 - **拒绝信号是结构化通道（M7）**：guest-proxy 不从子进程 stderr 推断拒绝。
   后端（confine / sandlock）把拒绝响应写成 JSON 行到 `SANDBOX_DENY_FD`
   指定 fd；guest-proxy 仅在收到记录**且** exec 非零退出时改写 exit code 为
-  `SANDBOX_DENY_EXIT_CODE`。**覆盖边界（诚实声明）**：confine 的网络拒绝
+  `SANDBOX_DENY_EXIT_CODE`。**覆盖边界**：confine 的网络拒绝
   （seccomp-notify）与 sandlock 的网络/动态拒绝精确上报；confine 的静态 fs
   拒绝（Landlock 内核执行）不可观测——不产生 `audit.deny`，这是性能取舍
   （fs ~1.3× vs sandlock 4.6×）。sandlock 的 fsgrant patch 镜像静态 fs

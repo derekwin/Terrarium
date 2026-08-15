@@ -433,7 +433,7 @@ async fn test_tenant_destroy_cascades() {
     .await;
     assert_eq!(resp.data.unwrap()["count"], 0);
 
-    // Unknown tenant → honest error.
+    // Unknown tenant → explicit error.
     let resp = execute(
         &mut mgr,
         Command::new("tenant_destroy").with_tenant("nosuch"),

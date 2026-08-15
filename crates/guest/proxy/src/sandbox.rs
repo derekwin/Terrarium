@@ -173,7 +173,7 @@ pub fn wrap_for_confine(
 /// - `limits.cpu_shares` / `fds` / `bandwidth_kbps` are not expressible in
 ///   sandlock and are intentionally ignored.
 ///
-/// Honest-unsupported (D4): `File { Execute }`, `Network { Inbound }` and
+/// Explicitly-unsupported (D4): `File { Execute }`, `Network { Inbound }` and
 /// `Device` capabilities return Err instead of being silently dropped.
 ///
 /// `exists` probes path presence in the guest rootfs (production passes
@@ -365,7 +365,8 @@ pub fn exec_isolated(
     let pid = child.id();
 
     // Register under exec_id so a `kill` command can find this process
-    // group. Duplicate id → kill the just-spawned child and fail honestly.
+    // group. Duplicate id → kill the just-spawned child and fail with an
+    // explicit error.
     // The guard unregisters on every return path below.
     let _guard = match exec_id {
         Some(id) => {

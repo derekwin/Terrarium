@@ -271,7 +271,7 @@ pub(crate) async fn bind_sandbox(
     };
 
     // Ensure the workdir exists in the guest (unsandboxed). On failure
-    // return an honest error, best-effort tear down the bound session, and
+    // return an explicit error, best-effort tear down the bound session, and
     // don't register a half-created sandbox.
     let mkdir = vec!["mkdir".to_string(), "-p".to_string(), prepared.workdir.clone()];
     let opts = ExecOpts::new(mkdir, 30).with_sandbox(false);

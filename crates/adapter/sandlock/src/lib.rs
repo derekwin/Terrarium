@@ -43,7 +43,7 @@ impl SandboxAdapter for GuestSandlockAdapter {
     ) -> Result<Box<dyn SandboxHandle>, AdapterError> {
         // A confinement backend cannot enforce without a complete policy.
         // The engine injects its default before create; `None` here is a
-        // caller bug, surfaced honestly instead of silently running an
+        // caller bug, surfaced explicitly instead of silently running an
         // unconfined sandboxed exec.
         let policy = spec.policy.clone().ok_or_else(|| {
             AdapterError::invalid_argument(

@@ -104,7 +104,7 @@ per-VM Pss 稳定在 ~52 MB（RSS 63-65 MB 中约 17-21% 是共享页），99 MB
 零内核操作；批量编排 `batch_create` 16 环境 753 ms（详见
 [benchmarks.md](benchmarks.md)）。
 
-## 5. 诚实局限
+## 5. 已知局限
 
 - 单宿主、单日采样；cpu 负载受宿主并发影响（报告多次采样中位数）。
 - gVisor 的一次性 `do` 含启动成本，不是长驻 gVisor 的稳态对比；docker

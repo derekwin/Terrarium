@@ -1,10 +1,9 @@
 # L1 论证：VM 边界是隔离声明的依据
 
-> 论文章节素材（USENIX Security 2027 Cycle 2）。回答审稿人最可能的问题：
-> “你的隔离到底靠什么？guest 完全失控了会怎样？”。核心主张：
-> **L1 把爆炸半径限制在租户 VM 内，但它不是“不可逃逸”的承诺，而是
-> “最坏情况后果有界”的承诺——我们引用并依赖 KVM 硬件隔离，并诚实
-> 列出攻击面与不承诺项。**
+> 论文章节素材（USENIX Security 2027 Cycle 2）。回答两个问题：
+> “隔离靠什么？guest 完全失控会怎样？”。核心主张：
+> **L1 把爆炸半径限制在租户 VM 内——不是“不可逃逸”，而是
+> “最坏情况后果有界”，依据是 KVM 硬件隔离；攻击面与不承诺项见下文。**
 
 ## 1. 我们声明什么（L1 的保证）
 
@@ -58,7 +57,7 @@ syscall 拦截（一个大而全的 TCB）；Terrarium 的 L1 TCB 是 KVM + 微V
 - **Terrarium 采用同一立场**：guest 的 vCPU 自启动即视为恶意；L2
   （confine）是治理层，不是安全边界。
 
-## 4. 攻击面（诚实分析）
+## 4. 攻击面分析
 
 guest→宿主的数据面就是**virtio 设备**（guest 驱动 virtio 队列与 VMM
 交互）。Terrarium 暴露的设备：virtio-net（tap）、virtio-vsock
@@ -78,12 +77,12 @@ virtio-mem。这是论文必须正面处理的攻击面：
 - **vsock**：guest-proxy 经 vsock 与 CH 交互，是第二个数据面；已无
   legacy 串口/控制台（--serial null --console off）。
 
-诚实结论：L1 的保证是“逃逸需要先攻破 KVM 或 CH/virtiofsd”，这依赖
+结论：L1 的保证是“逃逸需要先攻破 KVM 或 CH/virtiofsd”，这依赖
 生态的持续硬化，Terrarium 不自行证明 KVM 正确性——论文表述为
 “blast radius bounded by KVM hardware isolation”，并引用微VM 设备面
 最小化作为缩小 VMM 攻击面的设计依据。
 
-## 5. 侧信道（诚实声明）
+## 5. 侧信道
 
 - **CPU 微架构侧信道**（Spectre/Meltdown/L1TF/MDS）：KVM 依赖宿主级
   缓解——微码、`mitigations=auto,nosmt`（L1TF/MDS 建议关 SMT）、
@@ -97,7 +96,7 @@ virtio-mem。这是论文必须正面处理的攻击面：
   防御；这是共享层架构的固有折衷，论文明示。
 - **定时/功率等物理侧信道**：超出范围。
 
-## 6. 不承诺项（明示，防审稿人误解）
+## 6. 不承诺项（范围声明）
 
 1. 不承诺对抗宿主内核 / KVM / CH 的 0-day（§4 的 CVE 即证据）——依赖
    生态，论文把这一点写成“TCB 外的边界由 KVM 生态负责”；
@@ -137,7 +136,7 @@ sentry 逃逸（sentry 是用户态进程，但仍需攻破一个巨大的 sysca
 - **宿主配置文档**：`mitigations=auto,nosmt`、微码要求、IOMMU
   （VT-d）可选启用。
 
-降权后的诚实表述：**CH/virtiofsd 不是宿主 root**——即使 guest 逃逸
+降权后的效果：**CH/virtiofsd 不是宿主 root**——即使 guest 逃逸
 打入这两个进程，也先要在一个专用受限用户内继续提权才能影响宿主。
 这是 L1“爆炸半径有界”声明在工程上的落地。
 

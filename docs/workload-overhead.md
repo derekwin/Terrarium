@@ -49,7 +49,7 @@ fileio 0.91×、subproc 0.87×、cpu 0.93×、mixed 1.04×
 - 文件/进程/混合负载：~0.5-1.3×（guest /tmp 是 tmpfs，fileio 反而比
   宿主磁盘快）。
 
-诚实声明：VM 的硬隔离在计算密集路径有 ~1.5-2× 成本；IO/进程密集的
+VM 的硬隔离在计算密集路径有 ~1.5-2× 成本；IO/进程密集的
 agent 工作（改代码、跑构建、读文件）基本持平。
 
 **3. exec 路径开销：Terrarium ≪ docker ≪ gVisor**
@@ -60,7 +60,7 @@ docker exec 每次 ~80-100ms CLI/runc 往返，gVisor do
 含沙箱启动；Terrarium exec p50 ~5ms（同 VM 复用 + vsock 通道）。agent
 做的是成千上万次工具调用，**每次调用的固定开销**是真实场景的主成本。
 
-## 诚实局限
+## 已知局限
 
 - 单宿主、单轮采样；cpu 负载受宿主并发影响（报告多次采样的中位数 +
   范围）。

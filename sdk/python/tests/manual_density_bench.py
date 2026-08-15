@@ -340,7 +340,7 @@ def main() -> int:
         )
     except TerraError as e:
         # The environment reached the engine but cannot complete a sandbox
-        # (missing guest assets, no mount/namespace privileges, ...). Honest
+        # (missing guest assets, no mount/namespace privileges, ...). Explicit
         # failure: report and clean up, never emit partial numbers.
         print(f"benchmark aborted: engine error — {e}", file=sys.stderr)
         print(

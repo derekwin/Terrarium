@@ -22,7 +22,7 @@ pub(crate) async fn cmd_pool_create(mgr: &mut VmManager, cmd: Command) -> Respon
         Ok(outcome) if outcome.failed.is_empty() => Response::ok(
             serde_json::json!({"created": outcome.ready, "count": outcome.ready.len()}),
         ),
-        // Honest partial failure: report which VMs never became ready.
+        // Explicit partial failure: report which VMs never became ready.
         Ok(outcome) if !outcome.ready.is_empty() => {
             let failed: Vec<_> = outcome
                 .failed

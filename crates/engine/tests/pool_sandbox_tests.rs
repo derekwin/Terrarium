@@ -218,7 +218,7 @@ async fn test_pool_create_waits_for_readiness() {
 }
 
 /// A VM that never becomes ready is destroyed, never slotted, and
-/// reported honestly (error when nothing became ready).
+/// reported explicitly (error when nothing became ready).
 #[tokio::test]
 async fn test_pool_create_readiness_failure_is_honest() {
     let adapter = MockVmAdapter::new().with_ping_ready_after(u32::MAX);

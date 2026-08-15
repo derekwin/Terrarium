@@ -544,10 +544,10 @@ async fn test_info_missing_name() {
 }
 
 // ---------------------------------------------------------------------------
-// Honesty: explicit errors instead of fake success / silent fallback
+// Errors are explicit: no fake success / silent fallback
 // ---------------------------------------------------------------------------
 
-/// session_kill on an unknown session → honest not-found error.
+/// session_kill on an unknown session → explicit not-found error.
 #[tokio::test]
 async fn test_session_kill_not_found() {
     let mut mgr = make_mgr();
@@ -613,7 +613,7 @@ async fn test_session_kill_running_session() {
 }
 
 /// Destroying a VM terminates its orphaned sessions; session_kill of such
-/// a session → honest error (never fake success).
+/// a session → explicit error (never fake success).
 #[tokio::test]
 async fn test_session_kill_vm_gone() {
     let gate = Arc::new(tokio::sync::Notify::new());
@@ -652,7 +652,7 @@ async fn test_session_kill_vm_gone() {
     assert!(!resp.is_ok());
     assert!(
         resp.error.unwrap().contains("not running"),
-        "killing a terminated session should error honestly"
+        "killing a terminated session should error explicitly"
     );
     gate.notify_one();
 }
