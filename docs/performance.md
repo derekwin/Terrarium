@@ -73,10 +73,31 @@ create/restore 的差异来自 virtiofsd/CH 以非 root 启动的一次性初始
 
 ## 4. 密度：VM 隔离，容器级内存成本
 
-（详见 [benchmarks.md](benchmarks.md)）每租户 VM 的宿主成本 ~52-65 MB
-Pss，与层大小几乎无关（99 MB ubuntu 层 vs 20 MB base 只差 ~2 MB/VM）；
-12 个 VM 共享 ~134-164 MB 层页缓存。快照恢复 ~26 ms（legacy）/ ~39 ms
-（vmm）p50，热池下 VM claim 零内核操作。
+2026-08-15 同宿主 100 个长驻实例扫描（原始数据
+[density-compare-2026-08-15.json](density-compare-2026-08-15.json)）：
+
+| 指标 | Terrarium | docker | gVisor |
+|---|---:|---:|---:|
+| 创建速率（instances/s） | 9.07 | 3.19 | 29.81* |
+| 宿主内存/实例（MB） | 68.0 | 0.6† | 86.1 |
+| 聚合 exec 吞吐（execs/s） | 1936 | 166.5 | n/a |
+
+![density-compare](perf/density-compare.png)
+
+\* gVisor 的 `runsc do` 是空壳一次性沙箱（无预置环境），创建快但
+单实例内存比 Terrarium 还高 27%；† docker 的 0.6 MB 是共享内核的
+容器壳，隔离由宿主内核承担，不是可比对象。
+
+**层共享**：同一份只读层页缓存在所有 VM 间共享——12 个租户时
+per-VM Pss 稳定在 ~52 MB（RSS 63-65 MB 中约 17-21% 是共享页），99 MB
+的 ubuntu 层只比 20 MB 的 base 多 ~2 MB/VM（原始数据
+`benchmark-results-2026-08-03-*.json`）：
+
+![memory-sharing](perf/memory-sharing.png)
+
+快照恢复 ~26 ms（legacy）/ ~39 ms（vmm）p50，热池 claim ~9 ms、
+零内核操作；批量编排 `batch_create` 16 环境 753 ms（详见
+[benchmarks.md](benchmarks.md)）。
 
 ## 5. 诚实局限
 

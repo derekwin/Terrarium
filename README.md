@@ -47,9 +47,18 @@ dependent — ~1.3–2× on pure CPU, at parity on I/O and process-heavy agent
 work. The host-side data planes (Cloud Hypervisor, virtiofsd) run under a
 dedicated unprivileged user with no measurable cost on the exec path.
 
-Also see: [density benchmarks](docs/benchmarks.md) (per-VM host cost
-~52–65 MB Pss with shared layer page cache; snapshot→restore ~26–39 ms;
-net restores at 539 VMs/s from the warm tap pool).
+![density compare](docs/perf/density-compare.png)
+
+![memory sharing](docs/perf/memory-sharing.png)
+
+Density: 100 long-lived instances on one host — Terrarium runs **9.07
+instances/s** (vs docker 3.19/s), costs **68 MB host memory per real VM**
+(vs gVisor 86.1 MB), and sustains **1936 execs/s** aggregate (vs docker
+166.5/s). Shared read-only layer page cache keeps per-VM cost flat as
+tenants grow (~52 MB Pss at 12 VMs; a 99 MB layer adds only ~2 MB/VM).
+Snapshot→restore ~26–39 ms; warm-pool claim ~9 ms; net restores at
+539 VMs/s. Full detail in [docs/performance.md](docs/performance.md) and
+[docs/benchmarks.md](docs/benchmarks.md).
 
 ## Architecture
 

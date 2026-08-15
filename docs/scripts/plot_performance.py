@@ -5,6 +5,11 @@ Inputs (raw measurements, committed):
   docs/workload-overhead-2026-08-15-vmm.json — 5 envs x 4 workloads, medians
   docs/bench-privilege-drop-2026-08-15.json — vmm vs legacy A/B (normal order)
   docs/bench-privilege-drop-swap-2026-08-15.json — A/B with swapped order
+  docs/density-compare-2026-08-15.json    — 100-instance sweep, terra vs
+                                            docker vs gVisor (creation rate,
+                                            host memory, exec throughput)
+  docs/benchmark-results-2026-08-03-{base,ubuntu}-12.json — per-VM RSS/Pss
+                                            memory-sharing curves
 
 Outputs:
   docs/perf/exec-path-latency.png       — per-call fixed cost, Terrarium vs
@@ -13,6 +18,10 @@ Outputs:
   docs/perf/governance-overhead.png     — vm+confine / vm ratio per workload
   docs/perf/privdrop-ab.png             — privilege-drop A/B (exec p50,
                                           cold create, restore)
+  docs/perf/density-compare.png         — terra vs docker vs gVisor:
+                                          create rate / memory / execs
+  docs/perf/memory-sharing.png          — per-VM RSS vs Pss as tenants grow
+                                          (shared layer page cache)
 
 Uses English labels (no CJK fonts guaranteed in CI).
 """
@@ -152,11 +161,78 @@ def fig_privdrop_ab() -> None:
     plt.close(fig)
 
 
+def fig_density_compare() -> None:
+    data = _load("density-compare-2026-08-15.json")["baselines"]
+    order = ["terra", "docker", "gvisor"]
+    labels = {"terra": "Terrarium", "docker": "docker", "gvisor": "gVisor"}
+    colors = {"terra": "#2ca02c", "docker": "#ff7f0e", "gvisor": "#d62728"}
+    metrics = [
+        ("instances_per_sec", "create rate (instances/s)", None),
+        ("per_instance_mb", "host memory per instance (MB)", None),
+        ("execs_per_sec", "aggregate exec throughput (execs/s)", None),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(11.5, 3.4))
+    for ax, (key, ylabel, _) in zip(axes, metrics):
+        vals = [data[b][key] for b in order]
+        plot_vals = [0.0 if v is None else v for v in vals]
+        bars = ax.bar([labels[b] for b in order], plot_vals,
+                      color=[colors[b] for b in order], width=0.55)
+        for b, v in zip(bars, vals):
+            label = "n/a" if v is None else f"{v:.1f}"
+            ax.text(b.get_x() + b.get_width() / 2, (v or 0) + max(plot_vals or [1]) * 0.02,
+                    label, ha="center", fontsize=10)
+        ax.set_ylabel(ylabel)
+        ax.set_title(key.replace("_", " "))
+        ax.grid(axis="y", linestyle=":", alpha=0.4)
+    fig.suptitle(
+        "Density, 100 long-lived instances on one host (2026-08-15, vmm drop)\n"
+        "Terrarium: real KVM per tenant. docker: shared kernel (0.6 MB/instance "
+        "is the container shell, no isolation). gVisor: one-shot sandboxes.",
+        fontsize=10,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.88])
+    fig.savefig(OUT / "density-compare.png", dpi=150)
+    plt.close(fig)
+
+
+def fig_memory_sharing() -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 3.7))
+    for ax, (label, fname) in zip(
+        axes,
+        [("base (20 MB layer)", "benchmark-results-2026-08-03-base-12.json"),
+         ("ubuntu (99 MB layer)", "benchmark-results-2026-08-03-ubuntu-12.json")],
+    ):
+        rows = _load(fname)["per_vm_memory_mb"]
+        n = [r["tenants"] for r in rows]
+        per_rss = [r["per_vm_rss_mb"] for r in rows]
+        per_pss = [r["per_vm_pss_mb"] for r in rows]
+        shared_pct = [r["shared_pct"] for r in rows]
+        ax.plot(n, per_rss, "o-", color="#1f77b4", label="per-VM RSS")
+        ax.plot(n, per_pss, "o-", color="#2ca02c", label="per-VM Pss (shared once)")
+        ax.set_xlabel("tenants (VMs)")
+        ax.set_ylabel("host memory per VM (MB)")
+        ax.set_title(label)
+        ax.grid(linestyle=":", alpha=0.4)
+        ax.legend(fontsize=8)
+        ax2 = ax.twinx()
+        ax2.plot(n, shared_pct, "s--", color="#d62728", alpha=0.8, label="shared %")
+        ax2.set_ylabel("shared page-cache %", color="#d62728")
+        ax2.tick_params(axis="y", labelcolor="#d62728")
+    fig.suptitle("Layer page-cache sharing: per-VM cost stays flat as tenants grow\n"
+                 "(RSS counts shared pages per process; Pss counts them once)",
+                 fontsize=11)
+    fig.tight_layout(rect=[0, 0, 1, 0.88])
+    fig.savefig(OUT / "memory-sharing.png", dpi=150)
+    plt.close(fig)
+
+
 def main() -> None:
     fig_exec_path()
     fig_workload_overhead()
     fig_governance()
     fig_privdrop_ab()
+    fig_density_compare()
+    fig_memory_sharing()
     print("wrote:", [p.name for p in sorted(OUT.glob("*.png"))])
 
 
