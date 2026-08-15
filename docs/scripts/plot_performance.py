@@ -64,12 +64,12 @@ def fig_exec_path() -> None:
     for b, v in zip(bars, ms):
         ax.text(b.get_x() + b.get_width() / 2, v * 1.15, f"{v:.1f} ms",
                 ha="center", va="bottom", fontsize=10)
-    ax.annotate(
-        "~31x faster than docker exec,\n~101x faster than gVisor do",
-        xy=(0, 293.3), xytext=(0.45, 150),
-        fontsize=9, color="#333",
-        arrowprops=dict(arrowstyle="->", color="#333"),
-    )
+    # Multiples vs Terrarium, labeled directly on the comparison bars.
+    for b, v, mult in zip(bars, ms, [1.0, 88.9 / 2.9, 293.3 / 2.9]):
+        if mult > 1.0:
+            ax.text(b.get_x() + b.get_width() / 2, v * 1.45,
+                    f"\u2248{mult:.0f}\u00d7 slower than Terrarium",
+                    ha="center", va="bottom", fontsize=8, color="#555")
     ax.set_ylim(1, 1200)
     ax.grid(axis="y", linestyle=":", alpha=0.5)
     fig.tight_layout()
